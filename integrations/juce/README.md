@@ -206,19 +206,19 @@ LicenseSeatJuceStandalone license(config);
 
 ### Methods
 
-| Method | Thread Safety | Description |
-|--------|--------------|-------------|
-| `isValid()` | Audio-safe | Check if license is valid (atomic read) |
-| `getDeviceId()` | Safe | Get device identifier |
-| `getLicenseKey()` | Safe | Get current license key |
-| `getCachedResult()` | Safe | Get cached validation result |
-| `validateAsync(key, callback)` | Safe | Async validation (callback on message thread) |
-| `activateAsync(key, callback)` | Safe | Async activation (callback on message thread) |
-| `deactivateAsync(callback)` | Safe | Async deactivation |
-| `checkEntitlementAsync(key, entitlement, callback)` | Safe | Check specific entitlement |
-| `validate(key)` | **Blocks!** | Sync validation (avoid in plugins!) |
-| `activate(key)` | **Blocks!** | Sync activation (avoid in plugins!) |
-| `reset()` | Safe | Clear all license state |
+| Method                                              | Thread Safety | Description                                   |
+| --------------------------------------------------- | ------------- | --------------------------------------------- |
+| `isValid()`                                         | Audio-safe    | Check if license is valid (atomic read)       |
+| `getDeviceId()`                                     | Safe          | Get device identifier                         |
+| `getLicenseKey()`                                   | Safe          | Get current license key                       |
+| `getCachedResult()`                                 | Safe          | Get cached validation result                  |
+| `validateAsync(key, callback)`                      | Safe          | Async validation (callback on message thread) |
+| `activateAsync(key, callback)`                      | Safe          | Async activation (callback on message thread) |
+| `deactivateAsync(callback)`                         | Safe          | Async deactivation                            |
+| `checkEntitlementAsync(key, entitlement, callback)` | Safe          | Check specific entitlement                    |
+| `validate(key)`                                     | **Blocks!**   | Sync validation (avoid in plugins!)           |
+| `activate(key)`                                     | **Blocks!**   | Sync activation (avoid in plugins!)           |
+| `reset()`                                           | Safe          | Clear all license state                       |
 
 ### Result Types
 
@@ -344,13 +344,13 @@ LicenseSeatJuceStandalone license(config);
 
 ## Comparison: Standalone vs Full SDK
 
-| Feature | LicenseSeatJuceStandalone | Full SDK (LicenseSeatJuce.h) |
-|---------|--------------------------|------------------------------|
-| Dependencies | **JUCE only** | cpp-httplib, nlohmann/json, OpenSSL |
-| Setup | Single header | Multiple files + libraries |
-| HTTP | juce::URL | cpp-httplib |
-| JSON | juce::JSON | nlohmann/json |
-| Best for | **Audio plugins** | Desktop apps, games |
+| Feature      | LicenseSeatJuceStandalone | Full SDK (LicenseSeatJuce.h)        |
+| ------------ | ------------------------- | ----------------------------------- |
+| Dependencies | **JUCE only**             | cpp-httplib, nlohmann/json, OpenSSL |
+| Setup        | Single header             | Multiple files + libraries          |
+| HTTP         | juce::URL                 | cpp-httplib                         |
+| JSON         | juce::JSON                | nlohmann/json                       |
+| Best for     | **Audio plugins**         | Desktop apps, games                 |
 
 **For VST/AU/AAX plugins, use LicenseSeatJuceStandalone.h** - it's specifically designed for the plugin ecosystem where symbol conflicts and dependency hell are common problems.
 
@@ -394,5 +394,5 @@ The API is similar but the standalone version uses JUCE types (juce::String) thr
 
 ## Support
 
-- Documentation: https://docs.licenseseat.com/sdks/juce
+- Documentation: https://licenseseat.com/docs/sdks/juce
 - Issues: https://github.com/licenseseat/licenseseat-cpp/issues
