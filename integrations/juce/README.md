@@ -4,80 +4,49 @@ License management for JUCE-based audio plugins (VST3, AU, AAX).
 
 ## Features
 
-- **Single-File Integration** - Drop in and go
-- **No External Dependencies** - Self-contained crypto
-- **Thread-Safe** - Safe for audio threads
-- **Offline Support** - Works without internet
+- **Zero External Dependencies** - Uses only JUCE's native HTTP and JSON
+- **Single Header** - Drop `LicenseSeatJuceStandalone.h` into your project
+- **Thread-Safe** - `std::atomic<bool>` for audio-thread-safe status checks
+- **Async-First** - Non-blocking API with message thread callbacks
+- **Multi-Instance Safe** - No global state, each instance is independent
+- **Offline Support** - Optional Ed25519 signature verification
 - **Cross-Platform** - Windows, macOS, Linux
 
 ## Quick Start
 
-### 1. Add Files to Your Project
+### 1. Add the Header
 
-Copy these files to your JUCE project:
+Copy `Source/LicenseSeatJuceStandalone.h` to your JUCE project. That's it - no other files needed!
 
 ```
 YourPlugin/
 ├── Source/
 │   ├── PluginProcessor.cpp
 │   ├── PluginProcessor.h
-│   └── LicenseSeat/
-│       ├── licenseseat/          # Copy from dist/licenseseat-minimal/include/licenseseat
-│       │   ├── licenseseat.hpp
-│       │   ├── crypto.hpp
-│       │   ├── device.hpp
-│       │   └── ...
-│       ├── src/                  # Copy from dist/licenseseat-minimal/src
-│       │   ├── client.cpp
-│       │   ├── crypto_minimal.cpp
-│       │   ├── device.cpp
-│       │   ├── http.cpp
-│       │   └── storage.cpp
-│       └── deps/                 # Copy from dist/licenseseat-minimal/deps
-│           ├── ed25519/
-│           └── PicoSHA2/
-└── JuceLibraryCode/
+│   └── LicenseSeatJuceStandalone.h   // <-- Just this one file!
 ```
 
-### 2. Configure Projucer
-
-**Header Search Paths:**
-```
-Source/LicenseSeat
-Source/LicenseSeat/deps
-Source/LicenseSeat/deps/ed25519
-```
-
-**Add to Source Files:**
-- `Source/LicenseSeat/src/*.cpp`
-- `Source/LicenseSeat/deps/ed25519/*.c`
-
-**External Libraries (for HTTP):**
-You'll also need nlohmann/json and cpp-httplib headers.
-
-### 3. Use in Your Plugin
+### 2. Use in Your Plugin
 
 ```cpp
 // PluginProcessor.h
 #pragma once
 
 #include <JuceHeader.h>
-#include "LicenseSeat/licenseseat/licenseseat.hpp"
+#include "LicenseSeatJuceStandalone.h"
 
 class MyPluginProcessor : public juce::AudioProcessor
 {
 public:
     MyPluginProcessor();
-    ~MyPluginProcessor() override;
 
-    // ... other methods ...
+    // Safe to call from audio thread!
+    bool isLicenseValid() const { return license.isValid(); }
 
-    bool isLicenseValid() const { return licenseValid; }
-    void checkLicense(const juce::String& key);
+    void validateLicense(const juce::String& key);
 
 private:
-    std::unique_ptr<licenseseat::Client> licenseClient;
-    bool licenseValid = false;
+    LicenseSeatJuceStandalone license;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MyPluginProcessor)
 };
@@ -88,224 +57,340 @@ private:
 #include "PluginProcessor.h"
 
 MyPluginProcessor::MyPluginProcessor()
+    : license("your-api-key", "your-product-slug")
 {
-    // Initialize license client
-    licenseseat::Config config;
-    config.api_key = "your-api-key";
-    config.product_slug = "your-plugin";
-    config.timeout_seconds = 10;
-    config.max_retries = 1;
-
-    licenseClient = std::make_unique<licenseseat::Client>(config);
-
-    // Check stored license on startup
-    auto status = licenseClient->get_status();
-    licenseValid = status.valid;
+    // Optionally validate stored license on startup
+    auto savedKey = loadLicenseFromSettings();
+    if (savedKey.isNotEmpty())
+        validateLicense(savedKey);
 }
 
-MyPluginProcessor::~MyPluginProcessor()
+void MyPluginProcessor::validateLicense(const juce::String& key)
 {
-    // Client cleanup handled automatically
-}
-
-void MyPluginProcessor::checkLicense(const juce::String& key)
-{
-    // Run validation in background thread
-    std::thread([this, key]()
+    license.validateAsync(key, [this](const auto& result)
     {
-        auto result = licenseClient->validate(key.toStdString());
-        if (result.is_ok())
+        // This callback runs on the message thread
+        if (result.valid)
         {
-            licenseValid = result.value().valid;
-
-            // Update UI on message thread
-            juce::MessageManager::callAsync([this]()
-            {
-                // Notify UI of license status change
-            });
+            saveLicenseToSettings(key);
+            // Update UI to show "Licensed to: " + result.licensee
         }
-    }).detach();
+        else
+        {
+            // Show error: result.reason
+        }
+    });
 }
 ```
 
-## License Dialog Example
+### 3. Use in processBlock (Audio Thread Safe!)
 
 ```cpp
-// LicenseDialog.h
-class LicenseDialog : public juce::Component,
-                      public juce::Button::Listener
+void MyPluginProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    // isValid() uses std::atomic - safe for audio thread!
+    if (!license.isValid())
+    {
+        // Demo mode: output silence or add periodic noise
+        buffer.clear();
+        return;
+    }
+
+    // Full processing for licensed users
+    // ...
+}
+```
+
+## Complete Example with License Dialog
+
+```cpp
+// LicenseComponent.h
+class LicenseComponent : public juce::Component
 {
 public:
-    LicenseDialog(MyPluginProcessor& p)
-        : processor(p)
+    LicenseComponent(LicenseSeatJuceStandalone& lic)
+        : license(lic)
     {
-        addAndMakeVisible(licenseKeyInput);
-        licenseKeyInput.setTextToShowWhenEmpty("Enter license key...",
-            juce::Colours::grey);
+        addAndMakeVisible(keyInput);
+        keyInput.setTextToShowWhenEmpty("Enter license key...", juce::Colours::grey);
 
         addAndMakeVisible(activateButton);
         activateButton.setButtonText("Activate");
-        activateButton.addListener(this);
+        activateButton.onClick = [this]() { onActivate(); };
 
         addAndMakeVisible(statusLabel);
         updateStatus();
 
-        setSize(400, 200);
+        setSize(400, 150);
     }
 
-    void buttonClicked(juce::Button* button) override
+    void resized() override
     {
-        if (button == &activateButton)
-        {
-            statusLabel.setText("Activating...", juce::dontSendNotification);
-            processor.checkLicense(licenseKeyInput.getText());
-        }
+        auto area = getLocalBounds().reduced(20);
+        keyInput.setBounds(area.removeFromTop(30));
+        area.removeFromTop(10);
+        activateButton.setBounds(area.removeFromTop(30).withWidth(100));
+        area.removeFromTop(10);
+        statusLabel.setBounds(area);
+    }
+
+private:
+    void onActivate()
+    {
+        statusLabel.setText("Activating...", juce::dontSendNotification);
+        activateButton.setEnabled(false);
+
+        license.activateAsync(keyInput.getText(),
+            [this](const LicenseSeatJuceStandalone::ActivationResult& result)
+            {
+                activateButton.setEnabled(true);
+
+                if (result.success)
+                {
+                    statusLabel.setText("Licensed! Seats: " +
+                        juce::String(result.seatsUsed) + "/" +
+                        juce::String(result.seatsTotal),
+                        juce::dontSendNotification);
+                    statusLabel.setColour(juce::Label::textColourId, juce::Colours::green);
+                }
+                else
+                {
+                    statusLabel.setText("Error: " + result.message,
+                        juce::dontSendNotification);
+                    statusLabel.setColour(juce::Label::textColourId, juce::Colours::red);
+                }
+            });
     }
 
     void updateStatus()
     {
-        if (processor.isLicenseValid())
+        if (license.isValid())
         {
-            statusLabel.setText("License: Active",
+            auto result = license.getCachedResult();
+            statusLabel.setText("Licensed to: " + result.licensee,
                 juce::dontSendNotification);
-            statusLabel.setColour(juce::Label::textColourId,
-                juce::Colours::green);
+            statusLabel.setColour(juce::Label::textColourId, juce::Colours::green);
         }
         else
         {
-            statusLabel.setText("License: Not Active",
-                juce::dontSendNotification);
-            statusLabel.setColour(juce::Label::textColourId,
-                juce::Colours::red);
+            statusLabel.setText("Not licensed", juce::dontSendNotification);
+            statusLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
         }
     }
 
-private:
-    MyPluginProcessor& processor;
-    juce::TextEditor licenseKeyInput;
+    LicenseSeatJuceStandalone& license;
+    juce::TextEditor keyInput;
     juce::TextButton activateButton;
     juce::Label statusLabel;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LicenseDialog)
 };
 ```
 
-## Best Practices
+## API Reference
 
-### 1. Never Block Audio Thread
+### Configuration
 
 ```cpp
-// WRONG - Don't do this in processBlock!
-void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override
-{
-    if (!licenseClient->validate(key).is_ok())  // BLOCKS!
-        return;
-    // ...
+LicenseSeatJuceStandalone::Config config;
+config.apiKey = "your-api-key";
+config.productSlug = "your-product";
+config.apiUrl = "https://licenseseat.com/api";  // Optional
+config.timeoutMs = 10000;                        // Optional (default: 10s)
+config.maxRetries = 1;                           // Optional
+
+// For offline support (requires LICENSESEAT_JUCE_OFFLINE_SUPPORT define)
+config.offlinePublicKeyBase64 = "your-ed25519-public-key";
+config.maxOfflineDays = 30;
+
+LicenseSeatJuceStandalone license(config);
+```
+
+### Methods
+
+| Method | Thread Safety | Description |
+|--------|--------------|-------------|
+| `isValid()` | Audio-safe | Check if license is valid (atomic read) |
+| `getDeviceId()` | Safe | Get device identifier |
+| `getLicenseKey()` | Safe | Get current license key |
+| `getCachedResult()` | Safe | Get cached validation result |
+| `validateAsync(key, callback)` | Safe | Async validation (callback on message thread) |
+| `activateAsync(key, callback)` | Safe | Async activation (callback on message thread) |
+| `deactivateAsync(callback)` | Safe | Async deactivation |
+| `checkEntitlementAsync(key, entitlement, callback)` | Safe | Check specific entitlement |
+| `validate(key)` | **Blocks!** | Sync validation (avoid in plugins!) |
+| `activate(key)` | **Blocks!** | Sync activation (avoid in plugins!) |
+| `reset()` | Safe | Clear all license state |
+
+### Result Types
+
+```cpp
+struct ValidationResult {
+    bool valid;
+    juce::String reason;
+    juce::String licensee;
+    juce::String licenseType;
+    juce::StringPairArray metadata;
+    juce::StringArray entitlements;
+};
+
+struct ActivationResult {
+    bool success;
+    juce::String message;
+    juce::String activationId;
+    int seatsUsed;
+    int seatsTotal;
+};
+```
+
+## Best Practices for Audio Plugins
+
+### 1. Never Block the Audio Thread
+
+```cpp
+// WRONG - blocks audio thread!
+void processBlock(...) {
+    auto result = license.validate(key);  // BLOCKS!
 }
 
-// RIGHT - Check cached status
-void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override
-{
-    if (!licenseValid)  // Just read a bool
-    {
+// RIGHT - read atomic flag
+void processBlock(...) {
+    if (!license.isValid()) {  // Just reads std::atomic
         buffer.clear();
         return;
     }
-    // ...
 }
 ```
 
-### 2. Validate on Startup, Cache Result
+### 2. Validate on Startup
 
 ```cpp
 MyPluginProcessor()
+    : license("api-key", "product")
 {
-    // Load saved license from settings
-    auto savedKey = loadLicenseFromSettings();
-    if (!savedKey.empty())
-    {
-        // Validate in background
-        std::thread([this, savedKey]()
-        {
-            auto result = licenseClient->validate(savedKey);
-            licenseValid = result.is_ok() && result.value().valid;
-        }).detach();
+    auto savedKey = loadKey();
+    if (savedKey.isNotEmpty()) {
+        license.validateAsync(savedKey, [](auto& result) {
+            // Update UI if needed
+        });
     }
 }
 ```
 
-### 3. Handle Offline Gracefully
+### 3. Multiple Plugin Instances Work Fine
 
 ```cpp
-licenseseat::Config config;
-config.offline_fallback_mode = licenseseat::OfflineFallbackMode::PreferOffline;
-config.max_offline_days = 30;  // Allow 30 days offline
-config.offline_public_key = "your-ed25519-public-key-base64";
+// Each instance has its own LicenseSeatJuceStandalone
+// No global state, no conflicts between instances
+// Safe to run 10+ instances in the same DAW
 ```
 
-### 4. Limit Features, Don't Crash
+### 4. Handle Demo Mode Gracefully
 
 ```cpp
-void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
-{
-    if (!licenseValid)
-    {
-        // Demo mode: add noise or limit time
-        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-        {
-            for (int s = 0; s < buffer.getNumSamples(); ++s)
-            {
-                // Add periodic noise as demo reminder
-                if (rand() % 10000 < 10)
-                    buffer.setSample(ch, s, (rand() / (float)RAND_MAX) * 0.1f);
-            }
+void processBlock(juce::AudioBuffer<float>& buffer, ...) {
+    if (!license.isValid()) {
+        // Option 1: Output silence
+        buffer.clear();
+
+        // Option 2: Add periodic noise reminder
+        static int counter = 0;
+        if (++counter % 44100 == 0) {  // Every second at 44.1kHz
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                buffer.setSample(ch, 0, 0.1f * (rand() / (float)RAND_MAX));
         }
+
+        // Option 3: Limit to 30 seconds
+        // Option 4: Disable premium features only
+        return;
     }
-    else
-    {
-        // Full processing
-        // ...
-    }
+    // Full processing
 }
 ```
 
-## Multiple Plugin Instances
-
-LicenseSeat is designed to work with multiple instances:
+### 5. Store License Key Securely
 
 ```cpp
-// Each plugin instance has its own Client
-// They don't share state - safe for multiple instances in same DAW
+void saveLicenseToSettings(const juce::String& key) {
+    auto appProps = juce::ApplicationProperties();
+    appProps.getUserSettings()->setValue("license_key", key);
+    appProps.saveIfNeeded();
+}
 
-MyPluginProcessor::MyPluginProcessor()
-{
-    // This creates an independent client for this instance
-    licenseClient = std::make_unique<licenseseat::Client>(config);
+juce::String loadLicenseFromSettings() {
+    auto appProps = juce::ApplicationProperties();
+    return appProps.getUserSettings()->getValue("license_key", "");
 }
 ```
+
+## Offline License Support
+
+For offline verification (requires vendored crypto):
+
+1. Define `LICENSESEAT_JUCE_OFFLINE_SUPPORT` before including the header
+2. Add `ed25519/` and `PicoSHA2/` to your project
+3. Configure your offline public key
+
+```cpp
+#define LICENSESEAT_JUCE_OFFLINE_SUPPORT
+#include "LicenseSeatJuceStandalone.h"
+
+LicenseSeatJuceStandalone::Config config;
+config.apiKey = "your-api-key";
+config.productSlug = "your-product";
+config.offlinePublicKeyBase64 = "your-ed25519-public-key";
+config.maxOfflineDays = 30;
+
+LicenseSeatJuceStandalone license(config);
+```
+
+## Comparison: Standalone vs Full SDK
+
+| Feature | LicenseSeatJuceStandalone | Full SDK (LicenseSeatJuce.h) |
+|---------|--------------------------|------------------------------|
+| Dependencies | **JUCE only** | cpp-httplib, nlohmann/json, OpenSSL |
+| Setup | Single header | Multiple files + libraries |
+| HTTP | juce::URL | cpp-httplib |
+| JSON | juce::JSON | nlohmann/json |
+| Best for | **Audio plugins** | Desktop apps, games |
+
+**For VST/AU/AAX plugins, use LicenseSeatJuceStandalone.h** - it's specifically designed for the plugin ecosystem where symbol conflicts and dependency hell are common problems.
 
 ## Troubleshooting
 
-### Build Errors
+### "juce::URL request failed"
 
-**"nlohmann/json.hpp not found"**
-- Download from https://github.com/nlohmann/json
-- Add to Header Search Paths
+1. Check your API key is correct
+2. Verify internet connectivity
+3. Try the sync `validate()` method to debug (in non-audio code)
 
-**"httplib.h not found"**
-- Download from https://github.com/yhirose/cpp-httplib
-- Add to Header Search Paths
+### "License not persisting between sessions"
 
-### Runtime Issues
+Implement save/load using `juce::ApplicationProperties` or `juce::PropertiesFile`.
 
-**"Network error" on all requests**
-- Check API key is correct
-- Verify internet connectivity
-- Try curl to test API manually
+### "Multiple instances show different license states"
 
-**License not persisting**
-- Implement save/load using `juce::PropertiesFile`
-- Store license key securely
+This is by design - each instance is independent. If you need shared state, implement a singleton license manager or use inter-process communication.
+
+### "Build errors on Windows"
+
+Ensure you're using a recent JUCE version (6.1+) with working juce::URL.
+
+## Migration from Full SDK
+
+If you're currently using `LicenseSeatJuce.h` (the wrapper around the full SDK):
+
+```cpp
+// Before (full SDK)
+#include "licenseseat/licenseseat.hpp"
+licenseseat::Client client(config);
+client.validate(key);
+
+// After (standalone)
+#include "LicenseSeatJuceStandalone.h"
+LicenseSeatJuceStandalone license(apiKey, productSlug);
+license.validateAsync(key, callback);
+```
+
+The API is similar but the standalone version uses JUCE types (juce::String) throughout.
 
 ## Support
 
