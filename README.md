@@ -438,6 +438,6 @@ MIT License – see [LICENSE](LICENSE) for details.
 ## Links
 
 - [LicenseSeat Website](https://licenseseat.com)
-- [Documentation](https://docs.licenseseat.com)
-- [API Reference](https://docs.licenseseat.com/api)
+- [Documentation](https://licenseseat.com/docs)
+- [API Reference](https://licenseseat.com/docs/api)
 - [GitHub Issues](https://github.com/licenseseat/licenseseat-cpp/issues)
