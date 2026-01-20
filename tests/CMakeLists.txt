@@ -25,7 +25,6 @@ target_link_libraries(licenseseat_tests
         licenseseat::licenseseat
         GTest::gtest
         GTest::gtest_main
-        GTest::gmock
         nlohmann_json::nlohmann_json
         httplib::httplib
 )

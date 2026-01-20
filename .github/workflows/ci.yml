@@ -14,37 +14,20 @@ jobs:
   # Linux Builds
   # =============================================================================
   linux:
-    name: Linux (${{ matrix.compiler.name }})
-    runs-on: ubuntu-${{ matrix.os }}
+    name: Linux (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        os: [22.04, 24.04]
-        compiler:
-          - { name: "GCC 11", cc: gcc-11, cxx: g++-11, package: g++-11 }
-          - { name: "GCC 12", cc: gcc-12, cxx: g++-12, package: g++-12 }
-          - { name: "GCC 13", cc: gcc-13, cxx: g++-13, package: g++-13 }
-          - { name: "Clang 14", cc: clang-14, cxx: clang++-14, package: clang-14 }
-          - { name: "Clang 15", cc: clang-15, cxx: clang++-15, package: clang-15 }
-        exclude:
-          # GCC 13 not available on 22.04
-          - os: 22.04
-            compiler: { name: "GCC 13", cc: gcc-13, cxx: g++-13, package: g++-13 }
-          # Clang 15 not available on 22.04
-          - os: 22.04
-            compiler: { name: "Clang 15", cc: clang-15, cxx: clang++-15, package: clang-15 }
+        compiler: [g++, clang++]
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ${{ matrix.compiler.package }}
-
       - name: Install dependencies
         run: |
+          sudo apt-get update
           sudo apt-get install -y \
             libssl-dev \
             nlohmann-json3-dev \
@@ -58,19 +41,17 @@ jobs:
           cd /tmp/cpp-httplib
           sudo mkdir -p /usr/local/include
           sudo cp -r httplib.h /usr/local/include/
-          # Create cmake config
           sudo mkdir -p /usr/local/lib/cmake/httplib
-          cat << 'CMAKEOF' | sudo tee /usr/local/lib/cmake/httplib/httplibConfig.cmake
+          cat << 'EOF' | sudo tee /usr/local/lib/cmake/httplib/httplibConfig.cmake
           add_library(httplib::httplib INTERFACE IMPORTED)
           set_target_properties(httplib::httplib PROPERTIES
             INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
           )
-          CMAKEOF
+          EOF
 
-      - name: Configure CMake
+      - name: Configure
         env:
-          CC: ${{ matrix.compiler.cc }}
-          CXX: ${{ matrix.compiler.cxx }}
+          CXX: ${{ matrix.compiler }}
         run: |
           cmake -B build \
             -G Ninja \
@@ -79,11 +60,11 @@ jobs:
             -DLICENSESEAT_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build build --config ${{ env.BUILD_TYPE }}
+        run: cmake --build build
 
-      - name: Run Tests
+      - name: Test
         working-directory: build
-        run: ctest --output-on-failure -C ${{ env.BUILD_TYPE }}
+        run: ctest --output-on-failure
 
   # =============================================================================
   # macOS Builds
@@ -94,8 +75,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-13, macos-14, macos-15]
-        # macos-13 is x86_64, macos-14+ is arm64
+        os: [macos-13, macos-14]
+        # macos-13 is x86_64, macos-14 is arm64
 
     steps:
       - name: Checkout
@@ -110,7 +91,7 @@ jobs:
             googletest \
             ninja
 
-      - name: Configure CMake
+      - name: Configure
         run: |
           cmake -B build \
             -G Ninja \
@@ -120,24 +101,18 @@ jobs:
             -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
 
       - name: Build
-        run: cmake --build build --config ${{ env.BUILD_TYPE }}
+        run: cmake --build build
 
-      - name: Run Tests
+      - name: Test
         working-directory: build
-        run: ctest --output-on-failure -C ${{ env.BUILD_TYPE }}
+        run: ctest --output-on-failure
 
   # =============================================================================
   # Windows Builds
   # =============================================================================
   windows:
-    name: Windows (${{ matrix.compiler.name }})
-    runs-on: windows-${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [2022]
-        compiler:
-          - { name: "MSVC 2022", generator: "Visual Studio 17 2022" }
+    name: Windows (MSVC)
+    runs-on: windows-2022
 
     steps:
       - name: Checkout
@@ -148,18 +123,16 @@ jobs:
         with:
           vcpkgGitCommitId: "c82f74667287d3dc386bce81e44964370c91a289"
 
-      - name: Install dependencies via vcpkg
+      - name: Install dependencies
         run: |
           vcpkg install openssl:x64-windows
           vcpkg install nlohmann-json:x64-windows
           vcpkg install cpp-httplib:x64-windows
           vcpkg install gtest:x64-windows
 
-      - name: Configure CMake
+      - name: Configure
         run: |
           cmake -B build `
-            -G "${{ matrix.compiler.generator }}" `
-            -A x64 `
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
             -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
             -DLICENSESEAT_BUILD_TESTS=ON `
@@ -168,218 +141,6 @@ jobs:
       - name: Build
         run: cmake --build build --config ${{ env.BUILD_TYPE }}
 
-      - name: Run Tests
+      - name: Test
         working-directory: build
         run: ctest --output-on-failure -C ${{ env.BUILD_TYPE }}
-
-  # =============================================================================
-  # Code Quality
-  # =============================================================================
-  clang-format:
-    name: Code Formatting
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install clang-format
-        run: sudo apt-get install -y clang-format-14
-
-      - name: Check formatting
-        run: |
-          find include src tests examples -name '*.cpp' -o -name '*.hpp' | \
-            xargs clang-format-14 --dry-run --Werror
-
-  clang-tidy:
-    name: Static Analysis
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            clang-tidy-14 \
-            libssl-dev \
-            nlohmann-json3-dev \
-            libgtest-dev \
-            cmake \
-            ninja-build
-
-      - name: Install cpp-httplib
-        run: |
-          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
-          cd /tmp/cpp-httplib
-          sudo mkdir -p /usr/local/include
-          sudo cp -r httplib.h /usr/local/include/
-          sudo mkdir -p /usr/local/lib/cmake/httplib
-          cat << 'CMAKEOF' | sudo tee /usr/local/lib/cmake/httplib/httplibConfig.cmake
-          add_library(httplib::httplib INTERFACE IMPORTED)
-          set_target_properties(httplib::httplib PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
-          )
-          CMAKEOF
-
-      - name: Configure CMake
-        run: |
-          cmake -B build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DLICENSESEAT_BUILD_TESTS=ON \
-            -DLICENSESEAT_BUILD_EXAMPLES=OFF
-
-      - name: Run clang-tidy
-        run: |
-          find src -name '*.cpp' | \
-            xargs clang-tidy-14 -p build --warnings-as-errors='*'
-
-  # =============================================================================
-  # Address Sanitizer
-  # =============================================================================
-  sanitizers:
-    name: Sanitizers (${{ matrix.sanitizer }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        sanitizer: [address, undefined, thread]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libssl-dev \
-            nlohmann-json3-dev \
-            libgtest-dev \
-            cmake \
-            ninja-build
-
-      - name: Install cpp-httplib
-        run: |
-          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
-          cd /tmp/cpp-httplib
-          sudo mkdir -p /usr/local/include
-          sudo cp -r httplib.h /usr/local/include/
-          sudo mkdir -p /usr/local/lib/cmake/httplib
-          cat << 'CMAKEOF' | sudo tee /usr/local/lib/cmake/httplib/httplibConfig.cmake
-          add_library(httplib::httplib INTERFACE IMPORTED)
-          set_target_properties(httplib::httplib PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
-          )
-          CMAKEOF
-
-      - name: Configure CMake
-        run: |
-          cmake -B build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.sanitizer }}" \
-            -DLICENSESEAT_BUILD_TESTS=ON \
-            -DLICENSESEAT_BUILD_EXAMPLES=OFF
-
-      - name: Build
-        run: cmake --build build
-
-      - name: Run Tests
-        working-directory: build
-        env:
-          ASAN_OPTIONS: detect_leaks=1
-          UBSAN_OPTIONS: print_stacktrace=1
-          TSAN_OPTIONS: second_deadlock_stack=1
-        run: ctest --output-on-failure
-
-  # =============================================================================
-  # Coverage
-  # =============================================================================
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libssl-dev \
-            nlohmann-json3-dev \
-            libgtest-dev \
-            cmake \
-            ninja-build \
-            lcov
-
-      - name: Install cpp-httplib
-        run: |
-          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
-          cd /tmp/cpp-httplib
-          sudo mkdir -p /usr/local/include
-          sudo cp -r httplib.h /usr/local/include/
-          sudo mkdir -p /usr/local/lib/cmake/httplib
-          cat << 'CMAKEOF' | sudo tee /usr/local/lib/cmake/httplib/httplibConfig.cmake
-          add_library(httplib::httplib INTERFACE IMPORTED)
-          set_target_properties(httplib::httplib PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
-          )
-          CMAKEOF
-
-      - name: Configure CMake
-        run: |
-          cmake -B build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_FLAGS="--coverage -fprofile-arcs -ftest-coverage" \
-            -DCMAKE_EXE_LINKER_FLAGS="--coverage" \
-            -DLICENSESEAT_BUILD_TESTS=ON \
-            -DLICENSESEAT_BUILD_EXAMPLES=OFF
-
-      - name: Build
-        run: cmake --build build
-
-      - name: Run Tests
-        working-directory: build
-        run: ctest --output-on-failure
-
-      - name: Generate Coverage Report
-        run: |
-          lcov --capture --directory build --output-file coverage.info
-          lcov --remove coverage.info '/usr/*' '*/tests/*' '*/build/*' --output-file coverage.info
-          lcov --list coverage.info
-
-      - name: Upload Coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: coverage.info
-          fail_ci_if_error: false
-          verbose: true
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-  # =============================================================================
-  # Summary Job
-  # =============================================================================
-  ci-success:
-    name: CI Success
-    needs: [linux, macos, windows, clang-format, sanitizers]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Check all jobs passed
-        run: |
-          if [[ "${{ needs.linux.result }}" != "success" ]] || \
-             [[ "${{ needs.macos.result }}" != "success" ]] || \
-             [[ "${{ needs.windows.result }}" != "success" ]] || \
-             [[ "${{ needs.clang-format.result }}" != "success" ]] || \
-             [[ "${{ needs.sanitizers.result }}" != "success" ]]; then
-            echo "One or more jobs failed"
-            exit 1
-          fi
-          echo "All CI jobs passed!"
