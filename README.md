@@ -5,7 +5,10 @@
 [![Platforms](https://img.shields.io/badge/Platforms-Windows%20|%20macOS%20|%20Linux-green.svg)](#platform-support)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-The official C++ SDK for [LicenseSeat](https://licenseseat.com) – a licensing platform for apps, games, and plugins.
+The official C++ SDK for [LicenseSeat](https://licenseseat.com) – the licensing platform for apps, games, and plugins.
+
+> [!TIP]
+> Building a **VST/AU plugin** or **Unreal Engine** game? We provide a [Unreal Engine plugin](#unreal-engine-plugin) and a [single-header integration for JUCE VST/AU plugins](#juce-vst--au--aax).
 
 ---
 
@@ -58,9 +61,9 @@ LicenseSeat->ValidateAsync(TEXT("LICENSE-KEY"),
 
 ---
 
-### JUCE / VST / AU / AAX
+### JUCE: VST / AU / AAX
 
-A single-header integration using only JUCE's native HTTP (`juce::URL`) and JSON (`juce::JSON`). No cpp-httplib, no nlohmann/json, no OpenSSL.
+A single-header integration using only JUCE's native HTTP (`juce::URL`) and JSON (`juce::JSON`), without any dependency on cpp-httplib, nlohmann/json, or OpenSSL.
 
 ```cpp
 #include "LicenseSeatJuceStandalone.h"
@@ -190,15 +193,15 @@ config.max_offline_days = 30;
 
 ### Configuration Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `api_key` | string | *required* | API key for authentication |
-| `product_slug` | string | *required* | Product identifier |
-| `api_url` | string | `https://licenseseat.com/api` | API endpoint |
-| `timeout_seconds` | int | `30` | HTTP request timeout |
-| `max_retries` | int | `3` | Retry attempts for failed requests |
-| `offline_public_key` | string | `""` | Ed25519 public key for offline verification |
-| `max_offline_days` | int | `0` | Maximum days license works offline (0 = disabled) |
+| Option               | Type   | Default                       | Description                                       |
+| -------------------- | ------ | ----------------------------- | ------------------------------------------------- |
+| `api_key`            | string | *required*                    | API key for authentication                        |
+| `product_slug`       | string | *required*                    | Product identifier                                |
+| `api_url`            | string | `https://licenseseat.com/api` | API endpoint                                      |
+| `timeout_seconds`    | int    | `30`                          | HTTP request timeout                              |
+| `max_retries`        | int    | `3`                           | Retry attempts for failed requests                |
+| `offline_public_key` | string | `""`                          | Ed25519 public key for offline verification       |
+| `max_offline_days`   | int    | `0`                           | Maximum days license works offline (0 = disabled) |
 
 ---
 
@@ -355,28 +358,28 @@ if (result.is_ok()) {
 
 ### Error Codes
 
-| Code | Description |
-|------|-------------|
-| `NetworkError` | HTTP request failed |
-| `Timeout` | Request timed out |
-| `LicenseNotFound` | License key not found |
-| `LicenseExpired` | License has expired |
-| `LicenseInactive` | License is not active |
-| `SeatLimitExceeded` | Maximum activations reached |
-| `DeviceMismatch` | Device identifier mismatch |
-| `InvalidSignature` | Cryptographic verification failed |
-| `ClockTamper` | System clock manipulation detected |
-| `StorageError` | Failed to read/write cache |
+| Code                | Description                        |
+| ------------------- | ---------------------------------- |
+| `NetworkError`      | HTTP request failed                |
+| `Timeout`           | Request timed out                  |
+| `LicenseNotFound`   | License key not found              |
+| `LicenseExpired`    | License has expired                |
+| `LicenseInactive`   | License is not active              |
+| `SeatLimitExceeded` | Maximum activations reached        |
+| `DeviceMismatch`    | Device identifier mismatch         |
+| `InvalidSignature`  | Cryptographic verification failed  |
+| `ClockTamper`       | System clock manipulation detected |
+| `StorageError`      | Failed to read/write cache         |
 
 ---
 
 ## Platform Support
 
-| Platform | Compiler | Status |
-|----------|----------|--------|
-| Linux | GCC 9+, Clang 10+ | Supported |
-| macOS | Apple Clang 12+ (ARM & Intel) | Supported |
-| Windows | MSVC 2019+ | Supported |
+| Platform | Compiler                      | Status    |
+| -------- | ----------------------------- | --------- |
+| Linux    | GCC 9+, Clang 10+             | Supported |
+| macOS    | Apple Clang 12+ (ARM & Intel) | Supported |
+| Windows  | MSVC 2019+                    | Supported |
 
 ### Device Identification
 
