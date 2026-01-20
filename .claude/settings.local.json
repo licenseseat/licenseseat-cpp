@@ -21,7 +21,8 @@
       "Bash(./build/examples/basic_usage)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }
