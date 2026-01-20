@@ -18,7 +18,10 @@
       "Bash(ls:*)",
       "Bash(./tests/licenseseat_tests:*)",
       "Bash(./build/tests/licenseseat_tests:*)",
-      "Bash(./build/examples/basic_usage)"
+      "Bash(./build/examples/basic_usage)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }

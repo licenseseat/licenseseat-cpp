@@ -49,7 +49,12 @@ using nlohmann::json;
 /// Format Timestamp to ISO 8601 string
 [[nodiscard]] inline std::string format_timestamp(const Timestamp& ts) {
     auto time = std::chrono::system_clock::to_time_t(ts);
-    std::tm tm = *std::gmtime(&time);
+    std::tm tm = {};
+#if defined(_MSC_VER)
+    gmtime_s(&tm, &time);
+#else
+    gmtime_r(&time, &tm);
+#endif
     std::ostringstream ss;
     ss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
     return ss.str();
