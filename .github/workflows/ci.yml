@@ -123,14 +123,12 @@ jobs:
         with:
           vcpkgGitCommitId: "c82f74667287d3dc386bce81e44964370c91a289"
 
-      - name: Install dependencies
-        run: vcpkg install --triplet x64-windows --x-feature=tests
-
       - name: Configure
         run: |
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
             -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
+            -DVCPKG_MANIFEST_FEATURES=tests `
             -DLICENSESEAT_BUILD_TESTS=ON `
             -DLICENSESEAT_BUILD_EXAMPLES=ON
 
