@@ -16,13 +16,13 @@
 
 We analyzed hundreds of GitHub issues and forum posts from developers using competitor SDKs. The same problems appeared over and over:
 
-| 😤 Common Pain Points | ✅ How We Solved It |
-|----------------------|---------------------|
-| OpenSSL symbol conflicts crash DAWs | **Zero OpenSSL** – vendored Ed25519 + SHA-256 |
+| 😤 Common Pain Points                    | ✅ How We Solved It                                     |
+| --------------------------------------- | ------------------------------------------------------ |
+| OpenSSL symbol conflicts crash DAWs     | **Zero OpenSSL** – vendored Ed25519 + SHA-256          |
 | Thread safety bugs cause random crashes | **Battle-tested** – 200 concurrent clients, 10 threads |
-| Global singletons break multi-instance | **No global state** – each instance is independent |
-| Complex dependencies = build failures | **Single header** options for UE & JUCE |
-| Static destructors crash on shutdown | **Clean RAII** – no static initialization |
+| Global singletons break multi-instance  | **No global state** – each instance is independent     |
+| Complex dependencies = build failures   | **Single header** options for UE & JUCE                |
+| Static destructors crash on shutdown    | **Clean RAII** – no static initialization              |
 
 ---
 
@@ -203,15 +203,15 @@ config.offline_public_key = "base64-ed25519-key"; // For offline verification
 config.max_offline_days = 30;                      // Days license works offline
 ```
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `api_key` | string | *required* | Your LicenseSeat API key |
-| `product_slug` | string | *required* | Product identifier |
-| `api_url` | string | `https://licenseseat.com/api` | API endpoint |
-| `timeout_seconds` | int | `30` | HTTP timeout |
-| `max_retries` | int | `3` | Retry attempts |
-| `offline_public_key` | string | `""` | Ed25519 public key for offline |
-| `max_offline_days` | int | `0` | Max offline days (0 = online only) |
+| Option               | Type   | Default                       | Description                        |
+| -------------------- | ------ | ----------------------------- | ---------------------------------- |
+| `api_key`            | string | *required*                    | Your LicenseSeat API key           |
+| `product_slug`       | string | *required*                    | Product identifier                 |
+| `api_url`            | string | `https://licenseseat.com/api` | API endpoint                       |
+| `timeout_seconds`    | int    | `30`                          | HTTP timeout                       |
+| `max_retries`        | int    | `3`                           | Retry attempts                     |
+| `offline_public_key` | string | `""`                          | Ed25519 public key for offline     |
+| `max_offline_days`   | int    | `0`                           | Max offline days (0 = online only) |
 
 ---
 
@@ -371,11 +371,11 @@ cmake --build build
 
 ## 🖥️ Platform Support
 
-| Platform | Compiler | Status |
-|----------|----------|--------|
-| Linux | GCC 9+, Clang 10+ | ✅ Full support |
-| macOS | Apple Clang 12+ (ARM & Intel) | ✅ Full support |
-| Windows | MSVC 2019+ | ✅ Full support |
+| Platform | Compiler                      | Status         |
+| -------- | ----------------------------- | -------------- |
+| Linux    | GCC 9+, Clang 10+             | ✅ Full support |
+| macOS    | Apple Clang 12+ (ARM & Intel) | ✅ Full support |
+| Windows  | MSVC 2019+                    | ✅ Full support |
 
 **Device identification:**
 - **macOS:** IOKit Platform UUID
@@ -437,7 +437,7 @@ MIT License – see [LICENSE](LICENSE) for details.
 ## 🔗 Links
 
 - **Website:** [licenseseat.com](https://licenseseat.com)
-- **Documentation:** [docs.licenseseat.com](https://docs.licenseseat.com)
+- **Documentation:** [licenseseat.com/docs](https://licenseseat.com/docs)
 - **Issues:** [GitHub Issues](https://github.com/licenseseat/licenseseat-cpp/issues)
 
 ---
