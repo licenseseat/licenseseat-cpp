@@ -89,34 +89,34 @@ void AMyGameMode::BeginPlay()
 
 ### Configuration
 
-| Property | Type | Description |
-|----------|------|-------------|
-| ApiKey | FString | Your LicenseSeat API key |
-| ProductSlug | FString | Product identifier |
-| ApiUrl | FString | API base URL (default: https://licenseseat.com/api) |
-| OfflinePublicKey | FString | Ed25519 public key for offline verification |
-| MaxOfflineDays | int32 | Maximum offline operation days |
-| AutoValidateInterval | float | Auto-validation interval in seconds |
+| Property             | Type    | Description                                         |
+| -------------------- | ------- | --------------------------------------------------- |
+| ApiKey               | FString | Your LicenseSeat API key                            |
+| ProductSlug          | FString | Product identifier                                  |
+| ApiUrl               | FString | API base URL (default: https://licenseseat.com/api) |
+| OfflinePublicKey     | FString | Ed25519 public key for offline verification         |
+| MaxOfflineDays       | int32   | Maximum offline operation days                      |
+| AutoValidateInterval | float   | Auto-validation interval in seconds                 |
 
 ### Methods
 
-| Method | Description |
-|--------|-------------|
-| `Validate(LicenseKey)` | Synchronous validation (blocks!) |
-| `ValidateAsync(LicenseKey, Callback)` | Async validation (recommended) |
-| `Activate(LicenseKey)` | Synchronous activation |
-| `ActivateAsync(LicenseKey, Callback)` | Async activation |
-| `Deactivate(LicenseKey)` | Deactivate current device |
-| `GetStatus()` | Get current license status |
-| `IsLicenseValid()` | Quick validity check |
-| `GetDeviceId()` | Get device identifier |
-| `StartAutoValidation(LicenseKey)` | Start periodic validation |
-| `StopAutoValidation()` | Stop periodic validation |
+| Method                                | Description                      |
+| ------------------------------------- | -------------------------------- |
+| `Validate(LicenseKey)`                | Synchronous validation (blocks!) |
+| `ValidateAsync(LicenseKey, Callback)` | Async validation (recommended)   |
+| `Activate(LicenseKey)`                | Synchronous activation           |
+| `ActivateAsync(LicenseKey, Callback)` | Async activation                 |
+| `Deactivate(LicenseKey)`              | Deactivate current device        |
+| `GetStatus()`                         | Get current license status       |
+| `IsLicenseValid()`                    | Quick validity check             |
+| `GetDeviceId()`                       | Get device identifier            |
+| `StartAutoValidation(LicenseKey)`     | Start periodic validation        |
+| `StopAutoValidation()`                | Stop periodic validation         |
 
 ### Events
 
-| Event | Description |
-|-------|-------------|
+| Event                    | Description                       |
+| ------------------------ | --------------------------------- |
 | `OnLicenseStatusChanged` | Fired when license status changes |
 
 ## Best Practices
@@ -150,9 +150,3 @@ Regenerate project files if needed.
 ### Network errors
 Check API key and ensure internet connectivity.
 Try the synchronous `Validate()` method to debug.
-
-## Support
-
-- Documentation: https://docs.licenseseat.com/sdks/unreal
-- Issues: https://github.com/licenseseat/licenseseat-cpp/issues
-- Email: support@licenseseat.com
