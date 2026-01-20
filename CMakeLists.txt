@@ -50,6 +50,7 @@ endif()
 # Find dependencies (JSON and HTTP only - crypto is vendored)
 find_package(nlohmann_json REQUIRED)
 find_package(httplib REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Vendored ed25519 sources
 set(ED25519_SOURCES
@@ -96,6 +97,9 @@ target_compile_definitions(licenseseat
 
 # Link libraries
 target_link_libraries(licenseseat
+    PUBLIC
+        OpenSSL::SSL
+        OpenSSL::Crypto
     PRIVATE
         nlohmann_json::nlohmann_json
         httplib::httplib

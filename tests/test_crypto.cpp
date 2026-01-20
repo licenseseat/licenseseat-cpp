@@ -1,8 +1,6 @@
 #include <gtest/gtest.h>
 #include <licenseseat/crypto.hpp>
 
-#include <cstdio>
-
 namespace licenseseat {
 namespace crypto {
 namespace {
@@ -186,13 +184,22 @@ TEST(OfflineLicenseVerificationTest, EmptyPublicKeyFails) {
 
 namespace rfc8032 {
 
-// Helper to convert hex string to bytes
+// Helper to convert hex character to value
+inline uint8_t hex_char_to_value(char c) {
+    if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
+    if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F') return static_cast<uint8_t>(c - 'A' + 10);
+    return 0;
+}
+
+// Helper to convert hex string to bytes (portable, no sscanf)
 std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
     std::vector<uint8_t> bytes;
-    for (size_t i = 0; i < hex.length(); i += 2) {
-        unsigned int byte;
-        std::sscanf(hex.substr(i, 2).c_str(), "%02x", &byte);
-        bytes.push_back(static_cast<uint8_t>(byte));
+    bytes.reserve(hex.length() / 2);
+    for (size_t i = 0; i + 1 < hex.length(); i += 2) {
+        uint8_t high = hex_char_to_value(hex[i]);
+        uint8_t low = hex_char_to_value(hex[i + 1]);
+        bytes.push_back(static_cast<uint8_t>((high << 4) | low));
     }
     return bytes;
 }
