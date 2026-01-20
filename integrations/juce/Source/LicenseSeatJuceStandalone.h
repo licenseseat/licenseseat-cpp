@@ -321,9 +321,9 @@ private:
 
         if (stream == nullptr)
         {
-            juce::var error;
-            error.getDynamicObject()->setProperty("error", "Network request failed");
-            return error;
+            auto* errorObj = new juce::DynamicObject();
+            errorObj->setProperty("error", "Network request failed");
+            return juce::var(errorObj);
         }
 
         juce::String response = stream->readEntireStreamAsString();
