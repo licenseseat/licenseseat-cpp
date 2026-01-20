@@ -263,7 +263,7 @@ TEST_F(FileStorageTest, SetAndGetOfflineLicense) {
     EXPECT_EQ(retrieved->license_key, "OFFLINE-KEY");
     EXPECT_EQ(retrieved->product_slug, "test-product");
     EXPECT_EQ(retrieved->seat_limit, 10);
-    ASSERT_EQ(retrieved->entitlements.size(), 1);
+    ASSERT_EQ(retrieved->entitlements.size(), static_cast<size_t>(1));
     EXPECT_EQ(retrieved->entitlements[0].key, "updates");
 }
 

@@ -47,7 +47,7 @@ TEST(JsonMetadataTest, ParseStringValues) {
     nlohmann::json j = {{"key1", "value1"}, {"key2", "value2"}};
     auto meta = parse_metadata(j);
 
-    EXPECT_EQ(meta.size(), 2);
+    EXPECT_EQ(meta.size(), static_cast<size_t>(2));
     EXPECT_EQ(meta["key1"], "value1");
     EXPECT_EQ(meta["key2"], "value2");
 }
@@ -192,7 +192,7 @@ TEST(JsonOfflineLicenseTest, ParseFullOfflineLicense) {
     EXPECT_EQ(offline.key_id, "key-v1");
     EXPECT_EQ(offline.issued_at, 1737280800);
     EXPECT_EQ(offline.expires_at, 1768816800);
-    EXPECT_EQ(offline.entitlements.size(), 2);
+    EXPECT_EQ(offline.entitlements.size(), static_cast<size_t>(2));
     EXPECT_EQ(offline.entitlements[0].key, "updates");
     EXPECT_EQ(offline.entitlements[1].key, "support");
     EXPECT_EQ(offline.signature_b64u, "base64-signature");
@@ -236,7 +236,7 @@ TEST(JsonReleaseTest, ParseReleasesList) {
 
     auto releases = parse_releases(j);
 
-    EXPECT_EQ(releases.size(), 2);
+    EXPECT_EQ(releases.size(), static_cast<size_t>(2));
     EXPECT_EQ(releases[0].version, "1.0.0");
     EXPECT_EQ(releases[1].version, "0.9.0");
 }
