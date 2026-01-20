@@ -1,10 +1,5 @@
 #include "licenseseat/device.hpp"
 
-#ifdef LICENSESEAT_USE_OPENSSL
-#include <openssl/evp.h>
-#include <openssl/sha.h>
-#endif
-
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -33,52 +28,11 @@
 namespace licenseseat {
 namespace device {
 
-// Internal namespace for sha256_hex - implementation varies based on LICENSESEAT_USE_OPENSSL
+// Internal namespace for sha256_hex - implementation in crypto.cpp using PicoSHA2
 namespace internal {
 
-#ifdef LICENSESEAT_USE_OPENSSL
-// Hash a string using SHA-256 and return hex string (OpenSSL implementation)
-std::string sha256_hex(const std::string& input) {
-    if (input.empty()) {
-        return "";
-    }
-
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-
-    if (ctx == nullptr) {
-        return "";
-    }
-
-    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
-        EVP_MD_CTX_free(ctx);
-        return "";
-    }
-
-    if (EVP_DigestUpdate(ctx, input.c_str(), input.length()) != 1) {
-        EVP_MD_CTX_free(ctx);
-        return "";
-    }
-
-    unsigned int len = 0;
-    if (EVP_DigestFinal_ex(ctx, hash, &len) != 1) {
-        EVP_MD_CTX_free(ctx);
-        return "";
-    }
-
-    EVP_MD_CTX_free(ctx);
-
-    std::ostringstream ss;
-    for (unsigned int i = 0; i < len; i++) {
-        ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(hash[i]);
-    }
-
-    return ss.str();
-}
-#else
-// Forward declaration - implementation in crypto_minimal.cpp using PicoSHA2
+// Forward declaration - implementation in crypto.cpp
 std::string sha256_hex(const std::string& input);
-#endif
 
 }  // namespace internal
 

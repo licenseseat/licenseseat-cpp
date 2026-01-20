@@ -66,9 +66,10 @@ sudo cmake --install build
 
 ### Dependencies
 
-- **OpenSSL 3.0+** – Cryptographic operations (Ed25519, SHA256)
 - **nlohmann/json** – JSON parsing
-- **cpp-httplib** – HTTP client
+- **cpp-httplib** – HTTP client (with OpenSSL for HTTPS)
+
+*Note: Cryptographic operations (Ed25519, SHA-256) use vendored libraries with no external dependencies.*
 
 ---
 

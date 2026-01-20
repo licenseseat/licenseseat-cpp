@@ -19,7 +19,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(LICENSESEAT_BUILD_TESTS "Build tests" ON)
 option(LICENSESEAT_BUILD_EXAMPLES "Build examples" ON)
 option(LICENSESEAT_ENABLE_CLANG_TIDY "Enable clang-tidy" OFF)
-option(LICENSESEAT_USE_OPENSSL "Use OpenSSL for crypto (OFF uses vendored ed25519/PicoSHA2)" ON)
 
 # Compiler warnings
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -48,28 +47,23 @@ if(LICENSESEAT_ENABLE_CLANG_TIDY)
     endif()
 endif()
 
-# Find dependencies
-if(LICENSESEAT_USE_OPENSSL)
-    find_package(OpenSSL REQUIRED)
-endif()
+# Find dependencies (JSON and HTTP only - crypto is vendored)
 find_package(nlohmann_json REQUIRED)
 find_package(httplib REQUIRED)
 
-# Vendored ed25519 sources (when not using OpenSSL)
-if(NOT LICENSESEAT_USE_OPENSSL)
-    set(ED25519_SOURCES
-        deps/ed25519/add_scalar.c
-        deps/ed25519/fe.c
-        deps/ed25519/ge.c
-        deps/ed25519/key_exchange.c
-        deps/ed25519/keypair.c
-        deps/ed25519/sc.c
-        deps/ed25519/seed.c
-        deps/ed25519/sha512.c
-        deps/ed25519/sign.c
-        deps/ed25519/verify.c
-    )
-endif()
+# Vendored ed25519 sources
+set(ED25519_SOURCES
+    deps/ed25519/add_scalar.c
+    deps/ed25519/fe.c
+    deps/ed25519/ge.c
+    deps/ed25519/key_exchange.c
+    deps/ed25519/keypair.c
+    deps/ed25519/sc.c
+    deps/ed25519/seed.c
+    deps/ed25519/sha512.c
+    deps/ed25519/sign.c
+    deps/ed25519/verify.c
+)
 
 # Main library sources
 set(LICENSESEAT_SOURCES
@@ -77,14 +71,9 @@ set(LICENSESEAT_SOURCES
     src/http.cpp
     src/device.cpp
     src/storage.cpp
+    src/crypto.cpp
+    ${ED25519_SOURCES}
 )
-
-if(LICENSESEAT_USE_OPENSSL)
-    list(APPEND LICENSESEAT_SOURCES src/crypto.cpp)
-else()
-    list(APPEND LICENSESEAT_SOURCES src/crypto_minimal.cpp)
-    list(APPEND LICENSESEAT_SOURCES ${ED25519_SOURCES})
-endif()
 
 add_library(licenseseat ${LICENSESEAT_SOURCES})
 
@@ -94,46 +83,23 @@ target_include_directories(licenseseat
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
-)
-
-# Include vendored deps when not using OpenSSL
-if(NOT LICENSESEAT_USE_OPENSSL)
-    target_include_directories(licenseseat PRIVATE
+    PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/deps
         ${CMAKE_CURRENT_SOURCE_DIR}/deps/ed25519
-    )
-endif()
+)
 
-# Compile definitions
-if(LICENSESEAT_USE_OPENSSL)
-    target_compile_definitions(licenseseat
-        PRIVATE
-            CPPHTTPLIB_OPENSSL_SUPPORT
-            LICENSESEAT_USE_OPENSSL
-    )
-else()
-    target_compile_definitions(licenseseat
-        PRIVATE
-            CPPHTTPLIB_OPENSSL_SUPPORT
-    )
-endif()
+# Compile definitions for HTTPS support via cpp-httplib
+target_compile_definitions(licenseseat
+    PRIVATE
+        CPPHTTPLIB_OPENSSL_SUPPORT
+)
 
 # Link libraries
-if(LICENSESEAT_USE_OPENSSL)
-    target_link_libraries(licenseseat
-        PRIVATE
-            OpenSSL::SSL
-            OpenSSL::Crypto
-            nlohmann_json::nlohmann_json
-            httplib::httplib
-    )
-else()
-    target_link_libraries(licenseseat
-        PRIVATE
-            nlohmann_json::nlohmann_json
-            httplib::httplib
-    )
-endif()
+target_link_libraries(licenseseat
+    PRIVATE
+        nlohmann_json::nlohmann_json
+        httplib::httplib
+)
 
 # Platform-specific libraries for device identification
 if(APPLE)
@@ -222,8 +188,5 @@ message(STATUS "LicenseSeat C++ SDK ${PROJECT_VERSION}")
 message(STATUS "  Build tests:    ${LICENSESEAT_BUILD_TESTS}")
 message(STATUS "  Build examples: ${LICENSESEAT_BUILD_EXAMPLES}")
 message(STATUS "  clang-tidy:     ${LICENSESEAT_ENABLE_CLANG_TIDY}")
-message(STATUS "  Use OpenSSL:    ${LICENSESEAT_USE_OPENSSL}")
-if(NOT LICENSESEAT_USE_OPENSSL)
-    message(STATUS "    (using vendored ed25519 + PicoSHA2)")
-endif()
+message(STATUS "  Crypto:         Vendored (ed25519 + PicoSHA2)")
 message(STATUS "")

@@ -5,7 +5,7 @@
  * @brief Cryptographic utilities for LicenseSeat SDK
  *
  * Provides Ed25519 signature verification and Base64/Base64URL encoding
- * using OpenSSL.
+ * using vendored libraries (orlp/ed25519 and PicoSHA2).
  */
 
 #include "licenseseat.hpp"

@@ -1,7 +1,7 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(OpenSSL REQUIRED)
+# OpenSSL is used by cpp-httplib for HTTPS, not by licenseseat directly
 
 include("${CMAKE_CURRENT_LIST_DIR}/licenseseatTargets.cmake")
 
