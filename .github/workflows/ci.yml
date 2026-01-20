@@ -124,7 +124,7 @@ jobs:
           vcpkgGitCommitId: "c82f74667287d3dc386bce81e44964370c91a289"
 
       - name: Install dependencies
-        run: vcpkg install --triplet x64-windows
+        run: vcpkg install --triplet x64-windows --x-feature=tests
 
       - name: Configure
         run: |
