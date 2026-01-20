@@ -1,7 +1,9 @@
 #include "licenseseat/device.hpp"
 
+#ifdef LICENSESEAT_USE_OPENSSL
 #include <openssl/evp.h>
 #include <openssl/sha.h>
+#endif
 
 #include <cstring>
 #include <fstream>
@@ -31,9 +33,11 @@
 namespace licenseseat {
 namespace device {
 
-namespace {
+// Internal namespace for sha256_hex - implementation varies based on LICENSESEAT_USE_OPENSSL
+namespace internal {
 
-// Hash a string using SHA-256 and return hex string
+#ifdef LICENSESEAT_USE_OPENSSL
+// Hash a string using SHA-256 and return hex string (OpenSSL implementation)
 std::string sha256_hex(const std::string& input) {
     if (input.empty()) {
         return "";
@@ -71,6 +75,14 @@ std::string sha256_hex(const std::string& input) {
 
     return ss.str();
 }
+#else
+// Forward declaration - implementation in crypto_minimal.cpp using PicoSHA2
+std::string sha256_hex(const std::string& input);
+#endif
+
+}  // namespace internal
+
+namespace {
 
 #if defined(LICENSESEAT_PLATFORM_MACOS)
 
@@ -188,7 +200,7 @@ std::string generate_device_id() {
     }
 
     // Hash the raw ID for privacy and consistent format
-    std::string hash = sha256_hex(raw_id);
+    std::string hash = internal::sha256_hex(raw_id);
 
     // Return first 32 chars (128 bits) for a reasonable identifier length
     if (hash.length() > 32) {
