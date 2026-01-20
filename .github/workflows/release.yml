@@ -1,0 +1,225 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  # =============================================================================
+  # Create GitHub Release
+  # =============================================================================
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref_name }}
+          draft: true
+          prerelease: ${{ contains(github.ref, '-') }}
+
+  # =============================================================================
+  # Build Release Artifacts
+  # =============================================================================
+  build-linux:
+    name: Build Linux
+    needs: create-release
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libssl-dev \
+            nlohmann-json3-dev \
+            cmake \
+            ninja-build
+
+      - name: Install cpp-httplib
+        run: |
+          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
+          cd /tmp/cpp-httplib
+          sudo mkdir -p /usr/local/include
+          sudo cp -r httplib.h /usr/local/include/
+          sudo mkdir -p /usr/local/lib/cmake/httplib
+          cat << 'CMAKEOF' | sudo tee /usr/local/lib/cmake/httplib/httplibConfig.cmake
+          add_library(httplib::httplib INTERFACE IMPORTED)
+          set_target_properties(httplib::httplib PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
+          )
+          CMAKEOF
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DLICENSESEAT_BUILD_TESTS=OFF \
+            -DLICENSESEAT_BUILD_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX=install
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }}
+
+      - name: Install
+        run: cmake --install build
+
+      - name: Package
+        run: |
+          cd install
+          tar -czvf ../licenseseat-${{ github.ref_name }}-linux-x64.tar.gz .
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: licenseseat-${{ github.ref_name }}-linux-x64.tar.gz
+          asset_name: licenseseat-${{ github.ref_name }}-linux-x64.tar.gz
+          asset_content_type: application/gzip
+
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-13
+            arch: x64
+          - os: macos-14
+            arch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install \
+            openssl@3 \
+            nlohmann-json \
+            cpp-httplib \
+            ninja
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DLICENSESEAT_BUILD_TESTS=OFF \
+            -DLICENSESEAT_BUILD_EXAMPLES=OFF \
+            -DCMAKE_INSTALL_PREFIX=install \
+            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }}
+
+      - name: Install
+        run: cmake --install build
+
+      - name: Package
+        run: |
+          cd install
+          tar -czvf ../licenseseat-${{ github.ref_name }}-macos-${{ matrix.arch }}.tar.gz .
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: licenseseat-${{ github.ref_name }}-macos-${{ matrix.arch }}.tar.gz
+          asset_name: licenseseat-${{ github.ref_name }}-macos-${{ matrix.arch }}.tar.gz
+          asset_content_type: application/gzip
+
+  build-windows:
+    name: Build Windows
+    needs: create-release
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: "c82f74667287d3dc386bce81e44964370c91a289"
+
+      - name: Install dependencies via vcpkg
+        run: |
+          vcpkg install openssl:x64-windows
+          vcpkg install nlohmann-json:x64-windows
+          vcpkg install cpp-httplib:x64-windows
+
+      - name: Configure CMake
+        run: |
+          cmake -B build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
+            -DLICENSESEAT_BUILD_TESTS=OFF `
+            -DLICENSESEAT_BUILD_EXAMPLES=OFF `
+            -DCMAKE_INSTALL_PREFIX=install
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }}
+
+      - name: Install
+        run: cmake --install build --config ${{ env.BUILD_TYPE }}
+
+      - name: Package
+        run: |
+          Compress-Archive -Path install\* -DestinationPath licenseseat-${{ github.ref_name }}-windows-x64.zip
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: licenseseat-${{ github.ref_name }}-windows-x64.zip
+          asset_name: licenseseat-${{ github.ref_name }}-windows-x64.zip
+          asset_content_type: application/zip
+
+  # =============================================================================
+  # Source Package
+  # =============================================================================
+  source-package:
+    name: Source Package
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create source tarball
+        run: |
+          git archive --format=tar.gz --prefix=licenseseat-${{ github.ref_name }}/ \
+            -o licenseseat-${{ github.ref_name }}-source.tar.gz HEAD
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: licenseseat-${{ github.ref_name }}-source.tar.gz
+          asset_name: licenseseat-${{ github.ref_name }}-source.tar.gz
+          asset_content_type: application/gzip
