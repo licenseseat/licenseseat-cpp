@@ -124,11 +124,7 @@ jobs:
           vcpkgGitCommitId: "c82f74667287d3dc386bce81e44964370c91a289"
 
       - name: Install dependencies
-        run: |
-          vcpkg install openssl:x64-windows
-          vcpkg install nlohmann-json:x64-windows
-          vcpkg install cpp-httplib:x64-windows
-          vcpkg install gtest:x64-windows
+        run: vcpkg install --triplet x64-windows
 
       - name: Configure
         run: |

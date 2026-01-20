@@ -7,6 +7,7 @@
  * Provides an event-driven architecture similar to the Swift SDK's EventBus.
  */
 
+#include <algorithm>
 #include <any>
 #include <functional>
 #include <mutex>
