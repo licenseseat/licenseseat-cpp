@@ -2,116 +2,105 @@
 
 [![CI](https://github.com/licenseseat/licenseseat-cpp/actions/workflows/ci.yml/badge.svg)](https://github.com/licenseseat/licenseseat-cpp/actions/workflows/ci.yml)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
-[![Tests](https://img.shields.io/badge/Tests-208%20passing-brightgreen.svg)](#testing)
 [![Platforms](https://img.shields.io/badge/Platforms-Windows%20|%20macOS%20|%20Linux-green.svg)](#platform-support)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**The licensing SDK that doesn't get in your way.** Built for game developers, audio plugin makers, and desktop app creators who want licensing to *just work*.
-
-> [!TIP]
-> **Building a VST/AU plugin or Unreal Engine game?** Jump straight to our [zero-dependency integrations](#-zero-dependency-integrations) – single-header, no OpenSSL conflicts, no linking nightmares.
+The official C++ SDK for [LicenseSeat](https://licenseseat.com) – a licensing platform for apps, games, and plugins.
 
 ---
 
-## Why LicenseSeat?
+## Features
 
-We analyzed hundreds of GitHub issues and forum posts from developers using competitor SDKs. The same problems appeared over and over:
-
-| 😤 Common Pain Points                    | ✅ How We Solved It                                     |
-| --------------------------------------- | ------------------------------------------------------ |
-| OpenSSL symbol conflicts crash DAWs     | **Zero OpenSSL** – vendored Ed25519 + SHA-256          |
-| Thread safety bugs cause random crashes | **Battle-tested** – 200 concurrent clients, 10 threads |
-| Global singletons break multi-instance  | **No global state** – each instance is independent     |
-| Complex dependencies = build failures   | **Single header** options for UE & JUCE                |
-| Static destructors crash on shutdown    | **Clean RAII** – no static initialization              |
+- **License activation & deactivation** – Activate licenses with automatic device fingerprinting
+- **Online & offline validation** – Validate licenses with Ed25519 cryptographic verification
+- **Entitlement checking** – Check feature access with `has_entitlement()` and `check_entitlement()`
+- **Local caching** – File-based caching with clock tamper detection
+- **Auto-validation** – Background validation with configurable intervals
+- **Thread-safe** – All public methods are safe to call from multiple threads
+- **Cross-platform** – Windows, macOS, and Linux support
+- **Exception-free** – Uses `Result<T, Error>` pattern for error handling
 
 ---
 
-## 🚀 Zero-Dependency Integrations
+## Special Packaging
+
+The SDK includes zero-dependency integrations for platforms where dependency management is particularly challenging.
 
 ### Unreal Engine Plugin
 
-> [!IMPORTANT]
-> **ThirdParty folder comes pre-populated** – no manual setup, no hunting for dependencies.
-
-Drop-in plugin with Blueprint support. Uses native UE HTTP and JSON modules.
+A complete UE plugin using native `FHttpModule` and `FJsonObject`. No external dependencies.
 
 ```cpp
-// Get the subsystem (automatic lifecycle management)
 auto* LicenseSeat = GetGameInstance()->GetSubsystem<ULicenseSeatSubsystem>();
 
-// Configure once
 FLicenseSeatConfig Config;
 Config.ApiKey = TEXT("your-api-key");
 Config.ProductSlug = TEXT("your-game");
 LicenseSeat->InitializeWithConfig(Config);
 
-// Validate (non-blocking!)
 LicenseSeat->ValidateAsync(TEXT("LICENSE-KEY"),
     FOnValidationComplete::CreateLambda([](const FLicenseValidationResult& Result)
     {
         if (Result.bValid)
-            UE_LOG(LogTemp, Log, TEXT("Welcome, %s!"), *Result.Licensee);
+        {
+            // License valid
+        }
     }));
 ```
 
-📁 **Location:** [`integrations/unreal/LicenseSeat/`](integrations/unreal/)
+**Location:** [`integrations/unreal/LicenseSeat/`](integrations/unreal/)
 
-**Features:**
-- ✅ Full Blueprint support via `UFUNCTION`/`UPROPERTY`
-- ✅ `GameInstanceSubsystem` for automatic lifecycle
-- ✅ Async-first API – never blocks the game thread
-- ✅ Auto-validation timer for long play sessions
-- ✅ Ed25519 offline verification included
+- Blueprint support via `UFUNCTION`/`UPROPERTY`/`USTRUCT`
+- `GameInstanceSubsystem` for automatic lifecycle management
+- Async API (non-blocking)
+- Auto-validation timer
+- Ed25519 offline verification (ThirdParty folder pre-populated)
 
 ---
 
-### VST/AU/AAX Plugins (JUCE)
+### JUCE / VST / AU / AAX
 
-> [!TIP]
-> **One header file. Zero external dependencies.** Just copy and go.
+A single-header integration using only JUCE's native HTTP (`juce::URL`) and JSON (`juce::JSON`). No cpp-httplib, no nlohmann/json, no OpenSSL.
 
 ```cpp
 #include "LicenseSeatJuceStandalone.h"
 
-// That's it. No cpp-httplib, no nlohmann/json, no OpenSSL.
 LicenseSeatJuceStandalone license("your-api-key", "your-plugin");
 
-// Safe to call from audio thread (just reads std::atomic)
+// Audio thread safe (reads std::atomic)
 void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     if (!license.isValid())
     {
-        buffer.clear();  // Demo mode
+        buffer.clear();
         return;
     }
-    // Full processing for licensed users
+    // Process audio
 }
 
-// Async validation – callback runs on message thread
+// Async validation (callback on message thread)
 license.validateAsync("LICENSE-KEY", [](auto& result)
 {
     if (result.valid)
-        showMessage("Licensed to: " + result.licensee);
+    {
+        // Update UI
+    }
 });
 ```
 
-📁 **Location:** [`integrations/juce/Source/LicenseSeatJuceStandalone.h`](integrations/juce/)
+**Location:** [`integrations/juce/Source/LicenseSeatJuceStandalone.h`](integrations/juce/)
 
-**Features:**
-- ✅ Uses `juce::URL` for HTTP (native JUCE, no OpenSSL!)
-- ✅ Uses `juce::JSON` for parsing (no nlohmann!)
-- ✅ `std::atomic<bool>` for audio-thread-safe status checks
-- ✅ `MessageManager::callAsync` for UI callbacks
-- ✅ Multi-instance safe – run 10+ plugins in the same DAW
+- Single header file
+- `std::atomic<bool>` for lock-free status checks in audio thread
+- `MessageManager::callAsync` for thread-safe UI callbacks
+- Multi-instance safe (no global state)
 
 > [!NOTE]
-> **Why this matters:** Other SDKs cause crashes when multiple plugins link different OpenSSL versions. Our standalone integration has *zero* symbol conflicts.
+> The standalone integration avoids OpenSSL symbol conflicts that occur when multiple plugins in the same DAW link different OpenSSL versions.
 
 ---
 
-## 📦 Standard Installation
-
-For desktop apps and games that aren't using UE or JUCE:
+## Installation
 
 ### CMake (FetchContent)
 
@@ -138,28 +127,29 @@ cmake --build build
 sudo cmake --install build
 ```
 
-**Dependencies:** nlohmann/json, cpp-httplib (with OpenSSL for HTTPS)
+### Dependencies
 
-> [!NOTE]
-> Cryptographic operations (Ed25519, SHA-256) use vendored libraries – no external crypto dependencies.
+- **nlohmann/json** – JSON parsing
+- **cpp-httplib** – HTTP client (with OpenSSL for HTTPS)
+
+Cryptographic operations (Ed25519, SHA-256) use vendored libraries with no external dependencies.
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
 ```cpp
 #include <licenseseat/licenseseat.hpp>
 
 int main()
 {
-    // 1. Configure
     licenseseat::Config config;
     config.api_key = "your-api-key";
     config.product_slug = "your-product";
 
     licenseseat::Client client(config);
 
-    // 2. Activate
+    // Activate
     auto result = client.activate("XXXX-XXXX-XXXX-XXXX");
 
     if (result.is_ok()) {
@@ -168,14 +158,9 @@ int main()
         std::cerr << "Error: " << result.error_message() << "\n";
     }
 
-    // 3. Check entitlements
-    if (client.has_entitlement("pro-features")) {
-        enable_pro_mode();
-    }
-
-    // 4. Quick status check
-    if (client.is_valid()) {
-        // License is active
+    // Check entitlements
+    if (client.has_entitlement("pro")) {
+        // Enable pro features
     }
 
     return 0;
@@ -184,7 +169,7 @@ int main()
 
 ---
 
-## 🔧 Configuration
+## Configuration
 
 ```cpp
 licenseseat::Config config;
@@ -194,57 +179,30 @@ config.api_key = "your-api-key";
 config.product_slug = "your-product";
 
 // Optional
-config.api_url = "https://licenseseat.com/api";  // Custom API URL
-config.timeout_seconds = 10;                      // Request timeout
-config.max_retries = 3;                           // Retry on failure
+config.api_url = "https://licenseseat.com/api";
+config.timeout_seconds = 30;
+config.max_retries = 3;
 
-// Offline Support
-config.offline_public_key = "base64-ed25519-key"; // For offline verification
-config.max_offline_days = 30;                      // Days license works offline
-```
-
-| Option               | Type   | Default                       | Description                        |
-| -------------------- | ------ | ----------------------------- | ---------------------------------- |
-| `api_key`            | string | *required*                    | Your LicenseSeat API key           |
-| `product_slug`       | string | *required*                    | Product identifier                 |
-| `api_url`            | string | `https://licenseseat.com/api` | API endpoint                       |
-| `timeout_seconds`    | int    | `30`                          | HTTP timeout                       |
-| `max_retries`        | int    | `3`                           | Retry attempts                     |
-| `offline_public_key` | string | `""`                          | Ed25519 public key for offline     |
-| `max_offline_days`   | int    | `0`                           | Max offline days (0 = online only) |
-
----
-
-## 🛡️ Offline License Verification
-
-> [!IMPORTANT]
-> Offline licenses use **Ed25519 cryptographic signatures** – the same algorithm used by SSH and cryptocurrency.
-
-```cpp
-licenseseat::Config config;
-config.api_key = "your-api-key";
-config.product_slug = "your-product";
-config.offline_public_key = "MCowBQYDK2VwAyEA...";  // Your Ed25519 public key
+// Offline support
+config.offline_public_key = "base64-ed25519-public-key";
 config.max_offline_days = 30;
-
-licenseseat::Client client(config);
-
-// Works even without internet!
-auto result = client.validate_offline("LICENSE-KEY");
-if (result.is_ok() && result.value().valid) {
-    // Signature verified, license is legit
-}
 ```
 
-**How it works:**
-1. Server signs license data with Ed25519 private key
-2. SDK verifies signature locally with public key
-3. No network required after initial activation
-4. Clock tampering detection prevents bypassing expiration
+### Configuration Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `api_key` | string | *required* | API key for authentication |
+| `product_slug` | string | *required* | Product identifier |
+| `api_url` | string | `https://licenseseat.com/api` | API endpoint |
+| `timeout_seconds` | int | `30` | HTTP request timeout |
+| `max_retries` | int | `3` | Retry attempts for failed requests |
+| `offline_public_key` | string | `""` | Ed25519 public key for offline verification |
+| `max_offline_days` | int | `0` | Maximum days license works offline (0 = disabled) |
 
 ---
 
-## 🎯 API Reference
+## API Reference
 
 ### Activation
 
@@ -280,24 +238,22 @@ if (result.is_ok()) {
 auto result = client.deactivate("LICENSE-KEY");
 
 if (result.is_ok()) {
-    std::cout << "Seat freed up\n";
+    std::cout << "License deactivated\n";
 }
 ```
 
 ### Entitlement Checks
 
 ```cpp
-// Quick check
+// Simple boolean check
 if (client.has_entitlement("pro")) {
     enable_pro_features();
 }
 
 // Detailed check
 auto result = client.check_entitlement("LICENSE-KEY", "pro");
-if (result.is_ok()) {
-    if (result.value().has_entitlement) {
-        // Feature unlocked
-    }
+if (result.is_ok() && result.value().has_entitlement) {
+    // Feature unlocked
 }
 ```
 
@@ -311,43 +267,130 @@ std::cout << "Licensee: " << status.licensee << "\n";
 std::cout << "Type: " << status.license_type << "\n";
 ```
 
----
-
-## 🧵 Thread Safety
-
-> [!TIP]
-> **Tested with 200 concurrent clients across 10 threads.** Race conditions? Not here.
+### Reset
 
 ```cpp
-// Safe from any thread
-std::thread validator([&client]() {
+client.reset();  // Clear all cached data
+```
+
+---
+
+## Offline Support
+
+The SDK supports offline license validation using Ed25519 cryptographic signatures.
+
+```cpp
+licenseseat::Config config;
+config.api_key = "your-api-key";
+config.product_slug = "your-product";
+config.offline_public_key = "MCowBQYDK2VwAyEA...";
+config.max_offline_days = 30;
+
+licenseseat::Client client(config);
+
+// Works without network after initial activation
+auto result = client.validate_offline("LICENSE-KEY");
+if (result.is_ok() && result.value().valid) {
+    // Signature verified locally
+}
+```
+
+How it works:
+1. Server signs license data with Ed25519 private key
+2. SDK verifies signature locally with public key
+3. No network required after initial activation
+4. Clock tampering detection prevents bypassing expiration
+
+---
+
+## Thread Safety
+
+All public methods are thread-safe. The SDK uses internal mutexes to protect shared state.
+
+```cpp
+// Safe from multiple threads
+std::thread t1([&client]() {
     client.validate("KEY");
 });
 
-std::thread checker([&client]() {
-    bool valid = client.is_valid();  // Reads std::atomic
+std::thread t2([&client]() {
+    bool valid = client.is_valid();
 });
+```
 
-// For JUCE audio plugins specifically:
-void processBlock(...) {
-    if (!license.isValid()) {  // std::atomic – lock-free!
-        return;
+For audio plugins, `isValid()` uses `std::atomic<bool>` for lock-free reads in real-time contexts.
+
+---
+
+## Error Handling
+
+The SDK uses a `Result<T, Error>` pattern instead of exceptions.
+
+```cpp
+auto result = client.activate("LICENSE-KEY");
+
+if (result.is_ok()) {
+    auto& activation = result.value();
+    // Success
+} else {
+    auto& error = result.error();
+    std::cerr << "Error: " << error.message << "\n";
+
+    switch (error.code) {
+        case ErrorCode::NetworkError:
+            // Network issue
+            break;
+        case ErrorCode::LicenseNotFound:
+            // Invalid key
+            break;
+        case ErrorCode::LicenseExpired:
+            // Expired
+            break;
+        case ErrorCode::SeatLimitExceeded:
+            // Too many activations
+            break;
     }
 }
 ```
 
-**Thread safety guarantees:**
-- ✅ All public methods are thread-safe
-- ✅ `is_valid()` / `isValid()` use `std::atomic` – safe for real-time audio
-- ✅ No global state – multiple instances don't interfere
-- ✅ RAII cleanup – no static destruction order issues
+### Error Codes
+
+| Code | Description |
+|------|-------------|
+| `NetworkError` | HTTP request failed |
+| `Timeout` | Request timed out |
+| `LicenseNotFound` | License key not found |
+| `LicenseExpired` | License has expired |
+| `LicenseInactive` | License is not active |
+| `SeatLimitExceeded` | Maximum activations reached |
+| `DeviceMismatch` | Device identifier mismatch |
+| `InvalidSignature` | Cryptographic verification failed |
+| `ClockTamper` | System clock manipulation detected |
+| `StorageError` | Failed to read/write cache |
 
 ---
 
-## 🧪 Testing
+## Platform Support
+
+| Platform | Compiler | Status |
+|----------|----------|--------|
+| Linux | GCC 9+, Clang 10+ | Supported |
+| macOS | Apple Clang 12+ (ARM & Intel) | Supported |
+| Windows | MSVC 2019+ | Supported |
+
+### Device Identification
+
+The SDK automatically generates a unique device identifier:
+
+- **macOS**: IOKit Platform UUID
+- **Windows**: Machine GUID from registry
+- **Linux**: `/etc/machine-id` or hostname-based fallback
+
+---
+
+## Testing
 
 ```bash
-# Build and run tests
 cmake -B build -DLICENSESEAT_BUILD_TESTS=ON
 cmake --build build
 ./build/tests/licenseseat_tests
@@ -358,90 +401,43 @@ cmake --build build
 [  PASSED  ] 208 tests.
 ```
 
-**Test coverage includes:**
+Test coverage includes:
 - RFC 8032 Ed25519 test vectors
 - Thread safety (200 concurrent clients)
-- Rapid create/destroy cycles (memory safety)
+- Rapid create/destroy cycles
 - Large data handling (10KB keys, 100KB metadata)
 - Platform-specific device ID generation
 - Offline license verification
-- Clock tampering detection
 
 ---
 
-## 🖥️ Platform Support
-
-| Platform | Compiler                      | Status         |
-| -------- | ----------------------------- | -------------- |
-| Linux    | GCC 9+, Clang 10+             | ✅ Full support |
-| macOS    | Apple Clang 12+ (ARM & Intel) | ✅ Full support |
-| Windows  | MSVC 2019+                    | ✅ Full support |
-
-**Device identification:**
-- **macOS:** IOKit Platform UUID
-- **Windows:** Machine GUID from registry
-- **Linux:** `/etc/machine-id` or hostname-based fallback
-
----
-
-## 📁 Project Structure
+## Project Structure
 
 ```
 licenseseat-cpp/
 ├── include/licenseseat/     # Public headers
-├── src/                     # Core implementation
+├── src/                     # Implementation
 ├── deps/                    # Vendored dependencies
-│   ├── ed25519/            # Ed25519 signatures (public domain)
-│   └── PicoSHA2/           # SHA-256 (header-only, MIT)
+│   ├── ed25519/            # Ed25519 signatures
+│   └── PicoSHA2/           # SHA-256 (header-only)
 ├── integrations/
-│   ├── unreal/             # 🎮 Unreal Engine plugin
-│   │   └── LicenseSeat/    # Drop into YourGame/Plugins/
-│   └── juce/               # 🎵 JUCE/VST integration
-│       └── Source/         # Single-header standalone
-├── tests/                   # 208 unit tests
+│   ├── unreal/             # Unreal Engine plugin
+│   └── juce/               # JUCE/VST integration
+├── tests/                   # Unit tests
 └── examples/               # Usage examples
 ```
 
 ---
 
-## 🔒 Security
-
-> [!WARNING]
-> **Never commit your API key to source control.** Use environment variables or secure vaults.
-
-```cpp
-// Good: Load from environment
-const char* api_key = std::getenv("LICENSESEAT_API_KEY");
-
-// Good: Load from secure storage
-std::string api_key = secure_vault.get("licenseseat_key");
-
-// Bad: Hardcoded in source
-config.api_key = "sk_live_abc123";  // Don't do this!
-```
-
-**Security features:**
-- Ed25519 signatures (128-bit security level)
-- SHA-256 hashing for data integrity
-- Clock tampering detection
-- Device fingerprinting
-
----
-
-## 📄 License
+## License
 
 MIT License – see [LICENSE](LICENSE) for details.
 
 ---
 
-## 🔗 Links
+## Links
 
-- **Website:** [licenseseat.com](https://licenseseat.com)
-- **Documentation:** [licenseseat.com/docs](https://licenseseat.com/docs)
-- **Issues:** [GitHub Issues](https://github.com/licenseseat/licenseseat-cpp/issues)
-
----
-
-<p align="center">
-  <b>Built with ❤️ for developers who ship</b>
-</p>
+- [LicenseSeat Website](https://licenseseat.com)
+- [Documentation](https://docs.licenseseat.com)
+- [API Reference](https://docs.licenseseat.com/api)
+- [GitHub Issues](https://github.com/licenseseat/licenseseat-cpp/issues)
