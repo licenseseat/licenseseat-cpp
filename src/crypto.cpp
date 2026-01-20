@@ -1,40 +1,82 @@
+/**
+ * @file crypto_minimal.cpp
+ * @brief Minimal crypto implementation without OpenSSL dependency
+ *
+ * Uses vendored libraries:
+ * - orlp/ed25519 for Ed25519 signature verification
+ * - PicoSHA2 for SHA-256 hashing
+ *
+ * This file is compiled when LICENSESEAT_USE_OPENSSL=OFF
+ */
+
+#ifndef LICENSESEAT_USE_OPENSSL
+
 #include "licenseseat/crypto.hpp"
 #include "licenseseat/json.hpp"
 
-#include <openssl/bio.h>
-#include <openssl/buffer.h>
-#include <openssl/err.h>
-#include <openssl/evp.h>
-#include <openssl/pem.h>
+// Vendored ed25519 library
+extern "C" {
+#include "ed25519/ed25519.h"
+}
+
+// Vendored PicoSHA2 library (header-only)
+#include "PicoSHA2/picosha2.h"
 
 #include <algorithm>
 #include <cstring>
-#include <memory>
 
 namespace licenseseat {
 namespace crypto {
 
 // ==================== Base64 Encoding/Decoding ====================
+// Pure C++ implementation without OpenSSL
+
+namespace {
+
+const char BASE64_CHARS[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+inline int base64_char_value(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+}  // namespace
 
 std::string base64_encode(const std::vector<uint8_t>& data) {
     if (data.empty()) {
         return "";
     }
 
-    // Create BIO chain for base64 encoding
-    std::unique_ptr<BIO, decltype(&BIO_free_all)> b64(BIO_new(BIO_f_base64()), BIO_free_all);
-    BIO_set_flags(b64.get(), BIO_FLAGS_BASE64_NO_NL);
+    std::string result;
+    result.reserve(((data.size() + 2) / 3) * 4);
 
-    BIO* bmem = BIO_new(BIO_s_mem());
-    BIO_push(b64.get(), bmem);
+    size_t i = 0;
+    while (i < data.size()) {
+        uint32_t octet_a = i < data.size() ? data[i++] : 0;
+        uint32_t octet_b = i < data.size() ? data[i++] : 0;
+        uint32_t octet_c = i < data.size() ? data[i++] : 0;
 
-    BIO_write(b64.get(), data.data(), static_cast<int>(data.size()));
-    (void)BIO_flush(b64.get());
+        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
 
-    BUF_MEM* bptr = nullptr;
-    BIO_get_mem_ptr(b64.get(), &bptr);
+        result += BASE64_CHARS[(triple >> 18) & 0x3F];
+        result += BASE64_CHARS[(triple >> 12) & 0x3F];
+        result += BASE64_CHARS[(triple >> 6) & 0x3F];
+        result += BASE64_CHARS[triple & 0x3F];
+    }
 
-    std::string result(bptr->data, bptr->length);
+    // Add padding
+    size_t mod = data.size() % 3;
+    if (mod == 1) {
+        result[result.size() - 1] = '=';
+        result[result.size() - 2] = '=';
+    } else if (mod == 2) {
+        result[result.size() - 1] = '=';
+    }
+
     return result;
 }
 
@@ -64,22 +106,35 @@ std::vector<uint8_t> base64_decode(const std::string& encoded) {
         padded += '=';
     }
 
-    // Create BIO chain for base64 decoding
-    std::unique_ptr<BIO, decltype(&BIO_free_all)> b64(BIO_new(BIO_f_base64()), BIO_free_all);
-    BIO_set_flags(b64.get(), BIO_FLAGS_BASE64_NO_NL);
+    std::vector<uint8_t> result;
+    result.reserve((padded.size() / 4) * 3);
 
-    std::unique_ptr<BIO, decltype(&BIO_free)> bmem(
-        BIO_new_mem_buf(padded.data(), static_cast<int>(padded.size())), BIO_free);
-    BIO_push(b64.get(), bmem.release());
+    size_t i = 0;
+    while (i < padded.size()) {
+        int sextet_a = padded[i] == '=' ? 0 : base64_char_value(static_cast<unsigned char>(padded[i]));
+        int sextet_b = padded[i + 1] == '=' ? 0 : base64_char_value(static_cast<unsigned char>(padded[i + 1]));
+        int sextet_c = padded[i + 2] == '=' ? 0 : base64_char_value(static_cast<unsigned char>(padded[i + 2]));
+        int sextet_d = padded[i + 3] == '=' ? 0 : base64_char_value(static_cast<unsigned char>(padded[i + 3]));
 
-    // Allocate buffer (base64 expands by ~4/3, so decoding shrinks by ~3/4)
-    std::vector<uint8_t> result(padded.size() * 3 / 4 + 1);
+        if (sextet_a < 0 || sextet_b < 0 || sextet_c < 0 || sextet_d < 0) {
+            // Invalid base64 character
+            return {};
+        }
 
-    int decoded_len = BIO_read(b64.get(), result.data(), static_cast<int>(result.size()));
-    if (decoded_len > 0) {
-        result.resize(static_cast<size_t>(decoded_len));
-    } else {
-        result.clear();
+        uint32_t triple = (static_cast<uint32_t>(sextet_a) << 18) +
+                          (static_cast<uint32_t>(sextet_b) << 12) +
+                          (static_cast<uint32_t>(sextet_c) << 6) +
+                          static_cast<uint32_t>(sextet_d);
+
+        result.push_back(static_cast<uint8_t>((triple >> 16) & 0xFF));
+        if (padded[i + 2] != '=') {
+            result.push_back(static_cast<uint8_t>((triple >> 8) & 0xFF));
+        }
+        if (padded[i + 3] != '=') {
+            result.push_back(static_cast<uint8_t>(triple & 0xFF));
+        }
+
+        i += 4;
     }
 
     return result;
@@ -103,60 +158,28 @@ Result<bool> verify_ed25519_signature(const std::string& message,
     std::vector<uint8_t> signature = base64url_decode(signature_b64);
     if (signature.size() != 64) {
         return Result<bool>::error(ErrorCode::InvalidSignature,
-                                   "Invalid signature length (expected 64 bytes)");
+                                   "Invalid signature length (expected 64 bytes, got " +
+                                       std::to_string(signature.size()) + ")");
     }
 
     // Decode public key (standard Base64)
     std::vector<uint8_t> public_key = base64_decode(public_key_b64);
     if (public_key.size() != 32) {
         return Result<bool>::error(ErrorCode::InvalidParameter,
-                                   "Invalid public key length (expected 32 bytes)");
+                                   "Invalid public key length (expected 32 bytes, got " +
+                                       std::to_string(public_key.size()) + ")");
     }
 
-    // Create EVP_PKEY from raw public key
-    std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)> pkey(
-        EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, public_key.data(), public_key.size()),
-        EVP_PKEY_free);
-
-    if (!pkey) {
-        unsigned long err = ERR_get_error();
-        char err_buf[256];
-        ERR_error_string_n(err, err_buf, sizeof(err_buf));
-        return Result<bool>::error(ErrorCode::InvalidParameter,
-                                   std::string("Failed to create public key: ") + err_buf);
-    }
-
-    // Create verification context
-    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> ctx(EVP_MD_CTX_new(), EVP_MD_CTX_free);
-
-    if (!ctx) {
-        return Result<bool>::error(ErrorCode::Unknown, "Failed to create verification context");
-    }
-
-    // Initialize verification
-    if (EVP_DigestVerifyInit(ctx.get(), nullptr, nullptr, nullptr, pkey.get()) != 1) {
-        unsigned long err = ERR_get_error();
-        char err_buf[256];
-        ERR_error_string_n(err, err_buf, sizeof(err_buf));
-        return Result<bool>::error(ErrorCode::Unknown,
-                                   std::string("Failed to initialize verification: ") + err_buf);
-    }
-
-    // Verify signature
-    int result = EVP_DigestVerify(ctx.get(), signature.data(), signature.size(),
-                                  reinterpret_cast<const unsigned char*>(message.data()),
-                                  message.size());
+    // Verify using orlp/ed25519
+    int result = ed25519_verify(signature.data(),
+                                reinterpret_cast<const unsigned char*>(message.data()),
+                                message.size(),
+                                public_key.data());
 
     if (result == 1) {
         return Result<bool>::ok(true);
-    } else if (result == 0) {
-        return Result<bool>::error(ErrorCode::InvalidSignature, "Signature verification failed");
     } else {
-        unsigned long err = ERR_get_error();
-        char err_buf[256];
-        ERR_error_string_n(err, err_buf, sizeof(err_buf));
-        return Result<bool>::error(ErrorCode::Unknown,
-                                   std::string("Verification error: ") + err_buf);
+        return Result<bool>::error(ErrorCode::InvalidSignature, "Signature verification failed");
     }
 }
 
@@ -184,4 +207,26 @@ Result<bool> verify_offline_license_signature(const OfflineLicense& offline_lice
 }
 
 }  // namespace crypto
+
+// ==================== SHA-256 for Device ID ====================
+// This is used by device.cpp for hashing the device identifier
+
+namespace device {
+namespace internal {
+
+std::string sha256_hex(const std::string& input) {
+    if (input.empty()) {
+        return "";
+    }
+
+    std::string hash_hex;
+    picosha2::hash256_hex_string(input, hash_hex);
+    return hash_hex;
+}
+
+}  // namespace internal
+}  // namespace device
+
 }  // namespace licenseseat
+
+#endif  // !LICENSESEAT_USE_OPENSSL

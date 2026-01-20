@@ -4,7 +4,7 @@ project(licenseseat
     VERSION 0.1.0
     DESCRIPTION "C++ SDK for LicenseSeat licensing API"
     HOMEPAGE_URL "https://github.com/licenseseat/licenseseat-cpp"
-    LANGUAGES CXX
+    LANGUAGES CXX C
 )
 
 # Require C++17
@@ -47,19 +47,36 @@ if(LICENSESEAT_ENABLE_CLANG_TIDY)
     endif()
 endif()
 
-# Find dependencies
-find_package(OpenSSL REQUIRED)
+# Find dependencies (JSON and HTTP only - crypto is vendored)
 find_package(nlohmann_json REQUIRED)
 find_package(httplib REQUIRED)
+find_package(OpenSSL REQUIRED)
 
-# Main library
-add_library(licenseseat
+# Vendored ed25519 sources
+set(ED25519_SOURCES
+    deps/ed25519/add_scalar.c
+    deps/ed25519/fe.c
+    deps/ed25519/ge.c
+    deps/ed25519/key_exchange.c
+    deps/ed25519/keypair.c
+    deps/ed25519/sc.c
+    deps/ed25519/seed.c
+    deps/ed25519/sha512.c
+    deps/ed25519/sign.c
+    deps/ed25519/verify.c
+)
+
+# Main library sources
+set(LICENSESEAT_SOURCES
     src/client.cpp
     src/http.cpp
-    src/crypto.cpp
     src/device.cpp
     src/storage.cpp
+    src/crypto.cpp
+    ${ED25519_SOURCES}
 )
+
+add_library(licenseseat ${LICENSESEAT_SOURCES})
 
 add_library(licenseseat::licenseseat ALIAS licenseseat)
 
@@ -67,17 +84,23 @@ target_include_directories(licenseseat
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/ed25519
 )
 
+# Compile definitions for HTTPS support via cpp-httplib
 target_compile_definitions(licenseseat
     PRIVATE
         CPPHTTPLIB_OPENSSL_SUPPORT
 )
 
+# Link libraries
 target_link_libraries(licenseseat
-    PRIVATE
+    PUBLIC
         OpenSSL::SSL
         OpenSSL::Crypto
+    PRIVATE
         nlohmann_json::nlohmann_json
         httplib::httplib
 )
@@ -169,4 +192,5 @@ message(STATUS "LicenseSeat C++ SDK ${PROJECT_VERSION}")
 message(STATUS "  Build tests:    ${LICENSESEAT_BUILD_TESTS}")
 message(STATUS "  Build examples: ${LICENSESEAT_BUILD_EXAMPLES}")
 message(STATUS "  clang-tidy:     ${LICENSESEAT_ENABLE_CLANG_TIDY}")
+message(STATUS "  Crypto:         Vendored (ed25519 + PicoSHA2)")
 message(STATUS "")

@@ -22,7 +22,23 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(curl:*)",
+      "Bash(tar:*)",
+      "Bash(wget:*)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "WebFetch(domain:dev.epicgames.com)",
+      "Bash(gh pr view:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh api repos/licenseseat/licenseseat-cpp/actions/runs/21177934597/jobs)",
+      "Bash(xargs -I {} gh api repos/licenseseat/licenseseat-cpp/actions/jobs/{}/logs)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:docs.juce.com)",
+      "WebFetch(domain:forum.juce.com)",
+      "Bash(gh pr checks:*)"
     ]
   }
 }

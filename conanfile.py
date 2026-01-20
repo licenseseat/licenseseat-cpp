@@ -69,4 +69,5 @@ class LicenseSeatConan(ConanFile):
         self.cpp_info.libs = ["licenseseat"]
         self.cpp_info.set_property("cmake_file_name", "licenseseat")
         self.cpp_info.set_property("cmake_target_name", "licenseseat::licenseseat")
-        self.cpp_info.requires = ["openssl::openssl", "nlohmann_json::nlohmann_json", "cpp-httplib::cpp-httplib"]
+        # Note: OpenSSL is used by cpp-httplib for HTTPS, not by licenseseat directly
+        self.cpp_info.requires = ["nlohmann_json::nlohmann_json", "cpp-httplib::cpp-httplib"]

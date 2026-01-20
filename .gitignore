@@ -3,8 +3,13 @@
 
 # Build directories
 build/
+build_*/
 cmake-build-*/
 out/
+.cache/
+
+# Generated distribution (build with scripts/amalgamate.py)
+dist/
 
 # IDE
 .idea/

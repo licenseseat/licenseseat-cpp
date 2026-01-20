@@ -1,0 +1,29 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "0.1.0",
+    "FriendlyName": "LicenseSeat",
+    "Description": "License management SDK for games and applications. Validate licenses, manage activations, and handle offline scenarios.",
+    "Category": "Licensing",
+    "CreatedBy": "LicenseSeat",
+    "CreatedByURL": "https://licenseseat.com",
+    "DocsURL": "https://licenseseat.com/docs/sdks/cpp",
+    "MarketplaceURL": "",
+    "SupportURL": "https://github.com/licenseseat/licenseseat-cpp/issues",
+    "CanContainContent": false,
+    "IsBetaVersion": true,
+    "IsExperimentalVersion": false,
+    "Installed": false,
+    "Modules": [
+        {
+            "Name": "LicenseSeat",
+            "Type": "Runtime",
+            "LoadingPhase": "Default",
+            "PlatformAllowList": [
+                "Win64",
+                "Mac",
+                "Linux"
+            ]
+        }
+    ]
+}

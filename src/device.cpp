@@ -1,8 +1,5 @@
 #include "licenseseat/device.hpp"
 
-#include <openssl/evp.h>
-#include <openssl/sha.h>
-
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -31,46 +28,15 @@
 namespace licenseseat {
 namespace device {
 
+// Internal namespace for sha256_hex - implementation in crypto.cpp using PicoSHA2
+namespace internal {
+
+// Forward declaration - implementation in crypto.cpp
+std::string sha256_hex(const std::string& input);
+
+}  // namespace internal
+
 namespace {
-
-// Hash a string using SHA-256 and return hex string
-std::string sha256_hex(const std::string& input) {
-    if (input.empty()) {
-        return "";
-    }
-
-    unsigned char hash[SHA256_DIGEST_LENGTH];
-    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
-
-    if (ctx == nullptr) {
-        return "";
-    }
-
-    if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1) {
-        EVP_MD_CTX_free(ctx);
-        return "";
-    }
-
-    if (EVP_DigestUpdate(ctx, input.c_str(), input.length()) != 1) {
-        EVP_MD_CTX_free(ctx);
-        return "";
-    }
-
-    unsigned int len = 0;
-    if (EVP_DigestFinal_ex(ctx, hash, &len) != 1) {
-        EVP_MD_CTX_free(ctx);
-        return "";
-    }
-
-    EVP_MD_CTX_free(ctx);
-
-    std::ostringstream ss;
-    for (unsigned int i = 0; i < len; i++) {
-        ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(hash[i]);
-    }
-
-    return ss.str();
-}
 
 #if defined(LICENSESEAT_PLATFORM_MACOS)
 
@@ -188,7 +154,7 @@ std::string generate_device_id() {
     }
 
     // Hash the raw ID for privacy and consistent format
-    std::string hash = sha256_hex(raw_id);
+    std::string hash = internal::sha256_hex(raw_id);
 
     // Return first 32 chars (128 bits) for a reasonable identifier length
     if (hash.length() > 32) {
