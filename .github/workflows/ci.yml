@@ -75,8 +75,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-13, macos-14]
-        # macos-13 is x86_64, macos-14 is arm64
+        os: [macos-15-intel, macos-15]
+        # macos-15-intel is x86_64, macos-15 is arm64
 
     steps:
       - name: Checkout
