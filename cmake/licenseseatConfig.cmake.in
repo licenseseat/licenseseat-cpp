@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(OpenSSL REQUIRED)
+
+include("${CMAKE_CURRENT_LIST_DIR}/licenseseatTargets.cmake")
+
+check_required_components(licenseseat)

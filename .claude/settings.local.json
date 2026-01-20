@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(clang++:*)",
+      "Bash(g++:*)",
+      "Bash(cmake:*)",
+      "Bash(brew --version:*)",
+      "Bash(vcpkg version:*)",
+      "Bash(conan:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(ninja:*)",
+      "Bash(ctest:*)",
+      "Bash(/opt/homebrew/opt/llvm/bin/clang-tidy:*)",
+      "Bash(/opt/homebrew/opt/llvm/bin/clang-format:*)",
+      "Bash(echo:*)",
+      "Bash(cpack:*)",
+      "Bash(ls:*)",
+      "Bash(./tests/licenseseat_tests:*)",
+      "Bash(./build/tests/licenseseat_tests:*)",
+      "Bash(./build/examples/basic_usage)"
+    ]
+  }
+}

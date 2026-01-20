@@ -1,0 +1,869 @@
+#pragma once
+
+/**
+ * @file licenseseat.hpp
+ * @brief LicenseSeat C++ SDK
+ *
+ * A minimal-dependency C++ SDK for the LicenseSeat licensing API.
+ * Designed for constrained environments like VST plugins, game engines, etc.
+ */
+
+#include <any>
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace licenseseat {
+
+/// Library version
+constexpr const char* VERSION = "0.1.0";
+
+/// Metadata type used throughout the SDK
+using Metadata = std::map<std::string, std::string>;
+
+/// Error codes returned by SDK operations (matches API reason_codes)
+enum class ErrorCode {
+    Success = 0,
+
+    // Network errors
+    NetworkError,
+    ConnectionTimeout,
+    SSLError,
+
+    // License errors
+    InvalidLicenseKey,
+    LicenseNotFound,
+    LicenseExpired,
+    LicenseRevoked,
+    LicenseSuspended,
+    LicenseNotActive,
+    LicenseNotStarted,
+
+    // Activation errors
+    SeatLimitExceeded,
+    ActivationNotFound,
+    DeviceAlreadyActivated,
+
+    // Product errors
+    ProductNotFound,
+    ReleaseNotFound,
+
+    // Authentication/Authorization
+    AuthenticationFailed,
+    PermissionDenied,
+
+    // Request errors
+    MissingParameter,
+    InvalidParameter,
+    ValidationFailed,
+
+    // Server errors
+    ServerError,
+    FeatureNotConfigured,
+    SigningNotConfigured,
+
+    // Parse errors
+    ParseError,
+    InvalidSignature,
+
+    // File errors
+    FileError,
+    FileNotFound,
+
+    Unknown
+};
+
+/// Convert error code to string
+[[nodiscard]] constexpr const char* error_code_to_string(ErrorCode code) noexcept {
+    switch (code) {
+        case ErrorCode::Success:
+            return "Success";
+        case ErrorCode::NetworkError:
+            return "Network error";
+        case ErrorCode::ConnectionTimeout:
+            return "Connection timeout";
+        case ErrorCode::SSLError:
+            return "SSL/TLS error";
+        case ErrorCode::InvalidLicenseKey:
+            return "Invalid license key";
+        case ErrorCode::LicenseNotFound:
+            return "License not found";
+        case ErrorCode::LicenseExpired:
+            return "License expired";
+        case ErrorCode::LicenseRevoked:
+            return "License revoked";
+        case ErrorCode::LicenseSuspended:
+            return "License suspended";
+        case ErrorCode::LicenseNotActive:
+            return "License not active";
+        case ErrorCode::LicenseNotStarted:
+            return "License has not started yet";
+        case ErrorCode::SeatLimitExceeded:
+            return "Seat limit exceeded";
+        case ErrorCode::ActivationNotFound:
+            return "Activation not found";
+        case ErrorCode::DeviceAlreadyActivated:
+            return "Device already activated";
+        case ErrorCode::ProductNotFound:
+            return "Product not found";
+        case ErrorCode::ReleaseNotFound:
+            return "Release not found";
+        case ErrorCode::AuthenticationFailed:
+            return "Authentication failed";
+        case ErrorCode::PermissionDenied:
+            return "Permission denied";
+        case ErrorCode::MissingParameter:
+            return "Missing required parameter";
+        case ErrorCode::InvalidParameter:
+            return "Invalid parameter";
+        case ErrorCode::ValidationFailed:
+            return "Validation failed";
+        case ErrorCode::ServerError:
+            return "Server error";
+        case ErrorCode::FeatureNotConfigured:
+            return "Feature not configured";
+        case ErrorCode::SigningNotConfigured:
+            return "Signing not configured";
+        case ErrorCode::ParseError:
+            return "Parse error";
+        case ErrorCode::InvalidSignature:
+            return "Invalid signature";
+        case ErrorCode::FileError:
+            return "File error";
+        case ErrorCode::FileNotFound:
+            return "File not found";
+        case ErrorCode::Unknown:
+            return "Unknown error";
+    }
+    return "Unknown error";
+}
+
+/// License status as returned by the API
+enum class LicenseStatus {
+    Active,
+    Expired,
+    Revoked,
+    Suspended,
+    Pending,  // Not yet started
+    Unknown
+};
+
+/// Convert license status to string
+[[nodiscard]] constexpr const char* license_status_to_string(LicenseStatus status) noexcept {
+    switch (status) {
+        case LicenseStatus::Active:
+            return "active";
+        case LicenseStatus::Expired:
+            return "expired";
+        case LicenseStatus::Revoked:
+            return "revoked";
+        case LicenseStatus::Suspended:
+            return "suspended";
+        case LicenseStatus::Pending:
+            return "pending";
+        case LicenseStatus::Unknown:
+            return "unknown";
+    }
+    return "unknown";
+}
+
+/// Parse license status from API string
+[[nodiscard]] inline LicenseStatus license_status_from_string(const std::string& str) noexcept {
+    if (str == "active")
+        return LicenseStatus::Active;
+    if (str == "expired")
+        return LicenseStatus::Expired;
+    if (str == "revoked")
+        return LicenseStatus::Revoked;
+    if (str == "suspended")
+        return LicenseStatus::Suspended;
+    if (str == "pending")
+        return LicenseStatus::Pending;
+    return LicenseStatus::Unknown;
+}
+
+/// License mode (how the license is enforced)
+enum class LicenseMode {
+    HardwareLocked,  // Tied to specific devices
+    Floating,        // Concurrent usage limited
+    Named,           // Tied to named users
+    Unknown
+};
+
+/// Convert license mode to string
+[[nodiscard]] constexpr const char* license_mode_to_string(LicenseMode mode) noexcept {
+    switch (mode) {
+        case LicenseMode::HardwareLocked:
+            return "hardware_locked";
+        case LicenseMode::Floating:
+            return "floating";
+        case LicenseMode::Named:
+            return "named";
+        case LicenseMode::Unknown:
+            return "unknown";
+    }
+    return "unknown";
+}
+
+/// Parse license mode from API string
+[[nodiscard]] inline LicenseMode license_mode_from_string(const std::string& str) noexcept {
+    if (str == "hardware_locked")
+        return LicenseMode::HardwareLocked;
+    if (str == "floating")
+        return LicenseMode::Floating;
+    if (str == "named")
+        return LicenseMode::Named;
+    return LicenseMode::Unknown;
+}
+
+/**
+ * @brief Result type for operations that can fail
+ * @tparam T The success value type
+ */
+template <typename T> class Result {
+  public:
+    /// Construct a success result
+    static Result ok(T value) {
+        Result r;
+        r.value_ = std::move(value);
+        r.error_ = ErrorCode::Success;
+        return r;
+    }
+
+    /// Construct an error result
+    static Result error(ErrorCode code, std::string message = "") {
+        Result r;
+        r.error_ = code;
+        r.error_message_ = std::move(message);
+        return r;
+    }
+
+    /// Check if the result is successful
+    [[nodiscard]] bool is_ok() const noexcept { return error_ == ErrorCode::Success; }
+
+    /// Check if the result is an error
+    [[nodiscard]] bool is_error() const noexcept { return error_ != ErrorCode::Success; }
+
+    /// Get the value (undefined behavior if is_error())
+    [[nodiscard]] const T& value() const& { return *value_; }
+    [[nodiscard]] T& value() & { return *value_; }
+    [[nodiscard]] T&& value() && { return std::move(*value_); }
+
+    /// Get the error code
+    [[nodiscard]] ErrorCode error_code() const noexcept { return error_; }
+
+    /// Get the error message
+    [[nodiscard]] const std::string& error_message() const noexcept { return error_message_; }
+
+  private:
+    Result() = default;
+    std::optional<T> value_;
+    ErrorCode error_ = ErrorCode::Unknown;
+    std::string error_message_;
+};
+
+/// Specialization for void results
+template <> class Result<void> {
+  public:
+    static Result ok() {
+        Result r;
+        r.error_ = ErrorCode::Success;
+        return r;
+    }
+
+    static Result error(ErrorCode code, std::string message = "") {
+        Result r;
+        r.error_ = code;
+        r.error_message_ = std::move(message);
+        return r;
+    }
+
+    [[nodiscard]] bool is_ok() const noexcept { return error_ == ErrorCode::Success; }
+    [[nodiscard]] bool is_error() const noexcept { return error_ != ErrorCode::Success; }
+    [[nodiscard]] ErrorCode error_code() const noexcept { return error_; }
+    [[nodiscard]] const std::string& error_message() const noexcept { return error_message_; }
+
+  private:
+    Result() = default;
+    ErrorCode error_ = ErrorCode::Unknown;
+    std::string error_message_;
+};
+
+/// Timestamp type used throughout the SDK
+using Timestamp = std::chrono::system_clock::time_point;
+
+/**
+ * @brief Represents a software license from the API
+ *
+ * Contains all license information as returned by the LicenseSeat API,
+ * including status, dates, seat limits, and metadata.
+ */
+class License {
+  public:
+    License() = default;
+
+    /// Full constructor with all fields
+    License(std::string key, LicenseStatus status, LicenseMode mode, std::string plan_key,
+            int seat_limit, int active_activations_count, std::optional<Timestamp> starts_at,
+            std::optional<Timestamp> ends_at, Metadata metadata)
+        : key_(std::move(key)),
+          status_(status),
+          mode_(mode),
+          plan_key_(std::move(plan_key)),
+          seat_limit_(seat_limit),
+          active_activations_count_(active_activations_count),
+          starts_at_(starts_at),
+          ends_at_(ends_at),
+          metadata_(std::move(metadata)) {}
+
+    /// Get the license key
+    [[nodiscard]] const std::string& key() const noexcept { return key_; }
+
+    /// Get the license status
+    [[nodiscard]] LicenseStatus status() const noexcept { return status_; }
+
+    /// Get the license mode
+    [[nodiscard]] LicenseMode mode() const noexcept { return mode_; }
+
+    /// Get the plan key (e.g., "pro-annual", "starter-monthly")
+    [[nodiscard]] const std::string& plan_key() const noexcept { return plan_key_; }
+
+    /// Get the maximum number of concurrent activations allowed
+    [[nodiscard]] int seat_limit() const noexcept { return seat_limit_; }
+
+    /// Get the current number of active activations
+    [[nodiscard]] int active_activations_count() const noexcept { return active_activations_count_; }
+
+    /// Get the license start date (when it becomes valid)
+    [[nodiscard]] const std::optional<Timestamp>& starts_at() const noexcept { return starts_at_; }
+
+    /// Get the license expiry date
+    [[nodiscard]] const std::optional<Timestamp>& ends_at() const noexcept { return ends_at_; }
+
+    /// Get custom metadata associated with the license
+    [[nodiscard]] const Metadata& metadata() const noexcept { return metadata_; }
+
+    /// Check if the license is currently valid (active and not expired)
+    [[nodiscard]] bool is_valid() const noexcept {
+        if (status_ != LicenseStatus::Active) {
+            return false;
+        }
+        auto now = std::chrono::system_clock::now();
+        if (starts_at_.has_value() && now < *starts_at_) {
+            return false;
+        }
+        if (ends_at_.has_value() && now > *ends_at_) {
+            return false;
+        }
+        return true;
+    }
+
+    /// Check if the license has expired
+    [[nodiscard]] bool is_expired() const noexcept {
+        if (!ends_at_.has_value()) {
+            return false;
+        }
+        return std::chrono::system_clock::now() > *ends_at_;
+    }
+
+    /// Check if the license has started (is past its start date)
+    [[nodiscard]] bool has_started() const noexcept {
+        if (!starts_at_.has_value()) {
+            return true;
+        }
+        return std::chrono::system_clock::now() >= *starts_at_;
+    }
+
+    /// Check if there are seats available for activation
+    [[nodiscard]] bool has_available_seats() const noexcept {
+        if (seat_limit_ <= 0) {
+            return true;  // Unlimited seats
+        }
+        return active_activations_count_ < seat_limit_;
+    }
+
+    /// Get remaining seat count (-1 if unlimited)
+    [[nodiscard]] int remaining_seats() const noexcept {
+        if (seat_limit_ <= 0) {
+            return -1;  // Unlimited
+        }
+        return seat_limit_ - active_activations_count_;
+    }
+
+  private:
+    std::string key_;
+    LicenseStatus status_ = LicenseStatus::Unknown;
+    LicenseMode mode_ = LicenseMode::Unknown;
+    std::string plan_key_;
+    int seat_limit_ = 0;
+    int active_activations_count_ = 0;
+    std::optional<Timestamp> starts_at_;
+    std::optional<Timestamp> ends_at_;
+    Metadata metadata_;
+};
+
+/**
+ * @brief Represents a device activation
+ *
+ * Contains information about a specific device activation for a license.
+ */
+class Activation {
+  public:
+    Activation() = default;
+
+    Activation(int64_t id, std::string device_identifier, std::string license_key,
+               Timestamp activated_at, std::optional<Timestamp> deactivated_at,
+               std::string ip_address, Metadata metadata)
+        : id_(id),
+          device_identifier_(std::move(device_identifier)),
+          license_key_(std::move(license_key)),
+          activated_at_(activated_at),
+          deactivated_at_(deactivated_at),
+          ip_address_(std::move(ip_address)),
+          metadata_(std::move(metadata)) {}
+
+    /// Get the activation ID
+    [[nodiscard]] int64_t id() const noexcept { return id_; }
+
+    /// Get the device identifier
+    [[nodiscard]] const std::string& device_identifier() const noexcept {
+        return device_identifier_;
+    }
+
+    /// Get the associated license key
+    [[nodiscard]] const std::string& license_key() const noexcept { return license_key_; }
+
+    /// Get the activation timestamp
+    [[nodiscard]] const Timestamp& activated_at() const noexcept { return activated_at_; }
+
+    /// Get the deactivation timestamp (if deactivated)
+    [[nodiscard]] const std::optional<Timestamp>& deactivated_at() const noexcept {
+        return deactivated_at_;
+    }
+
+    /// Get the IP address used during activation
+    [[nodiscard]] const std::string& ip_address() const noexcept { return ip_address_; }
+
+    /// Get custom metadata
+    [[nodiscard]] const Metadata& metadata() const noexcept { return metadata_; }
+
+    /// Check if this activation is currently active
+    [[nodiscard]] bool is_active() const noexcept { return !deactivated_at_.has_value(); }
+
+  private:
+    int64_t id_ = 0;
+    std::string device_identifier_;
+    std::string license_key_;
+    Timestamp activated_at_;
+    std::optional<Timestamp> deactivated_at_;
+    std::string ip_address_;
+    Metadata metadata_;
+};
+
+/**
+ * @brief Represents an entitlement in an offline license
+ */
+struct Entitlement {
+    std::string key;                      // Feature/entitlement key (e.g., "updates")
+    std::optional<std::string> name;      // Human-readable name
+    std::optional<std::string> description;
+    std::optional<Timestamp> expires;     // Optional per-entitlement expiry
+    Metadata metadata;                    // Per-entitlement metadata
+};
+
+/**
+ * @brief Represents an offline license payload with its signature
+ *
+ * Used for air-gapped or offline license validation. The payload is signed
+ * with Ed25519 and can be verified without contacting the server.
+ */
+struct OfflineLicense {
+    // Payload fields (matches API response)
+    std::string license_key;            // lic_k
+    std::string product_slug;           // prod_s
+    std::string plan_key;               // plan_k
+    std::string key_id;                 // kid - identifies which public key to use
+    int seat_limit = 0;                 // sl
+    int64_t issued_at = 0;              // iat - Unix timestamp
+    int64_t expires_at = 0;             // exp_at - Unix timestamp
+    std::vector<Entitlement> entitlements;  // active_ents
+    Metadata metadata;                  // meta
+
+    // Signature
+    std::string signature_b64u;         // Base64URL-encoded Ed25519 signature
+
+    /// Check if the offline license has expired
+    [[nodiscard]] bool is_expired() const noexcept {
+        auto now = std::chrono::system_clock::now();
+        auto exp_time = std::chrono::system_clock::from_time_t(expires_at);
+        return now > exp_time;
+    }
+
+    /// Check if a specific entitlement is present and not expired
+    [[nodiscard]] bool has_entitlement(const std::string& entitlement_key) const noexcept {
+        auto now = std::chrono::system_clock::now();
+        for (const auto& ent : entitlements) {
+            if (ent.key == entitlement_key) {
+                if (!ent.expires.has_value()) {
+                    return true;
+                }
+                return now <= *ent.expires;
+            }
+        }
+        return false;
+    }
+};
+
+/**
+ * @brief Represents a software release
+ */
+struct Release {
+    std::string version;
+    std::string channel;        // stable, beta, alpha
+    std::string platform;       // macos, windows, linux
+    std::string product_slug;
+    std::optional<Timestamp> published_at;
+};
+
+/**
+ * @brief Download token for gated releases
+ */
+struct DownloadToken {
+    std::string token;
+    int expires_in_seconds = 0;
+};
+
+/**
+ * @brief Offline fallback mode for network failures
+ */
+enum class OfflineFallbackMode {
+    Always,      // Always try offline fallback on any error
+    NetworkOnly  // Only fallback on network/transport errors
+};
+
+/**
+ * @brief Configuration for the LicenseSeat client
+ */
+struct Config {
+    /// API key for authentication (required)
+    std::string api_key;
+
+    /// Base URL for the LicenseSeat API
+    std::string api_url = "https://licenseseat.com/api";
+
+    /// Product slug to validate licenses against
+    std::string product_slug;
+
+    /// Device identifier (auto-generated if empty)
+    std::string device_identifier;
+
+    /// Path for license cache storage (required for persistence)
+    std::string storage_path;
+
+    /// Storage prefix for file names
+    std::string storage_prefix = "licenseseat";
+
+    /// Ed25519 public key for offline license verification (base64-encoded)
+    /// If not provided, will be fetched from API on first use
+    std::string offline_public_key;
+
+    /// Key ID for the offline public key
+    std::string offline_key_id;
+
+    /// HTTP request timeout in seconds
+    int timeout_seconds = 30;
+
+    /// Enable SSL certificate verification (disable only for testing!)
+    bool verify_ssl = true;
+
+    /// Number of retry attempts for failed requests
+    int max_retries = 3;
+
+    /// Interval between retries in milliseconds
+    int retry_interval_ms = 1000;
+
+    // ========== Auto-Validation Settings ==========
+
+    /// Interval for automatic re-validation in seconds (0 to disable)
+    double auto_validate_interval = 300.0;  // 5 minutes
+
+    /// Interval for network status checks when offline (seconds)
+    double network_recheck_interval = 30.0;
+
+    // ========== Offline Fallback Settings ==========
+
+    /// Offline fallback mode
+    OfflineFallbackMode offline_fallback_mode = OfflineFallbackMode::NetworkOnly;
+
+    /// Maximum days to allow offline operation (0 = unlimited)
+    int max_offline_days = 30;
+
+    /// Maximum clock skew allowed in milliseconds (for tamper detection)
+    double max_clock_skew_ms = 86400000.0;  // 24 hours
+
+    /// Interval for refreshing offline license (seconds)
+    double offline_license_refresh_interval = 86400.0;  // 24 hours
+
+    // ========== Debug Settings ==========
+
+    /// Enable debug logging
+    bool debug = false;
+};
+
+/**
+ * @brief Validation response from the API
+ */
+struct ValidationResult {
+    bool valid = false;
+    std::string reason;            // Human-readable reason for invalid
+    std::string reason_code;       // Machine-readable reason code
+    bool offline = false;          // Whether this was an offline validation
+    bool optimistic = false;       // Whether this is an optimistic result
+    License license;
+    std::vector<Entitlement> active_entitlements;
+};
+
+// Forward declarations for callback types
+class Subscription;
+using EventHandler = std::function<void(const std::any&)>;
+using AsyncCallback = std::function<void(Result<ValidationResult>)>;
+using ActivationCallback = std::function<void(Result<Activation>)>;
+using OfflineCallback = std::function<void(Result<OfflineLicense>)>;
+
+/**
+ * @brief Entitlement check result
+ */
+struct EntitlementStatus {
+    bool active = false;
+    std::string reason;  // "no_license", "not_found", "expired", etc.
+    std::optional<Timestamp> expires_at;
+    std::optional<Entitlement> entitlement;
+};
+
+/**
+ * @brief Main client for interacting with the LicenseSeat API
+ *
+ * The Client class provides a high-level interface to the LicenseSeat API.
+ * It handles HTTP communication, JSON parsing, caching, auto-validation,
+ * and offline fallback internally.
+ *
+ * Thread Safety: All public methods are thread-safe.
+ *
+ * ## Event-Driven Architecture
+ *
+ * Subscribe to SDK events for reactive updates:
+ * ```cpp
+ * client.on("validation:success", [](const auto& data) {
+ *     std::cout << "License validated!" << std::endl;
+ * });
+ * ```
+ *
+ * ## Auto-Validation
+ *
+ * The SDK automatically revalidates licenses periodically. Configure with:
+ * ```cpp
+ * config.auto_validate_interval = 300.0; // 5 minutes
+ * ```
+ *
+ * ## Offline Fallback
+ *
+ * When network is unavailable, the SDK automatically falls back to
+ * cached offline license verification (Ed25519 signature).
+ */
+class Client {
+  public:
+    /// Construct a client with the given configuration
+    explicit Client(Config config);
+
+    /// Destructor
+    ~Client();
+
+    // Non-copyable
+    Client(const Client&) = delete;
+    Client& operator=(const Client&) = delete;
+
+    // Movable
+    Client(Client&&) noexcept;
+    Client& operator=(Client&&) noexcept;
+
+    // ========== Synchronous API ==========
+
+    /// Validate a license key
+    /// @param license_key The license key to validate
+    /// @param device_identifier Optional device ID (uses config if empty)
+    [[nodiscard]] Result<ValidationResult> validate(
+        const std::string& license_key,
+        const std::string& device_identifier = "");
+
+    /// Activate a license on this device
+    /// @param license_key The license key to activate
+    /// @param device_identifier Optional device ID (uses config if empty)
+    /// @param metadata Optional metadata to attach to the activation
+    [[nodiscard]] Result<Activation> activate(
+        const std::string& license_key,
+        const std::string& device_identifier = "",
+        const Metadata& metadata = {});
+
+    /// Deactivate a license on this device
+    /// @param license_key The license key to deactivate
+    /// @param device_identifier Optional device ID (uses config if empty)
+    [[nodiscard]] Result<Activation> deactivate(
+        const std::string& license_key,
+        const std::string& device_identifier = "");
+
+    // ========== Asynchronous API ==========
+
+    /// Validate a license key asynchronously
+    /// @param license_key The license key to validate
+    /// @param callback Called when validation completes
+    /// @param device_identifier Optional device ID (uses config if empty)
+    void validate_async(
+        const std::string& license_key,
+        AsyncCallback callback,
+        const std::string& device_identifier = "");
+
+    /// Activate a license asynchronously
+    /// @param license_key The license key to activate
+    /// @param callback Called when activation completes
+    /// @param device_identifier Optional device ID (uses config if empty)
+    /// @param metadata Optional metadata to attach to the activation
+    void activate_async(
+        const std::string& license_key,
+        ActivationCallback callback,
+        const std::string& device_identifier = "",
+        const Metadata& metadata = {});
+
+    /// Deactivate a license asynchronously
+    /// @param license_key The license key to deactivate
+    /// @param callback Called when deactivation completes
+    /// @param device_identifier Optional device ID (uses config if empty)
+    void deactivate_async(
+        const std::string& license_key,
+        ActivationCallback callback,
+        const std::string& device_identifier = "");
+
+    // ========== Offline Licensing ==========
+
+    /// Generate an offline license file from the server
+    /// @param license_key The license key to generate offline license for
+    [[nodiscard]] Result<OfflineLicense> generate_offline_license(const std::string& license_key);
+
+    /// Verify an offline license locally (no network required)
+    /// @param offline_license The offline license to verify
+    /// @param public_key_b64 Base64-encoded Ed25519 public key (uses config if empty)
+    [[nodiscard]] Result<bool> verify_offline_license(
+        const OfflineLicense& offline_license,
+        const std::string& public_key_b64 = "");
+
+    /// Fetch the public key for offline verification from the API
+    /// @param key_id The key ID to fetch
+    [[nodiscard]] Result<std::string> fetch_public_key(const std::string& key_id);
+
+    /// Sync offline assets (fetch offline license and public key)
+    void sync_offline_assets();
+
+    // ========== Auto-Validation ==========
+
+    /// Start automatic license validation
+    /// @param license_key The license key to validate periodically
+    void start_auto_validation(const std::string& license_key);
+
+    /// Stop automatic license validation
+    void stop_auto_validation();
+
+    /// Check if auto-validation is running
+    [[nodiscard]] bool is_auto_validating() const;
+
+    // ========== Status & State ==========
+
+    /// Get the current license status based on cached data
+    [[nodiscard]] ValidationResult get_status() const;
+
+    /// Get the currently cached license (if any)
+    [[nodiscard]] std::optional<License> current_license() const;
+
+    /// Check if a specific entitlement is active
+    /// @param entitlement_key The entitlement key to check
+    [[nodiscard]] EntitlementStatus check_entitlement(const std::string& entitlement_key) const;
+
+    /// Check if the client is online (network available)
+    [[nodiscard]] bool is_online() const;
+
+    // ========== Event Handling ==========
+
+    /// Subscribe to SDK events
+    /// @param event Event name (e.g., "validation:success")
+    /// @param handler Callback function
+    /// @return Subscription handle (call cancel() to unsubscribe)
+    Subscription on(const std::string& event, EventHandler handler);
+
+    /// Emit an event (for testing/integration)
+    void emit(const std::string& event, const std::any& data = {});
+
+    // ========== Releases ==========
+
+    /// Get the latest release for a product
+    [[nodiscard]] Result<Release> get_latest_release(
+        const std::string& product_slug,
+        const std::string& channel = "",
+        const std::string& platform = "");
+
+    /// List all releases for a product
+    [[nodiscard]] Result<std::vector<Release>> list_releases(
+        const std::string& product_slug,
+        const std::string& channel = "",
+        const std::string& platform = "");
+
+    /// Generate a download token for a release
+    [[nodiscard]] Result<DownloadToken> generate_download_token(
+        int release_id,
+        const std::string& license_key);
+
+    // ========== Health & Utility ==========
+
+    /// Check if the API is available
+    [[nodiscard]] Result<bool> heartbeat();
+
+    /// Reset SDK state (clear cache, stop timers)
+    void reset();
+
+    /// Get the current configuration
+    [[nodiscard]] const Config& config() const noexcept;
+
+    /// Get the device identifier (auto-generated if not in config)
+    [[nodiscard]] const std::string& device_identifier() const;
+
+  private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+/**
+ * @brief Subscription handle for event unsubscription
+ */
+class Subscription {
+  public:
+    Subscription() = default;
+    explicit Subscription(std::function<void()> unsubscribe) : unsubscribe_(std::move(unsubscribe)) {}
+
+    /// Cancel this subscription
+    void cancel() {
+        if (unsubscribe_) {
+            unsubscribe_();
+            unsubscribe_ = nullptr;
+        }
+    }
+
+    /// Check if subscription is active
+    [[nodiscard]] bool is_active() const { return unsubscribe_ != nullptr; }
+
+  private:
+    std::function<void()> unsubscribe_;
+};
+
+} // namespace licenseseat
