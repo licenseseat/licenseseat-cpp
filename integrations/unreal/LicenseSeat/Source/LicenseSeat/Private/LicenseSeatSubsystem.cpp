@@ -12,10 +12,13 @@
 #include "TimerManager.h"
 
 // Include vendored crypto (in ThirdParty folder)
+// Use UE's third-party include guards to suppress warnings
+THIRD_PARTY_INCLUDES_START
 extern "C" {
 #include "ed25519.h"
 }
 #include "picosha2.h"
+THIRD_PARTY_INCLUDES_END
 
 void ULicenseSeatSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {

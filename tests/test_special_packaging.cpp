@@ -30,6 +30,7 @@
 #include <atomic>
 #include <memory>
 #include <chrono>
+#include <ctime>
 
 namespace licenseseat {
 namespace special_packaging {
@@ -435,6 +436,273 @@ TEST(EventIsolationTest, EventsArePerInstance) {
     // Events should have been isolated
     EXPECT_TRUE(client1_events.load() == 0 || client2_events.load() == 0 ||
                 client1_events.load() == client2_events.load());
+}
+
+// ==================== Config Validation Tests ====================
+// Test that invalid configs are handled gracefully
+
+TEST(ConfigValidationTest, EmptyApiKeyHandled) {
+    Config config;
+    config.api_key = "";  // Empty API key
+    config.product_slug = "test";
+    config.api_url = "http://localhost:1";
+    config.timeout_seconds = 1;
+    config.max_retries = 0;
+
+    // Should not crash on construction
+    Client client(config);
+    EXPECT_FALSE(client.get_status().valid);
+}
+
+TEST(ConfigValidationTest, EmptyProductSlugHandled) {
+    Config config;
+    config.api_key = "test-key";
+    config.product_slug = "";  // Empty product slug
+    config.api_url = "http://localhost:1";
+    config.timeout_seconds = 1;
+    config.max_retries = 0;
+
+    Client client(config);
+    EXPECT_FALSE(client.get_status().valid);
+}
+
+TEST(ConfigValidationTest, InvalidUrlHandled) {
+    Config config;
+    config.api_key = "test-key";
+    config.product_slug = "test";
+    config.api_url = "not-a-valid-url";
+    config.timeout_seconds = 1;
+    config.max_retries = 0;
+
+    // Should not crash
+    Client client(config);
+    auto result = client.validate("TEST-KEY");
+    EXPECT_TRUE(result.is_error());
+}
+
+TEST(ConfigValidationTest, ZeroTimeoutHandled) {
+    Config config;
+    config.api_key = "test-key";
+    config.product_slug = "test";
+    config.api_url = "http://localhost:1";
+    config.timeout_seconds = 0;  // Zero timeout
+    config.max_retries = 0;
+
+    // Should not crash
+    Client client(config);
+    auto result = client.validate("TEST-KEY");
+    EXPECT_TRUE(result.is_error());
+}
+
+// ==================== Offline License Expiration Edge Cases ====================
+
+TEST(OfflineLicenseEdgeCasesTest, ExpiredLicenseRejected) {
+    auto config = make_test_config("-offline");
+    Client client(config);
+
+    OfflineLicense offline;
+    offline.license_key = "TEST-KEY";
+    offline.product_slug = "test";
+    offline.issued_at = std::time(nullptr) - (365 * 24 * 60 * 60);  // 1 year ago
+    offline.expires_at = std::time(nullptr) - (1);  // 1 second ago
+
+    auto result = client.verify_offline_license(offline);
+    EXPECT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::LicenseExpired);
+}
+
+TEST(OfflineLicenseEdgeCasesTest, FutureLicenseHandled) {
+    auto config = make_test_config("-offline-future");
+    Client client(config);
+
+    OfflineLicense offline;
+    offline.license_key = "TEST-KEY";
+    offline.product_slug = "test";
+    offline.issued_at = std::time(nullptr) + (365 * 24 * 60 * 60);  // 1 year in future
+    offline.expires_at = std::time(nullptr) + (2 * 365 * 24 * 60 * 60);  // 2 years in future
+
+    // Should handle gracefully (may reject or accept based on implementation)
+    auto result = client.verify_offline_license(offline);
+    // Just verify it doesn't crash
+    (void)result;
+}
+
+// ==================== Large Data Handling ====================
+// Test memory safety with large inputs
+
+TEST(LargeDataTest, LargeLicenseKeyHandled) {
+    auto config = make_test_config("-large");
+    Client client(config);
+
+    // Create a very long license key (10KB)
+    std::string large_key(10000, 'A');
+
+    auto result = client.validate(large_key);
+    // Should fail gracefully, not crash
+    EXPECT_TRUE(result.is_error());
+}
+
+TEST(LargeDataTest, LargeMetadataHandled) {
+    auto config = make_test_config("-large-meta");
+    Client client(config);
+
+    Metadata large_metadata;
+    for (int i = 0; i < 100; ++i) {
+        large_metadata["key_" + std::to_string(i)] = std::string(1000, 'X');
+    }
+
+    // Activation with large metadata should not crash
+    auto result = client.activate("TEST-KEY", "", large_metadata);
+    EXPECT_TRUE(result.is_error());  // Will fail due to network, but shouldn't crash
+}
+
+// ==================== Platform Detection Tests ====================
+
+TEST(PlatformTest, PlatformNameIsValid) {
+    auto platform = device::get_platform_name();
+
+    // Should be one of the known platforms
+    EXPECT_TRUE(platform == "macos" || platform == "linux" ||
+                platform == "windows" || platform == "unknown");
+}
+
+TEST(PlatformTest, HostnameIsReasonable) {
+    auto hostname = device::get_hostname();
+
+    // Should not be empty
+    EXPECT_FALSE(hostname.empty());
+
+    // Should be reasonable length
+    EXPECT_LE(hostname.length(), 255u);
+
+    // Should not contain null bytes
+    EXPECT_EQ(hostname.find('\0'), std::string::npos);
+}
+
+TEST(PlatformTest, DeviceIdFormat) {
+    auto device_id = device::generate_device_id();
+
+    if (!device_id.empty()) {
+        // Should be exactly 32 hex characters
+        EXPECT_EQ(device_id.length(), 32u);
+
+        // Should be all lowercase hex
+        for (char c : device_id) {
+            bool is_valid_hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            EXPECT_TRUE(is_valid_hex) << "Invalid character in device ID: " << c;
+        }
+    }
+}
+
+// ==================== Storage Isolation Tests ====================
+// Verify storage is isolated per client
+
+TEST(StorageIsolationTest, DifferentStoragePathsAreIsolated) {
+    Config config1 = make_test_config("-storage1");
+    config1.storage_path = "/tmp/licenseseat_test_1";
+    config1.storage_prefix = "test1";
+
+    Config config2 = make_test_config("-storage2");
+    config2.storage_path = "/tmp/licenseseat_test_2";
+    config2.storage_prefix = "test2";
+
+    Client client1(config1);
+    Client client2(config2);
+
+    // Operations on one client should not affect the other
+    client1.reset();
+    client2.reset();
+
+    // Both should be independent
+    EXPECT_FALSE(client1.get_status().valid);
+    EXPECT_FALSE(client2.get_status().valid);
+}
+
+// ==================== Auto-Validation Edge Cases ====================
+
+TEST(AutoValidationEdgeCasesTest, StartWithEmptyKeyDoesNotCrash) {
+    auto config = make_test_config("-autovalidate");
+    Client client(config);
+
+    // Start with empty key - should handle gracefully
+    client.start_auto_validation("");
+    EXPECT_TRUE(client.is_auto_validating());
+
+    client.stop_auto_validation();
+    EXPECT_FALSE(client.is_auto_validating());
+}
+
+TEST(AutoValidationEdgeCasesTest, MultipleStartStopCycles) {
+    auto config = make_test_config("-autovalidate-cycles");
+    Client client(config);
+
+    for (int i = 0; i < 10; ++i) {
+        client.start_auto_validation("KEY-" + std::to_string(i));
+        EXPECT_TRUE(client.is_auto_validating());
+
+        client.stop_auto_validation();
+        EXPECT_FALSE(client.is_auto_validating());
+    }
+}
+
+// ==================== Binary Size Verification ====================
+// These tests ensure all necessary functions are linked
+
+TEST(BinarySizeVerificationTest, AllCryptoFunctionsLinked) {
+    // Verify all crypto functions are available
+    std::vector<uint8_t> test_data = {1, 2, 3, 4, 5};
+
+    // Base64
+    auto b64 = crypto::base64_encode(test_data);
+    EXPECT_FALSE(b64.empty());
+    auto decoded_b64 = crypto::base64_decode(b64);
+    EXPECT_EQ(decoded_b64, test_data);
+
+    // Base64URL
+    auto b64url = crypto::base64url_encode(test_data);
+    EXPECT_FALSE(b64url.empty());
+    auto decoded_b64url = crypto::base64url_decode(b64url);
+    EXPECT_EQ(decoded_b64url, test_data);
+
+    // Ed25519 verification (will fail, but exercises code path)
+    auto verify_result = crypto::verify_ed25519_signature("msg", "sig", "key");
+    EXPECT_TRUE(verify_result.is_error());
+}
+
+TEST(BinarySizeVerificationTest, AllDeviceFunctionsLinked) {
+    // Verify all device functions are available
+    auto device_id = device::generate_device_id();
+    (void)device_id;  // May be empty in some environments
+
+    auto platform = device::get_platform_name();
+    EXPECT_FALSE(platform.empty());
+
+    auto hostname = device::get_hostname();
+    EXPECT_FALSE(hostname.empty());
+}
+
+// ==================== Entitlement Tests ====================
+
+TEST(EntitlementTest, CheckEntitlementWithNoLicense) {
+    auto config = make_test_config("-entitlement");
+    Client client(config);
+
+    auto status = client.check_entitlement("feature-x");
+
+    EXPECT_FALSE(status.active);
+    EXPECT_EQ(status.reason, "no_license");
+}
+
+TEST(EntitlementTest, CheckMultipleEntitlements) {
+    auto config = make_test_config("-entitlements");
+    Client client(config);
+
+    std::vector<std::string> features = {"updates", "support", "premium", "enterprise"};
+
+    for (const auto& feature : features) {
+        auto status = client.check_entitlement(feature);
+        EXPECT_FALSE(status.active);  // No license, so all should be inactive
+    }
 }
 
 }  // namespace

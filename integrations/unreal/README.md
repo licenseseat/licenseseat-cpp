@@ -27,20 +27,7 @@ YourProject/
         └── Source/
 ```
 
-### 2. Add Third-Party Dependencies
-
-Copy the vendored crypto libraries to the plugin's ThirdParty folder:
-
-```
-LicenseSeat/Source/LicenseSeat/Private/ThirdParty/
-├── ed25519/          # Copy from deps/ed25519
-│   ├── ed25519.h
-│   ├── *.c files
-│   └── *.h files
-└── picosha2.h        # Copy from deps/PicoSHA2/picosha2.h
-```
-
-### 3. Enable the Plugin
+### 2. Enable the Plugin
 
 Edit your `.uproject` file:
 
@@ -55,7 +42,7 @@ Edit your `.uproject` file:
 }
 ```
 
-### 4. Configure and Use
+### 3. Configure and Use
 
 **In C++:**
 
@@ -157,7 +144,8 @@ Device ID uses login ID + hostname combination.
 Ensure the plugin folder name matches "LicenseSeat" exactly.
 
 ### Build errors about missing headers
-Copy the ThirdParty dependencies as described in step 2.
+The plugin includes all required crypto dependencies in ThirdParty folder.
+Regenerate project files if needed.
 
 ### Network errors
 Check API key and ensure internet connectivity.
