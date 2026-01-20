@@ -404,7 +404,7 @@ TEST(BinarySizeTest, CryptoFunctionsAreUsable) {
     // Device ID (truncated SHA256)
     auto id = device::generate_device_id();
     EXPECT_FALSE(id.empty());
-    EXPECT_GE(id.length(), 32);  // At least 32 chars (truncated hash)
+    EXPECT_GE(id.length(), 32U);  // At least 32 chars (truncated hash)
 }
 
 // ==================== Event System Independence ====================
