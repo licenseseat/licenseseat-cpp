@@ -6,6 +6,13 @@
 #include <mutex>
 #include <thread>
 
+// Detect SSL support in cpp-httplib
+#if defined(CPPHTTPLIB_OPENSSL_SUPPORT)
+#define LICENSESEAT_HTTP_HAS_SSL 1
+#else
+#define LICENSESEAT_HTTP_HAS_SSL 0
+#endif
+
 namespace licenseseat {
 namespace http {
 
@@ -59,6 +66,7 @@ class HttpClient::Impl {
 
         // Create the appropriate client
         if (use_https) {
+#if LICENSESEAT_HTTP_HAS_SSL
             ssl_client_ = std::make_unique<httplib::SSLClient>(host, port);
             ssl_client_->set_connection_timeout(config_.timeout_seconds);
             ssl_client_->set_read_timeout(config_.timeout_seconds);
@@ -67,6 +75,14 @@ class HttpClient::Impl {
             if (!config_.verify_ssl) {
                 ssl_client_->enable_server_certificate_verification(false);
             }
+#else
+            // SSL not available - HTTPS URLs will fail at request time
+            https_requested_ = true;
+            client_ = std::make_unique<httplib::Client>(host, port);
+            client_->set_connection_timeout(config_.timeout_seconds);
+            client_->set_read_timeout(config_.timeout_seconds);
+            client_->set_write_timeout(config_.timeout_seconds);
+#endif
         } else {
             client_ = std::make_unique<httplib::Client>(host, port);
             client_->set_connection_timeout(config_.timeout_seconds);
@@ -81,6 +97,15 @@ class HttpClient::Impl {
         std::lock_guard<std::mutex> lock(mutex_);
 
         Response response;
+
+#if !LICENSESEAT_HTTP_HAS_SSL
+        // If HTTPS was requested but SSL is not available, fail gracefully
+        if (https_requested_) {
+            response.error_message = "HTTPS not supported: cpp-httplib was compiled without SSL support";
+            return response;
+        }
+#endif
+
         std::string full_path = base_path_ + request.path;
 
         // Add auth header
@@ -95,13 +120,21 @@ class HttpClient::Impl {
         for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
             httplib::Result result;
 
+#if LICENSESEAT_HTTP_HAS_SSL
             if (ssl_client_) {
                 result = send_with_ssl(request.method, full_path, headers, request.body,
                                        request.content_type);
             } else if (client_) {
                 result = send_without_ssl(request.method, full_path, headers, request.body,
                                           request.content_type);
-            } else {
+            }
+#else
+            if (client_) {
+                result = send_without_ssl(request.method, full_path, headers, request.body,
+                                          request.content_type);
+            }
+#endif
+            else {
                 response.error_message = "HTTP client not configured";
                 return response;
             }
@@ -135,12 +168,14 @@ class HttpClient::Impl {
                 case httplib::Error::Write:
                     response.error_message = "Write failed";
                     break;
+#if LICENSESEAT_HTTP_HAS_SSL
                 case httplib::Error::SSLConnection:
                     response.error_message = "SSL connection failed";
                     break;
                 case httplib::Error::SSLServerVerification:
                     response.error_message = "SSL certificate verification failed";
                     break;
+#endif
                 default:
                     response.error_message = "Unknown network error";
             }
@@ -155,6 +190,7 @@ class HttpClient::Impl {
     const std::string& base_url() const { return config_.base_url; }
 
   private:
+#if LICENSESEAT_HTTP_HAS_SSL
     httplib::Result send_with_ssl(Method method, const std::string& path,
                                    const httplib::Headers& headers, const std::string& body,
                                    const std::string& content_type) {
@@ -170,6 +206,7 @@ class HttpClient::Impl {
         }
         return httplib::Result();
     }
+#endif
 
     httplib::Result send_without_ssl(Method method, const std::string& path,
                                       const httplib::Headers& headers, const std::string& body,
@@ -190,7 +227,11 @@ class HttpClient::Impl {
     Config config_;
     std::string base_path_;
     std::unique_ptr<httplib::Client> client_;
+#if LICENSESEAT_HTTP_HAS_SSL
     std::unique_ptr<httplib::SSLClient> ssl_client_;
+#else
+    bool https_requested_ = false;
+#endif
     bool configured_ = false;
     std::mutex mutex_;
 };
