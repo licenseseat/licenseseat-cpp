@@ -114,23 +114,18 @@ jobs:
     name: Windows (MSVC)
     runs-on: windows-2022
 
-    env:
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
-      # Force vcpkg to use our cache directory (not CMake toolchain's UUID path)
-      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Create vcpkg binary cache directory
-        run: New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_DEFAULT_BINARY_CACHE }}"
+        run: New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\vcpkg-cache"
         shell: pwsh
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
-          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          path: ${{ github.workspace }}/vcpkg-cache
           key: vcpkg-binary-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
             vcpkg-binary-${{ runner.os }}-
@@ -141,6 +136,9 @@ jobs:
           vcpkgGitCommitId: "c82f74667287d3dc386bce81e44964370c91a289"
 
       - name: Configure
+        env:
+          # Override vcpkg binary cache to use our cached directory
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
         run: |
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
@@ -148,6 +146,12 @@ jobs:
             -DVCPKG_MANIFEST_FEATURES=tests `
             -DLICENSESEAT_BUILD_TESTS=ON `
             -DLICENSESEAT_BUILD_EXAMPLES=ON
+
+      - name: Debug - Show cache contents
+        run: |
+          Write-Host "Cache directory contents:"
+          Get-ChildItem -Path "${{ github.workspace }}\vcpkg-cache" -Recurse | Select-Object FullName, Length
+        shell: pwsh
 
       - name: Build
         run: cmake --build build --config ${{ env.BUILD_TYPE }}
