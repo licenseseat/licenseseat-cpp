@@ -115,15 +115,17 @@ jobs:
     runs-on: windows-2022
 
     env:
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
+      # Force vcpkg to use our cache directory (not CMake toolchain's UUID path)
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Create vcpkg binary cache directory
-        run: mkdir -p ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-        shell: bash
+        run: New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_DEFAULT_BINARY_CACHE }}"
+        shell: pwsh
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
