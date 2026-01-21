@@ -45,6 +45,7 @@ Config make_test_config(const std::string& suffix = "") {
     config.api_url = "http://localhost:1";  // Non-existent URL for fast failure
     config.timeout_seconds = 1;
     config.max_retries = 0;
+    config.auto_validate_interval = 0.1;  // Short interval for faster tests
     return config;
 }
 
