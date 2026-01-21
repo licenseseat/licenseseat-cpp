@@ -114,31 +114,28 @@ jobs:
     name: Windows (MSVC)
     runs-on: windows-2022
 
+    env:
+      # Disable vcpkg binary caching entirely (x-gha was removed in June 2025)
+      VCPKG_BINARY_SOURCES: "clear"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Create vcpkg binary cache directory
-        run: New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\vcpkg-cache"
-        shell: pwsh
-
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/vcpkg-cache
-          key: vcpkg-binary-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-binary-${{ runner.os }}-
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgGitCommitId: "c82f74667287d3dc386bce81e44964370c91a289"
 
+      - name: Cache vcpkg installed packages
+        uses: actions/cache@v4
+        with:
+          path: build/vcpkg_installed
+          key: vcpkg-installed-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-installed-${{ runner.os }}-
+
       - name: Configure
-        env:
-          # Override vcpkg binary cache to use our cached directory
-          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-cache
         run: |
           cmake -B build `
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
@@ -146,12 +143,6 @@ jobs:
             -DVCPKG_MANIFEST_FEATURES=tests `
             -DLICENSESEAT_BUILD_TESTS=ON `
             -DLICENSESEAT_BUILD_EXAMPLES=ON
-
-      - name: Debug - Show cache contents
-        run: |
-          Write-Host "Cache directory contents:"
-          Get-ChildItem -Path "${{ github.workspace }}\vcpkg-cache" -Recurse | Select-Object FullName, Length
-        shell: pwsh
 
       - name: Build
         run: cmake --build build --config ${{ env.BUILD_TYPE }}
