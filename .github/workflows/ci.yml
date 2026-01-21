@@ -153,3 +153,152 @@ jobs:
       - name: Test
         working-directory: build
         run: ctest --output-on-failure -C ${{ env.BUILD_TYPE }}
+
+  # =============================================================================
+  # Single-Header Amalgamation Test
+  # =============================================================================
+  single-header:
+    name: Single-Header Test
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nlohmann-json3-dev
+
+      - name: Install cpp-httplib
+        run: |
+          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
+          sudo cp /tmp/cpp-httplib/httplib.h /usr/local/include/
+
+      - name: Generate single-header
+        run: python3 scripts/amalgamate.py > licenseseat_single.hpp
+
+      - name: Compile test program
+        run: |
+          cat > /tmp/test_single_header.cpp << 'EOF'
+          #define LICENSESEAT_IMPLEMENTATION
+          #include "licenseseat_single.hpp"
+
+          #include <iostream>
+          #include <cassert>
+
+          int main() {
+              // Test 1: Base64 encoding/decoding
+              std::string input = "Hello, LicenseSeat!";
+              std::string encoded = licenseseat::crypto::base64_encode(
+                  std::vector<uint8_t>(input.begin(), input.end())
+              );
+              auto decoded = licenseseat::crypto::base64_decode(encoded);
+              std::string decoded_str(decoded.begin(), decoded.end());
+              assert(decoded_str == input && "Base64 round-trip failed");
+              std::cout << "Base64 encoding/decoding works" << std::endl;
+
+              // Test 2: Base64URL encoding/decoding
+              std::string url_encoded = licenseseat::crypto::base64url_encode(
+                  std::vector<uint8_t>(input.begin(), input.end())
+              );
+              auto url_decoded = licenseseat::crypto::base64url_decode(url_encoded);
+              std::string url_decoded_str(url_decoded.begin(), url_decoded.end());
+              assert(url_decoded_str == input && "Base64URL round-trip failed");
+              std::cout << "Base64URL encoding/decoding works" << std::endl;
+
+              // Test 3: Device ID generation
+              std::string device_id = licenseseat::device::generate_device_id();
+              assert(!device_id.empty() && "Device ID is empty");
+              assert(device_id.length() >= 16 && "Device ID too short");
+              std::cout << "Device ID generation works: " << device_id.substr(0, 16) << "..." << std::endl;
+
+              // Test 4: Platform detection
+              std::string platform = licenseseat::device::get_platform_name();
+              assert(platform == "linux" && "Expected Linux platform");
+              std::cout << "Platform detection works: " << platform << std::endl;
+
+              std::cout << "\nAll single-header tests passed!" << std::endl;
+              return 0;
+          }
+          EOF
+          g++ -std=c++17 -I. -I/usr/local/include -o /tmp/test_single_header /tmp/test_single_header.cpp
+          /tmp/test_single_header
+
+      - name: Upload amalgamated header
+        uses: actions/upload-artifact@v4
+        with:
+          name: licenseseat-single-header
+          path: licenseseat_single.hpp
+
+  # =============================================================================
+  # Sanitizer Tests
+  # =============================================================================
+  sanitizers:
+    name: Sanitizers (${{ matrix.sanitizer }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: address
+            flags: -fsanitize=address -fno-omit-frame-pointer
+          - sanitizer: undefined
+            flags: -fsanitize=undefined -fno-omit-frame-pointer
+          # TSan disabled: ShutdownTest stress tests cause 45+ min runtime
+          # TODO: Re-enable with reduced iterations or test exclusions
+          # - sanitizer: thread
+          #   flags: -fsanitize=thread
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libssl-dev \
+            nlohmann-json3-dev \
+            libgtest-dev \
+            cmake \
+            ninja-build \
+            clang
+
+      - name: Install cpp-httplib
+        run: |
+          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
+          cd /tmp/cpp-httplib
+          sudo mkdir -p /usr/local/include
+          sudo cp -r httplib.h /usr/local/include/
+          sudo mkdir -p /usr/local/lib/cmake/httplib
+          cat << 'EOF' | sudo tee /usr/local/lib/cmake/httplib/httplibConfig.cmake
+          add_library(httplib::httplib INTERFACE IMPORTED)
+          set_target_properties(httplib::httplib PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
+          )
+          EOF
+
+      - name: Configure
+        env:
+          CXX: clang++
+          CC: clang
+        run: |
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLICENSESEAT_BUILD_TESTS=ON \
+            -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
+            -DCMAKE_C_FLAGS="${{ matrix.flags }}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1
+          TSAN_OPTIONS: second_deadlock_stack=1
+        run: ctest --output-on-failure

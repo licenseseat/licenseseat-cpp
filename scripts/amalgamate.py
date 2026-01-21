@@ -36,7 +36,7 @@ HEADERS = [
 
 # Source files for implementation
 SOURCES = [
-    "src/crypto_minimal.cpp",
+    "src/crypto.cpp",
     "src/device.cpp",
     "src/http.cpp",
     "src/storage.cpp",
@@ -69,6 +69,7 @@ VENDORED = {
 
 # Includes to remove (will be embedded or provided by user)
 REMOVE_INCLUDES = {
+    # Full paths (used by src/*.cpp)
     '"licenseseat/licenseseat.hpp"',
     '"licenseseat/crypto.hpp"',
     '"licenseseat/device.hpp"',
@@ -76,6 +77,15 @@ REMOVE_INCLUDES = {
     '"licenseseat/http.hpp"',
     '"licenseseat/json.hpp"',
     '"licenseseat/storage.hpp"',
+    # Relative paths (used by include/licenseseat/*.hpp)
+    '"licenseseat.hpp"',
+    '"crypto.hpp"',
+    '"device.hpp"',
+    '"events.hpp"',
+    '"http.hpp"',
+    '"json.hpp"',
+    '"storage.hpp"',
+    # Vendored dependencies
     '"ed25519/ed25519.h"',
     '"PicoSHA2/picosha2.h"',
 }
@@ -135,10 +145,61 @@ def strip_ifdef_openssl(content):
     return content
 
 
+def strip_duplicate_ed25519_helpers(content, filename):
+    """Remove duplicate helper functions from ed25519 sc.c.
+
+    The load_3 and load_4 functions are duplicated in both fe.c and sc.c.
+    We keep them in fe.c (processed first) and remove from sc.c.
+    """
+    if 'sc.c' not in filename:
+        return content
+
+    # Remove load_3 function
+    content = re.sub(
+        r'static\s+uint64_t\s+load_3\s*\([^)]*\)\s*\{[^}]+\}',
+        '// load_3 defined in fe.c',
+        content
+    )
+    # Remove load_4 function
+    content = re.sub(
+        r'static\s+uint64_t\s+load_4\s*\([^)]*\)\s*\{[^}]+\}',
+        '// load_4 defined in fe.c',
+        content
+    )
+    return content
+
+
 def wrap_extern_c(content, is_c_code=False):
     """Wrap C code in extern \"C\" for C++ compatibility."""
     if is_c_code:
         return f'extern "C" {{\n{content}\n}}\n'
+    return content
+
+
+def add_namespace_prefix_to_crypto(content):
+    """Add licenseseat_internal:: prefix to ed25519 and picosha2 calls."""
+    # Replace bare ed25519 function calls with namespaced versions
+    content = re.sub(
+        r'\bed25519_verify\s*\(',
+        'licenseseat_internal::ed25519_verify(',
+        content
+    )
+    content = re.sub(
+        r'\bed25519_sign\s*\(',
+        'licenseseat_internal::ed25519_sign(',
+        content
+    )
+    content = re.sub(
+        r'\bed25519_create_keypair\s*\(',
+        'licenseseat_internal::ed25519_create_keypair(',
+        content
+    )
+    # Replace picosha2 namespace with full path
+    content = re.sub(
+        r'\bpicosha2::',
+        'licenseseat_internal::picosha2::',
+        content
+    )
     return content
 
 
@@ -180,6 +241,7 @@ def generate_header():
  *   MIT License - see https://github.com/licenseseat/licenseseat-cpp
  *
  * This build does NOT require OpenSSL - uses vendored ed25519 and PicoSHA2.
+ * HTTPS support requires cpp-httplib compiled with CPPHTTPLIB_OPENSSL_SUPPORT.
  */
 
 #ifndef LICENSESEAT_SINGLE_HPP
@@ -235,6 +297,8 @@ def generate_header():
         content = strip_pragma_once(content)
         # Remove internal includes between ed25519 files
         content = re.sub(r'#include\s*"[^"]+\.h"', '// (internal include removed)', content)
+        # Remove duplicate helper functions from sc.c
+        content = strip_duplicate_ed25519_helpers(content, ed_file)
         output.append(content)
 
     output.append('\n} // extern "C"\n')
@@ -245,10 +309,15 @@ def generate_header():
         output.append(f"// --- {src_path} ---\n")
         content = read_file(src_path)
         content = strip_local_includes(content, REMOVE_INCLUDES)
-        # Adjust ed25519/picosha2 includes to use internal namespace
+        # Remove the vendored include directives (already embedded above)
         content = content.replace('#include "ed25519/ed25519.h"', '// ed25519 embedded above')
-        content = content.replace('#include "PicoSHA2/picosha2.h"', 'using namespace licenseseat_internal;')
+        content = content.replace('#include "PicoSHA2/picosha2.h"', '// picosha2 embedded above')
         content = strip_ifdef_openssl(content)
+
+        # For crypto.cpp, add namespace prefixes for internal deps
+        if 'crypto.cpp' in src_path:
+            content = add_namespace_prefix_to_crypto(content)
+
         output.append(content)
         output.append("\n\n")
 
