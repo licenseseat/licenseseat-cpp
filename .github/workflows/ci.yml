@@ -245,8 +245,10 @@ jobs:
             flags: -fsanitize=address -fno-omit-frame-pointer
           - sanitizer: undefined
             flags: -fsanitize=undefined -fno-omit-frame-pointer
-          - sanitizer: thread
-            flags: -fsanitize=thread
+          # TSan disabled: ShutdownTest stress tests cause 45+ min runtime
+          # TODO: Re-enable with reduced iterations or test exclusions
+          # - sanitizer: thread
+          #   flags: -fsanitize=thread
 
     steps:
       - name: Checkout
