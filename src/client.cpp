@@ -313,12 +313,12 @@ class Client::Impl {
 
         std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
 
-        // Build request - new URL: /products/{slug}/licenses/{key}/offline-token
+        // Build request - URL: /products/{slug}/licenses/{key}/offline_token
         auto body = json::build_offline_token_request(device_id, ttl_days);
 
         http::Request request;
         request.method = http::Method::POST;
-        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/offline-token";
+        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/offline_token";
         request.body = body.dump();
 
         auto response = http_client_->send(request);
@@ -395,10 +395,10 @@ class Client::Impl {
             return Result<std::string>::error(ErrorCode::MissingParameter, "Key ID is required");
         }
 
-        // New URL: /signing-keys/{key_id}
+        // URL: /signing_keys/{key_id}
         http::Request request;
         request.method = http::Method::GET;
-        request.path = "/signing-keys/" + key_id;
+        request.path = "/signing_keys/" + key_id;
 
         auto response = http_client_->send(request);
 
@@ -659,12 +659,12 @@ class Client::Impl {
                                                 "Product slug is required");
         }
 
-        // New URL: /products/{slug}/releases/{version}/download-token
+        // URL: /products/{slug}/releases/{version}/download_token
         auto body = json::build_download_token_request(license_key, platform);
 
         http::Request request;
         request.method = http::Method::POST;
-        request.path = "/products/" + product_slug + "/releases/" + version + "/download-token";
+        request.path = "/products/" + product_slug + "/releases/" + version + "/download_token";
         request.body = body.dump();
 
         auto response = http_client_->send(request);
