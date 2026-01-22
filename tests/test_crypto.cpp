@@ -142,35 +142,48 @@ TEST(Ed25519Test, WrongSignatureFails) {
     EXPECT_EQ(result.error_code(), ErrorCode::InvalidSignature);
 }
 
-// ==================== Offline License Verification Tests ====================
+// ==================== Offline Token Verification Tests ====================
 
-TEST(OfflineLicenseVerificationTest, EmptyLicenseKeyFails) {
-    OfflineLicense offline;
-    offline.license_key = "";
+TEST(OfflineTokenVerificationTest, EmptyLicenseKeyFails) {
+    OfflineToken offline;
+    offline.token.license_key = "";
 
-    auto result = verify_offline_license_signature(offline, TEST_PUBLIC_KEY_B64);
+    auto result = verify_offline_token_signature(offline, TEST_PUBLIC_KEY_B64);
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::InvalidLicenseKey);
 }
 
-TEST(OfflineLicenseVerificationTest, EmptySignatureFails) {
-    OfflineLicense offline;
-    offline.license_key = "KEY-123";
-    offline.signature_b64u = "";
+TEST(OfflineTokenVerificationTest, EmptySignatureFails) {
+    OfflineToken offline;
+    offline.token.license_key = "KEY-123";
+    offline.signature.value = "";
 
-    auto result = verify_offline_license_signature(offline, TEST_PUBLIC_KEY_B64);
+    auto result = verify_offline_token_signature(offline, TEST_PUBLIC_KEY_B64);
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::InvalidSignature);
 }
 
-TEST(OfflineLicenseVerificationTest, EmptyPublicKeyFails) {
-    OfflineLicense offline;
-    offline.license_key = "KEY-123";
-    offline.signature_b64u = "some-signature";
+TEST(OfflineTokenVerificationTest, EmptyCanonicalFails) {
+    OfflineToken offline;
+    offline.token.license_key = "KEY-123";
+    offline.signature.value = "some-signature";
+    offline.canonical = "";
 
-    auto result = verify_offline_license_signature(offline, "");
+    auto result = verify_offline_token_signature(offline, TEST_PUBLIC_KEY_B64);
+
+    EXPECT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::InvalidParameter);
+}
+
+TEST(OfflineTokenVerificationTest, EmptyPublicKeyFails) {
+    OfflineToken offline;
+    offline.token.license_key = "KEY-123";
+    offline.signature.value = "some-signature";
+    offline.canonical = R"({"license_key":"KEY-123"})";
+
+    auto result = verify_offline_token_signature(offline, "");
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::MissingParameter);

@@ -45,16 +45,16 @@ namespace crypto {
                                                     const std::string& public_key_b64);
 
 /**
- * @brief Verify an offline license signature
+ * @brief Verify an offline token signature
  *
- * Reconstructs the canonical JSON payload and verifies the Ed25519 signature.
+ * Verifies the Ed25519 signature against the canonical JSON string.
  *
- * @param offline_license The offline license to verify
+ * @param offline_token The offline token to verify
  * @param public_key_b64 Base64-encoded Ed25519 public key
  * @return Result<bool> True if valid, error otherwise
  */
-[[nodiscard]] Result<bool> verify_offline_license_signature(const OfflineLicense& offline_license,
-                                                            const std::string& public_key_b64);
+[[nodiscard]] Result<bool> verify_offline_token_signature(const OfflineToken& offline_token,
+                                                          const std::string& public_key_b64);
 
 }  // namespace crypto
 }  // namespace licenseseat

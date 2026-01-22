@@ -13,7 +13,7 @@ class ClientTest : public ::testing::Test {
     void SetUp() override {
         config_.api_key = "test_api_key";
         config_.product_slug = "test_product";
-        config_.device_identifier = "test-device-001";
+        config_.device_id = "test-device-001";
         // Use a non-existent URL so network calls fail fast
         config_.api_url = "http://localhost:1";
         config_.timeout_seconds = 1;
@@ -30,18 +30,19 @@ TEST_F(ClientTest, CanBeConstructed) {
 
     EXPECT_EQ(client.config().api_key, "test_api_key");
     EXPECT_EQ(client.config().product_slug, "test_product");
-    EXPECT_EQ(client.device_identifier(), "test-device-001");
+    EXPECT_EQ(client.device_id(), "test-device-001");
 }
 
 TEST_F(ClientTest, GeneratesDeviceIdIfNotProvided) {
     Config config;
     config.api_key = "key";
+    config.product_slug = "product";
     config.api_url = "http://localhost:1";
-    // No device_identifier set
+    // No device_id set
 
     Client client(config);
 
-    EXPECT_FALSE(client.device_identifier().empty());
+    EXPECT_FALSE(client.device_id().empty());
 }
 
 // ==================== Validation Input Validation ====================
@@ -88,78 +89,90 @@ TEST_F(ClientTest, ActivateReturnsNetworkErrorWhenNoServer) {
 
 TEST_F(ClientTest, DeactivateWithEmptyKeyFails) {
     Client client(config_);
-    auto result = client.deactivate("");
+    auto result = client.deactivate("", "device-123");
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::InvalidLicenseKey);
 }
 
+TEST_F(ClientTest, DeactivateWithEmptyDeviceIdFails) {
+    Client client(config_);
+    auto result = client.deactivate("VALID-KEY", "");
+
+    EXPECT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::MissingParameter);
+}
+
 TEST_F(ClientTest, DeactivateReturnsNetworkErrorWhenNoServer) {
     Client client(config_);
-    auto result = client.deactivate("VALID-KEY");
+    auto result = client.deactivate("VALID-KEY", "device-123");
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::NetworkError);
 }
 
-// ==================== Offline License Input Validation ====================
+// ==================== Offline Token Input Validation ====================
 
-TEST_F(ClientTest, GenerateOfflineLicenseWithEmptyKeyFails) {
+TEST_F(ClientTest, GenerateOfflineTokenWithEmptyKeyFails) {
     Client client(config_);
-    auto result = client.generate_offline_license("");
+    auto result = client.generate_offline_token("");
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::InvalidLicenseKey);
 }
 
-TEST_F(ClientTest, VerifyOfflineLicenseWithEmptyKeyFails) {
+TEST_F(ClientTest, VerifyOfflineTokenWithEmptyKeyFails) {
     Client client(config_);
 
-    OfflineLicense offline;
-    offline.license_key = "";
+    OfflineToken offline;
+    offline.token.license_key = "";
 
-    auto result = client.verify_offline_license(offline);
+    auto result = client.verify_offline_token(offline);
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::InvalidLicenseKey);
 }
 
-TEST_F(ClientTest, VerifyExpiredOfflineLicenseFails) {
+TEST_F(ClientTest, VerifyExpiredOfflineTokenFails) {
     Client client(config_);
 
-    OfflineLicense offline;
-    offline.license_key = "KEY-123";
-    offline.issued_at = std::time(nullptr) - (365 * 24 * 60 * 60);
-    offline.expires_at = std::time(nullptr) - (24 * 60 * 60);  // Expired
+    OfflineToken offline;
+    offline.token.license_key = "KEY-123";
+    offline.token.iat = std::time(nullptr) - (365 * 24 * 60 * 60);
+    offline.token.nbf = offline.token.iat;
+    offline.token.exp = std::time(nullptr) - (24 * 60 * 60);  // Expired
 
-    auto result = client.verify_offline_license(offline);
+    auto result = client.verify_offline_token(offline);
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::LicenseExpired);
 }
 
-TEST_F(ClientTest, VerifyOfflineLicenseWithInvalidSignature) {
+TEST_F(ClientTest, VerifyOfflineTokenWithInvalidSignature) {
     Client client(config_);
 
-    OfflineLicense offline;
-    offline.license_key = "KEY-123";
-    offline.key_id = "key-v1";
-    offline.issued_at = std::time(nullptr);
-    offline.expires_at = std::time(nullptr) + (365 * 24 * 60 * 60);
-    offline.signature_b64u = "invalid-signature";  // Not a valid signature
+    OfflineToken offline;
+    offline.token.license_key = "KEY-123";
+    offline.token.kid = "key-v1";
+    offline.token.iat = std::time(nullptr);
+    offline.token.nbf = offline.token.iat;
+    offline.token.exp = std::time(nullptr) + (365 * 24 * 60 * 60);
+    offline.signature.key_id = "key-v1";
+    offline.signature.value = "invalid-signature";  // Not a valid signature
+    offline.canonical = R"({"test":"data"})";
 
     // Valid Ed25519 public key (32 bytes base64)
     const std::string public_key = "PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=";
-    auto result = client.verify_offline_license(offline, public_key);
+    auto result = client.verify_offline_token(offline, public_key);
 
     // Invalid signature should fail verification
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::InvalidSignature);
 }
 
-TEST_F(ClientTest, FetchPublicKeyWithEmptyIdFails) {
+TEST_F(ClientTest, FetchSigningKeyWithEmptyIdFails) {
     Client client(config_);
-    auto result = client.fetch_public_key("");
+    auto result = client.fetch_signing_key("");
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::MissingParameter);
@@ -167,35 +180,45 @@ TEST_F(ClientTest, FetchPublicKeyWithEmptyIdFails) {
 
 // ==================== Release Input Validation ====================
 
-TEST_F(ClientTest, GetLatestReleaseWithEmptySlugFails) {
+TEST_F(ClientTest, GetLatestReleaseUsesConfigProductSlug) {
     Client client(config_);
-    auto result = client.get_latest_release("");
+    // Should not fail with MissingParameter since we have product_slug in config
+    auto result = client.get_latest_release();
 
+    // Will fail with network error since we have a product_slug in config
     EXPECT_TRUE(result.is_error());
-    EXPECT_EQ(result.error_code(), ErrorCode::MissingParameter);
+    EXPECT_EQ(result.error_code(), ErrorCode::NetworkError);
 }
 
-TEST_F(ClientTest, ListReleasesWithEmptySlugFails) {
+TEST_F(ClientTest, ListReleasesUsesConfigProductSlug) {
     Client client(config_);
-    auto result = client.list_releases("");
+    auto result = client.list_releases();
 
     EXPECT_TRUE(result.is_error());
-    EXPECT_EQ(result.error_code(), ErrorCode::MissingParameter);
+    EXPECT_EQ(result.error_code(), ErrorCode::NetworkError);
 }
 
 TEST_F(ClientTest, GenerateDownloadTokenWithEmptyKeyFails) {
     Client client(config_);
-    auto result = client.generate_download_token(123, "");
+    auto result = client.generate_download_token("1.0.0", "");
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::InvalidLicenseKey);
 }
 
+TEST_F(ClientTest, GenerateDownloadTokenWithEmptyVersionFails) {
+    Client client(config_);
+    auto result = client.generate_download_token("", "LICENSE-KEY");
+
+    EXPECT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::MissingParameter);
+}
+
 // ==================== Health Check ====================
 
-TEST_F(ClientTest, HeartbeatReturnsNetworkErrorWhenNoServer) {
+TEST_F(ClientTest, HealthReturnsNetworkErrorWhenNoServer) {
     Client client(config_);
-    auto result = client.heartbeat();
+    auto result = client.health();
 
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::NetworkError);
@@ -385,8 +408,8 @@ TEST_F(ClientTest, DeactivateAsyncCallsCallback) {
     Client client(config_);
     std::atomic<bool> callback_called{false};
 
-    client.deactivate_async("TEST-KEY",
-                            [&](Result<Activation> /*result*/) { callback_called = true; });
+    client.deactivate_async("TEST-KEY", [&](Result<Deactivation> /*result*/) { callback_called = true; },
+                            "device-123");
 
     int attempts = 0;
     while (!callback_called && attempts++ < 100) {

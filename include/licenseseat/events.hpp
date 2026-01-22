@@ -186,8 +186,8 @@ constexpr const char* NETWORK_ONLINE = "network:online";
 constexpr const char* NETWORK_OFFLINE = "network:offline";
 constexpr const char* AUTOVALIDATION_CYCLE = "autovalidation:cycle";
 constexpr const char* AUTOVALIDATION_STOPPED = "autovalidation:stopped";
-constexpr const char* OFFLINE_LICENSE_READY = "offlineLicense:ready";
-constexpr const char* OFFLINE_LICENSE_VERIFIED = "offlineLicense:verified";
+constexpr const char* OFFLINE_TOKEN_READY = "offlineToken:ready";
+constexpr const char* OFFLINE_TOKEN_VERIFIED = "offlineToken:verified";
 constexpr const char* SDK_RESET = "sdk:reset";
 }  // namespace events
 

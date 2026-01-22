@@ -19,6 +19,7 @@ The official C++ SDK for [LicenseSeat](https://licenseseat.com) – the licensin
 - **Entitlement checking** – Check feature access with `has_entitlement()` and `check_entitlement()`
 - **Local caching** – File-based caching with clock tamper detection
 - **Auto-validation** – Background validation with configurable intervals
+- **Event system** – Subscribe to license events (validation success/failure, offline token ready, etc.)
 - **Thread-safe** – All public methods are safe to call from multiple threads
 - **Cross-platform** – Windows, macOS, and Linux support
 - **Exception-free** – Uses `Result<T, Error>` pattern for error handling
@@ -152,12 +153,20 @@ int main()
 
     licenseseat::Client client(config);
 
-    // Activate
-    auto result = client.activate("XXXX-XXXX-XXXX-XXXX");
+    // Validate a license
+    auto result = client.validate("XXXX-XXXX-XXXX-XXXX");
 
     if (result.is_ok()) {
-        std::cout << "Licensed to: " << result.value().licensee << "\n";
+        const auto& validation = result.value();
+        if (validation.valid) {
+            std::cout << "License is valid!\n";
+            std::cout << "Plan: " << validation.license.plan_key() << "\n";
+        } else {
+            // License exists but validation failed (e.g., expired, seat limit)
+            std::cout << "Invalid: " << validation.code << " - " << validation.message << "\n";
+        }
     } else {
+        // Network error, license not found, etc.
         std::cerr << "Error: " << result.error_message() << "\n";
     }
 
@@ -181,128 +190,332 @@ licenseseat::Config config;
 config.api_key = "your-api-key";
 config.product_slug = "your-product";
 
-// Optional
-config.api_url = "https://licenseseat.com/api";
+// Optional - API settings
+config.api_url = "https://licenseseat.com/api/v1";  // Default
 config.timeout_seconds = 30;
 config.max_retries = 3;
 
-// Offline support
-config.offline_public_key = "base64-ed25519-public-key";
+// Optional - Device identification
+config.device_id = "";  // Auto-generated if empty
+
+// Optional - Offline support
+config.signing_public_key = "base64-ed25519-public-key";  // Pre-configure for offline
 config.max_offline_days = 30;
+
+// Optional - Caching
+config.storage_path = "";  // Path for license cache (empty = no persistence)
+
+// Optional - Auto-validation
+config.auto_validate_interval = 3600.0;  // Seconds between background validations
 ```
 
 ### Configuration Options
 
-| Option               | Type   | Default                       | Description                                       |
-| -------------------- | ------ | ----------------------------- | ------------------------------------------------- |
-| `api_key`            | string | *required*                    | API key for authentication                        |
-| `product_slug`       | string | *required*                    | Product identifier                                |
-| `api_url`            | string | `https://licenseseat.com/api` | API endpoint                                      |
-| `timeout_seconds`    | int    | `30`                          | HTTP request timeout                              |
-| `max_retries`        | int    | `3`                           | Retry attempts for failed requests                |
-| `offline_public_key` | string | `""`                          | Ed25519 public key for offline verification       |
-| `max_offline_days`   | int    | `0`                           | Maximum days license works offline (0 = disabled) |
+| Option                   | Type   | Default                            | Description                                        |
+| ------------------------ | ------ | ---------------------------------- | -------------------------------------------------- |
+| `api_key`                | string | *required*                         | API key for authentication                         |
+| `product_slug`           | string | *required*                         | Product identifier                                 |
+| `api_url`                | string | `https://licenseseat.com/api/v1`   | API endpoint                                       |
+| `timeout_seconds`        | int    | `30`                               | HTTP request timeout                               |
+| `max_retries`            | int    | `3`                                | Retry attempts for failed requests                 |
+| `device_id`              | string | `""`                               | Device identifier (auto-generated if empty)        |
+| `signing_public_key`     | string | `""`                               | Ed25519 public key for offline verification        |
+| `max_offline_days`       | int    | `0`                                | Maximum days license works offline (0 = disabled)  |
+| `storage_path`           | string | `""`                               | Path for license cache (empty = no persistence)    |
+| `auto_validate_interval` | double | `3600.0`                           | Seconds between auto-validation cycles             |
 
 ---
 
 ## API Reference
 
-### Activation
-
-```cpp
-auto result = client.activate("LICENSE-KEY");
-
-if (result.is_ok()) {
-    auto& data = result.value();
-    std::cout << "Licensee: " << data.licensee << "\n";
-    std::cout << "Type: " << data.license_type << "\n";
-    std::cout << "Seats: " << data.seats_used << "/" << data.seats_total << "\n";
-}
-```
-
 ### Validation
+
+Validation checks if a license is valid. **Important:** The API always returns HTTP 200 for validation – check the `valid` field to determine validity.
 
 ```cpp
 auto result = client.validate("LICENSE-KEY");
 
 if (result.is_ok()) {
-    auto& data = result.value();
-    if (data.valid) {
-        // License is valid
+    const auto& validation = result.value();
+
+    if (validation.valid) {
+        // License is valid and usable
+        std::cout << "Valid! Plan: " << validation.license.plan_key() << "\n";
     } else {
-        std::cerr << "Invalid: " << data.reason << "\n";
+        // License exists but isn't valid for use
+        // Common codes: expired, revoked, suspended, seat_limit_exceeded
+        std::cout << "Code: " << validation.code << "\n";
+        std::cout << "Message: " << validation.message << "\n";
+    }
+
+    // License data is always available (even when invalid)
+    const auto& license = validation.license;
+    std::cout << "Key: " << license.key() << "\n";
+    std::cout << "Status: " << license_status_to_string(license.status()) << "\n";
+    std::cout << "Seats: " << license.active_seats() << "/" << license.seat_limit() << "\n";
+} else {
+    // API error (license not found, network error, auth failed)
+    std::cerr << "Error: " << result.error_message() << "\n";
+}
+```
+
+> [!IMPORTANT]
+> For **hardware-locked** licenses, you must provide a `device_id` to validate:
+> ```cpp
+> auto result = client.validate("LICENSE-KEY", device_id);
+> ```
+> Without it, validation may return `valid: false` with code `device_not_activated`.
+
+### Async Validation
+
+```cpp
+client.validate_async("LICENSE-KEY", [](licenseseat::Result<licenseseat::Validation> result) {
+    if (result.is_ok() && result.value().valid) {
+        // License is valid
+    }
+});
+```
+
+### Activation
+
+Activation binds a license to a device, consuming a seat.
+
+```cpp
+auto result = client.activate("LICENSE-KEY", device_id, "My MacBook Pro");
+
+if (result.is_ok()) {
+    const auto& activation = result.value();
+    std::cout << "Activation ID: " << activation.id() << "\n";
+    std::cout << "Device: " << activation.device_name() << "\n";
+} else {
+    switch (result.error_code()) {
+        case licenseseat::ErrorCode::SeatLimitExceeded:
+            std::cerr << "No seats available\n";
+            break;
+        case licenseseat::ErrorCode::DeviceAlreadyActivated:
+            std::cerr << "Device already activated\n";
+            break;
+        default:
+            std::cerr << "Error: " << result.error_message() << "\n";
     }
 }
 ```
 
 ### Deactivation
 
+Deactivation removes a device from a license, freeing a seat.
+
 ```cpp
-auto result = client.deactivate("LICENSE-KEY");
+auto result = client.deactivate("LICENSE-KEY", device_id);
 
 if (result.is_ok()) {
-    std::cout << "License deactivated\n";
+    std::cout << "Device deactivated\n";
+} else if (result.error_code() == licenseseat::ErrorCode::ActivationNotFound) {
+    std::cout << "Device was not activated\n";
 }
 ```
 
 ### Entitlement Checks
 
 ```cpp
-// Simple boolean check
+// Simple boolean check (uses cached license data)
 if (client.has_entitlement("pro")) {
     enable_pro_features();
 }
 
-// Detailed check
-auto result = client.check_entitlement("LICENSE-KEY", "pro");
-if (result.is_ok() && result.value().has_entitlement) {
+// Detailed check with reason
+auto entitlement = client.check_entitlement("feature-key");
+if (entitlement.active) {
     // Feature unlocked
+} else {
+    std::cout << "Not available: " << entitlement.reason << "\n";
 }
 ```
 
 ### Status
 
+Get the current cached license status without making a network request.
+
 ```cpp
 auto status = client.get_status();
 
-std::cout << "Valid: " << status.valid << "\n";
-std::cout << "Licensee: " << status.licensee << "\n";
-std::cout << "Type: " << status.license_type << "\n";
+std::cout << "Valid: " << (status.valid ? "yes" : "no") << "\n";
+std::cout << "Code: " << status.code << "\n";
 ```
 
 ### Reset
 
+Clear all cached data (license, offline tokens, etc.).
+
 ```cpp
-client.reset();  // Clear all cached data
+client.reset();
 ```
 
 ---
 
 ## Offline Support
 
-The SDK supports offline license validation using Ed25519 cryptographic signatures.
+The SDK supports offline license validation using Ed25519 cryptographic signatures. This allows your application to work without network access after initial setup.
+
+### Offline Token Workflow
+
+**Step 1: Generate and cache offline token while online**
+
+```cpp
+// Generate offline token (requires network)
+auto token_result = client.generate_offline_token("LICENSE-KEY");
+if (token_result.is_error()) {
+    std::cerr << "Failed to generate token: " << token_result.error_message() << "\n";
+    return;
+}
+auto offline_token = token_result.value();
+
+// Fetch signing key (requires network)
+auto key_result = client.fetch_signing_key(offline_token.token.kid);
+if (key_result.is_error()) {
+    std::cerr << "Failed to fetch key: " << key_result.error_message() << "\n";
+    return;
+}
+std::string public_key = key_result.value();
+
+// Store both for offline use
+save_to_disk(offline_token, public_key);
+```
+
+**Step 2: Verify offline (no network required)**
+
+```cpp
+// Load cached data
+auto [offline_token, public_key] = load_from_disk();
+
+// Verify signature locally
+auto verify_result = client.verify_offline_token(offline_token, public_key);
+if (verify_result.is_ok() && verify_result.value()) {
+    // Token is valid - license data available in offline_token.token
+    std::cout << "License: " << offline_token.token.license_key << "\n";
+    std::cout << "Plan: " << offline_token.token.plan_key << "\n";
+    std::cout << "Expires: " << offline_token.token.exp << "\n";
+
+    // Check entitlements from token
+    for (const auto& ent : offline_token.token.entitlements) {
+        std::cout << "Entitlement: " << ent.key << "\n";
+    }
+}
+```
+
+### Pre-configured Public Key
+
+For simpler deployments, you can pre-configure the signing public key:
 
 ```cpp
 licenseseat::Config config;
 config.api_key = "your-api-key";
 config.product_slug = "your-product";
-config.offline_public_key = "MCowBQYDK2VwAyEA...";
+config.signing_public_key = "MCowBQYDK2VwAyEA...";  // Your public key
 config.max_offline_days = 30;
 
 licenseseat::Client client(config);
 
-// Works without network after initial activation
-auto result = client.validate_offline("LICENSE-KEY");
-if (result.is_ok() && result.value().valid) {
-    // Signature verified locally
-}
+// Now verify_offline_token can use the pre-configured key
+auto result = client.verify_offline_token(offline_token);  // No key param needed
 ```
 
-How it works:
-1. Server signs license data with Ed25519 private key
-2. SDK verifies signature locally with public key
-3. No network required after initial activation
-4. Clock tampering detection prevents bypassing expiration
+### Offline Token Fields
+
+| Field              | Type     | Description                                      |
+| ------------------ | -------- | ------------------------------------------------ |
+| `license_key`      | string   | The license key                                  |
+| `product_slug`     | string   | Product identifier                               |
+| `plan_key`         | string   | Plan identifier (e.g., "pro-annual")             |
+| `mode`             | string   | License mode ("hardware_locked" or "floating")   |
+| `seat_limit`       | int      | Maximum allowed activations                      |
+| `device_id`        | string   | Device this token is bound to (if hardware_locked) |
+| `iat`              | int64    | Issued at (Unix timestamp)                       |
+| `exp`              | int64    | Expires at (Unix timestamp)                      |
+| `nbf`              | int64    | Not valid before (Unix timestamp)                |
+| `license_expires_at` | int64  | License expiration (Unix timestamp, may be 0)    |
+| `kid`              | string   | Key ID for fetching the signing public key       |
+| `entitlements`     | array    | List of entitlements with keys and expiration    |
+| `metadata`         | object   | Custom metadata attached to the license          |
+
+---
+
+## Auto-Validation
+
+The SDK can automatically validate licenses in the background at configurable intervals.
+
+```cpp
+// Configure interval (in seconds)
+config.auto_validate_interval = 3600.0;  // Every hour
+
+licenseseat::Client client(config);
+
+// Start auto-validation
+client.start_auto_validation("LICENSE-KEY");
+
+// Check if running
+if (client.is_auto_validating()) {
+    std::cout << "Auto-validation is active\n";
+}
+
+// Stop when done
+client.stop_auto_validation();
+```
+
+---
+
+## Events
+
+Subscribe to license events for reactive updates.
+
+```cpp
+#include <licenseseat/events.hpp>
+
+// Subscribe to validation success
+auto sub1 = client.on(licenseseat::events::VALIDATION_SUCCESS, [](const std::any& data) {
+    std::cout << "License validated successfully!\n";
+});
+
+// Subscribe to validation failure
+auto sub2 = client.on(licenseseat::events::VALIDATION_FAILED, [](const std::any& data) {
+    std::cout << "License validation failed\n";
+});
+
+// Subscribe to offline token ready
+auto sub3 = client.on(licenseseat::events::OFFLINE_TOKEN_READY, [](const std::any& data) {
+    std::cout << "Offline token generated\n";
+});
+
+// Later: cancel subscriptions
+sub1.cancel();
+sub2.cancel();
+sub3.cancel();
+```
+
+### Available Events
+
+| Event Name               | Description                                  |
+| ------------------------ | -------------------------------------------- |
+| `LICENSE_LOADED`         | License data loaded from cache               |
+| `ACTIVATION_START`       | Activation request starting                  |
+| `ACTIVATION_SUCCESS`     | Device activated successfully                |
+| `ACTIVATION_ERROR`       | Activation failed                            |
+| `VALIDATION_START`       | Validation request starting                  |
+| `VALIDATION_SUCCESS`     | License validated successfully               |
+| `VALIDATION_FAILED`      | License validation returned invalid          |
+| `VALIDATION_ERROR`       | Validation request failed (network, etc.)    |
+| `VALIDATION_OFFLINE_SUCCESS` | Offline token verified successfully      |
+| `VALIDATION_OFFLINE_FAILED`  | Offline token verification failed        |
+| `DEACTIVATION_START`     | Deactivation request starting                |
+| `DEACTIVATION_SUCCESS`   | Device deactivated successfully              |
+| `DEACTIVATION_ERROR`     | Deactivation failed                          |
+| `NETWORK_ONLINE`         | Network connectivity restored                |
+| `NETWORK_OFFLINE`        | Network connectivity lost                    |
+| `AUTOVALIDATION_CYCLE`   | Auto-validation cycle completed              |
+| `AUTOVALIDATION_STOPPED` | Auto-validation stopped                      |
+| `OFFLINE_TOKEN_READY`    | Offline token generated                      |
+| `OFFLINE_TOKEN_VERIFIED` | Offline token verified                       |
+| `SDK_RESET`              | SDK state reset                              |
 
 ---
 
@@ -330,46 +543,66 @@ For audio plugins, `isValid()` uses `std::atomic<bool>` for lock-free reads in r
 The SDK uses a `Result<T, Error>` pattern instead of exceptions.
 
 ```cpp
-auto result = client.activate("LICENSE-KEY");
+auto result = client.validate("LICENSE-KEY");
 
 if (result.is_ok()) {
-    auto& activation = result.value();
-    // Success
+    auto& validation = result.value();
+    // Success - check validation.valid for license validity
 } else {
-    auto& error = result.error();
-    std::cerr << "Error: " << error.message << "\n";
+    // Error - network, auth, or API error
+    std::cerr << "Error: " << result.error_message() << "\n";
 
-    switch (error.code) {
-        case ErrorCode::NetworkError:
-            // Network issue
+    switch (result.error_code()) {
+        case licenseseat::ErrorCode::NetworkError:
+            // No network connectivity
             break;
-        case ErrorCode::LicenseNotFound:
-            // Invalid key
+        case licenseseat::ErrorCode::LicenseNotFound:
+            // Invalid license key
             break;
-        case ErrorCode::LicenseExpired:
-            // Expired
+        case licenseseat::ErrorCode::AuthenticationFailed:
+            // Invalid API key
             break;
-        case ErrorCode::SeatLimitExceeded:
+        case licenseseat::ErrorCode::SeatLimitExceeded:
             // Too many activations
             break;
+        // ... handle other cases
     }
 }
 ```
 
 ### Error Codes
 
-| Code                | Description                        |
-| ------------------- | ---------------------------------- |
-| `NetworkError`      | HTTP request failed                |
-| `Timeout`           | Request timed out                  |
-| `LicenseNotFound`   | License key not found              |
-| `LicenseExpired`    | License has expired                |
-| `LicenseInactive`   | License is not active              |
-| `SeatLimitExceeded` | Maximum activations reached        |
-| `DeviceMismatch`    | Device identifier mismatch         |
-| `InvalidSignature`  | Cryptographic verification failed  |
-| `ClockTamper`       | System clock manipulation detected |
-| `StorageError`      | Failed to read/write cache         |
+| Code                    | Description                                 |
+| ----------------------- | ------------------------------------------- |
+| `Success`               | Operation completed successfully            |
+| `NetworkError`          | HTTP request failed (no connectivity)       |
+| `ConnectionTimeout`     | Request timed out                           |
+| `SSLError`              | SSL/TLS error                               |
+| `InvalidLicenseKey`     | License key format is invalid               |
+| `LicenseNotFound`       | License key not found in system             |
+| `LicenseExpired`        | License has expired                         |
+| `LicenseRevoked`        | License has been revoked                    |
+| `LicenseSuspended`      | License is suspended                        |
+| `LicenseNotActive`      | License is not active                       |
+| `LicenseNotStarted`     | License hasn't started yet                  |
+| `SeatLimitExceeded`     | Maximum activations reached                 |
+| `ActivationNotFound`    | Device activation not found                 |
+| `DeviceAlreadyActivated`| Device is already activated                 |
+| `ProductNotFound`       | Product slug not found                      |
+| `ReleaseNotFound`       | Software release not found                  |
+| `AuthenticationFailed`  | Invalid or missing API key                  |
+| `PermissionDenied`      | API key lacks required permissions          |
+| `MissingParameter`      | Required parameter not provided             |
+| `InvalidParameter`      | Parameter value is invalid                  |
+| `ValidationFailed`      | Generic validation failure                  |
+| `ServerError`           | Server-side error (5xx)                     |
+| `FeatureNotConfigured`  | Feature not enabled for product             |
+| `SigningNotConfigured`  | Offline signing not configured              |
+| `ParseError`            | Failed to parse response                    |
+| `InvalidSignature`      | Cryptographic signature invalid             |
+| `FileError`             | File read/write error                       |
+| `FileNotFound`          | File not found                              |
+| `Unknown`               | Unknown error                               |
 
 ---
 
@@ -400,17 +633,55 @@ cmake --build build
 ```
 
 ```
-[==========] 208 tests from 59 test suites ran. (195 ms total)
-[  PASSED  ] 208 tests.
+[==========] 236 tests from 67 test suites ran. (210 ms total)
+[  PASSED  ] 236 tests.
 ```
 
-Test coverage includes:
-- RFC 8032 Ed25519 test vectors
-- Thread safety (200 concurrent clients)
-- Rapid create/destroy cycles
-- Large data handling (10KB keys, 100KB metadata)
-- Platform-specific device ID generation
-- Offline license verification
+### Test Suites
+
+The SDK includes comprehensive tests:
+
+| Test Suite           | Tests | Network | Description                                 |
+| -------------------- | ----- | ------- | ------------------------------------------- |
+| Unit tests           | 236   | No      | Core functionality, parsing, crypto         |
+| Crypto stress tests  | 44    | Yes     | Ed25519, Base64, offline token verification |
+| Integration tests    | 48    | Yes     | Full API testing                            |
+| Scenario tests       | 38    | Yes     | Real-world workflows (10 scenarios)         |
+
+### Running Integration Tests
+
+The integration, crypto stress, and scenario tests require a live LicenseSeat account. Configure credentials via environment variables:
+
+```bash
+# Set your credentials
+export LICENSESEAT_API_KEY="ls_your_api_key"
+export LICENSESEAT_PRODUCT_SLUG="your-product"
+export LICENSESEAT_LICENSE_KEY="XXXX-XXXX-XXXX-XXXX"
+
+# Build the tests
+cmake -B build -DLICENSESEAT_BUILD_TESTS=ON
+cmake --build build
+
+# Run integration tests
+./build/tests/integration_test      # 48 tests - Full API coverage
+./build/tests/crypto_stress_test    # 44 tests - Crypto & offline tokens
+./build/tests/scenario_test         # 38 tests - Real-world scenarios
+```
+
+### Scenario Test Coverage
+
+The scenario tests validate 10 real-world use cases matching the Swift SDK test coverage:
+
+1. **First app launch & activation** – Fresh install, validation, activation
+2. **Returning user** – Cached license, session persistence
+3. **Offline mode** – Offline token generation and verification
+4. **Security** – Fake keys, wrong product, invalid API key, tampered signatures
+5. **License persistence** – State consistency during session
+6. **Grace period & expiration** – Token expiry handling
+7. **Deactivation flow** – Device removal, seat freeing
+8. **Re-activation** – Multi-device scenarios, seat limits
+9. **Auto-validation** – Background refresh cycles
+10. **Event system** – Event subscriptions and callbacks
 
 ---
 

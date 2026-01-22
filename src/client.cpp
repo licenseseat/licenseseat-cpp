@@ -20,14 +20,14 @@ namespace licenseseat {
 class Client::Impl {
   public:
     explicit Impl(Config config) : config_(std::move(config)) {
-        // Auto-generate device identifier if not provided
-        if (config_.device_identifier.empty()) {
-            device_identifier_ = device::generate_device_id();
-            if (device_identifier_.empty()) {
-                device_identifier_ = "unknown-device";
+        // Auto-generate device ID if not provided
+        if (config_.device_id.empty()) {
+            device_id_ = device::generate_device_id();
+            if (device_id_.empty()) {
+                device_id_ = "unknown-device";
             }
         } else {
-            device_identifier_ = config_.device_identifier;
+            device_id_ = config_.device_id;
         }
 
         // Initialize HTTP client
@@ -62,7 +62,7 @@ class Client::Impl {
     // ========== Synchronous API ==========
 
     Result<ValidationResult> validate(const std::string& license_key,
-                                      const std::string& device_identifier) {
+                                      const std::string& device_id_param) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (license_key.empty()) {
@@ -70,17 +70,22 @@ class Client::Impl {
                                                    "License key cannot be empty");
         }
 
-        std::string device_id = device_identifier.empty() ? device_identifier_ : device_identifier;
+        if (config_.product_slug.empty()) {
+            return Result<ValidationResult>::error(ErrorCode::MissingParameter,
+                                                   "Product slug is required in config");
+        }
+
+        std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
 
         event_bus_.emit(events::VALIDATION_START,
                         std::map<std::string, std::string>{{"license_key", license_key}});
 
-        // Build request
-        auto body = json::build_validate_request(license_key, device_id, config_.product_slug);
+        // Build request - new URL structure: /products/{slug}/licenses/{key}/validate
+        auto body = json::build_validate_request(device_id);
 
         http::Request request;
         request.method = http::Method::POST;
-        request.path = "/licenses/validate";
+        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/validate";
         request.body = body.dump();
 
         auto response = http_client_->send(request);
@@ -132,7 +137,9 @@ class Client::Impl {
     }
 
     Result<Activation> activate(const std::string& license_key,
-                                const std::string& device_identifier, const Metadata& metadata) {
+                                const std::string& device_id_param,
+                                const std::string& device_name,
+                                const Metadata& metadata) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (license_key.empty()) {
@@ -140,22 +147,27 @@ class Client::Impl {
                                              "License key cannot be empty");
         }
 
-        std::string device_id = device_identifier.empty() ? device_identifier_ : device_identifier;
+        if (config_.product_slug.empty()) {
+            return Result<Activation>::error(ErrorCode::MissingParameter,
+                                             "Product slug is required in config");
+        }
+
+        std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
         if (device_id.empty()) {
             return Result<Activation>::error(ErrorCode::MissingParameter,
-                                             "Device identifier is required");
+                                             "Device ID is required");
         }
 
         event_bus_.emit(events::ACTIVATION_START,
                         std::map<std::string, std::string>{{"license_key", license_key},
                                                            {"device_id", device_id}});
 
-        // Build request
-        auto body = json::build_activate_request(license_key, device_id, metadata);
+        // Build request - new URL structure: /products/{slug}/licenses/{key}/activate
+        auto body = json::build_activate_request(device_id, device_name, metadata);
 
         http::Request request;
         request.method = http::Method::POST;
-        request.path = "/activations/activate";
+        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/activate";
         request.body = body.dump();
 
         auto response = http_client_->send(request);
@@ -179,7 +191,7 @@ class Client::Impl {
             event_bus_.emit(events::ACTIVATION_SUCCESS, activation);
 
             // Sync offline assets in background
-            sync_offline_assets_impl();
+            sync_offline_assets_impl(license_key, device_id);
 
             return Result<Activation>::ok(std::move(activation));
         } catch (const nlohmann::json::exception& e) {
@@ -188,65 +200,73 @@ class Client::Impl {
         }
     }
 
-    Result<Activation> deactivate(const std::string& license_key,
-                                  const std::string& device_identifier) {
+    Result<Deactivation> deactivate(const std::string& license_key,
+                                    const std::string& device_id) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (license_key.empty()) {
-            return Result<Activation>::error(ErrorCode::InvalidLicenseKey,
-                                             "License key cannot be empty");
+            return Result<Deactivation>::error(ErrorCode::InvalidLicenseKey,
+                                               "License key cannot be empty");
         }
 
-        std::string device_id = device_identifier.empty() ? device_identifier_ : device_identifier;
+        if (device_id.empty()) {
+            return Result<Deactivation>::error(ErrorCode::MissingParameter,
+                                               "Device ID is required");
+        }
+
+        if (config_.product_slug.empty()) {
+            return Result<Deactivation>::error(ErrorCode::MissingParameter,
+                                               "Product slug is required in config");
+        }
 
         event_bus_.emit(events::DEACTIVATION_START,
                         std::map<std::string, std::string>{{"license_key", license_key}});
 
-        // Build request
-        auto body = json::build_deactivate_request(license_key, device_id);
+        // Build request - new URL structure: /products/{slug}/licenses/{key}/deactivate
+        auto body = json::build_deactivate_request(device_id);
 
         http::Request request;
         request.method = http::Method::POST;
-        request.path = "/activations/deactivate";
+        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/deactivate";
         request.body = body.dump();
 
         auto response = http_client_->send(request);
 
         if (!response.success) {
             if (response.error_message.empty()) {
-                auto err = handle_error_response<Activation>(response);
+                auto err = handle_error_response<Deactivation>(response);
                 event_bus_.emit(events::DEACTIVATION_ERROR,
                                 std::map<std::string, std::string>{{"error", err.error_message()}});
                 return err;
             }
-            return Result<Activation>::error(ErrorCode::NetworkError, response.error_message);
+            return Result<Deactivation>::error(ErrorCode::NetworkError, response.error_message);
         }
 
         // Parse response
         try {
             auto j = nlohmann::json::parse(response.body);
-            auto activation = json::parse_activation(j);
+            auto deactivation = json::parse_deactivation(j);
             current_activation_.reset();
             cached_license_.reset();
             cached_validation_.reset();
             storage_->clear_license();
-            storage_->clear_offline_license();
+            storage_->clear_offline_token();
 
-            event_bus_.emit(events::DEACTIVATION_SUCCESS, activation);
+            event_bus_.emit(events::DEACTIVATION_SUCCESS, deactivation);
 
-            return Result<Activation>::ok(std::move(activation));
+            return Result<Deactivation>::ok(std::move(deactivation));
         } catch (const nlohmann::json::exception& e) {
-            return Result<Activation>::error(ErrorCode::ParseError,
-                                             std::string("Failed to parse response: ") + e.what());
+            return Result<Deactivation>::error(ErrorCode::ParseError,
+                                               std::string("Failed to parse response: ") + e.what());
         }
     }
 
     // ========== Async API ==========
 
     void validate_async(const std::string& license_key, AsyncCallback callback,
-                        const std::string& device_identifier) {
-        std::thread([this, license_key, callback, device_identifier]() {
-            auto result = this->validate(license_key, device_identifier);
+                        const std::string& device_id) {
+        std::thread([this, license_key, callback, device_id]() {
+            auto result = this->validate(license_key, device_id);
             if (callback) {
                 callback(std::move(result));
             }
@@ -254,84 +274,102 @@ class Client::Impl {
     }
 
     void activate_async(const std::string& license_key, ActivationCallback callback,
-                        const std::string& device_identifier, const Metadata& metadata) {
-        std::thread([this, license_key, callback, device_identifier, metadata]() {
-            auto result = this->activate(license_key, device_identifier, metadata);
+                        const std::string& device_id, const std::string& device_name,
+                        const Metadata& metadata) {
+        std::thread([this, license_key, callback, device_id, device_name, metadata]() {
+            auto result = this->activate(license_key, device_id, device_name, metadata);
             if (callback) {
                 callback(std::move(result));
             }
         }).detach();
     }
 
-    void deactivate_async(const std::string& license_key, ActivationCallback callback,
-                          const std::string& device_identifier) {
-        std::thread([this, license_key, callback, device_identifier]() {
-            auto result = this->deactivate(license_key, device_identifier);
+    void deactivate_async(const std::string& license_key, DeactivationCallback callback,
+                          const std::string& device_id) {
+        std::thread([this, license_key, callback, device_id]() {
+            auto result = this->deactivate(license_key, device_id);
             if (callback) {
                 callback(std::move(result));
             }
         }).detach();
     }
 
-    // ========== Offline Licensing ==========
+    // ========== Offline Tokens ==========
 
-    Result<OfflineLicense> generate_offline_license(const std::string& license_key) {
+    Result<OfflineToken> generate_offline_token(const std::string& license_key,
+                                                const std::string& device_id_param,
+                                                int ttl_days) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (license_key.empty()) {
-            return Result<OfflineLicense>::error(ErrorCode::InvalidLicenseKey,
-                                                 "License key cannot be empty");
+            return Result<OfflineToken>::error(ErrorCode::InvalidLicenseKey,
+                                               "License key cannot be empty");
         }
 
+        if (config_.product_slug.empty()) {
+            return Result<OfflineToken>::error(ErrorCode::MissingParameter,
+                                               "Product slug is required in config");
+        }
+
+        std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
+
+        // Build request - new URL: /products/{slug}/licenses/{key}/offline-token
+        auto body = json::build_offline_token_request(device_id, ttl_days);
+
         http::Request request;
-        request.method = http::Method::GET;
-        request.path = "/licenses/" + license_key + "/offline_license";
+        request.method = http::Method::POST;
+        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/offline-token";
+        request.body = body.dump();
 
         auto response = http_client_->send(request);
 
         if (!response.success) {
             if (response.error_message.empty()) {
-                return handle_error_response<OfflineLicense>(response);
+                return handle_error_response<OfflineToken>(response);
             }
-            return Result<OfflineLicense>::error(ErrorCode::NetworkError, response.error_message);
+            return Result<OfflineToken>::error(ErrorCode::NetworkError, response.error_message);
         }
 
         // Parse response
         try {
             auto j = nlohmann::json::parse(response.body);
-            auto offline = json::parse_offline_license(j);
+            auto offline = json::parse_offline_token(j);
 
             // Cache it
-            storage_->set_offline_license(offline);
+            storage_->set_offline_token(offline);
 
-            event_bus_.emit(events::OFFLINE_LICENSE_READY, offline);
+            event_bus_.emit(events::OFFLINE_TOKEN_READY, offline);
 
-            return Result<OfflineLicense>::ok(std::move(offline));
+            return Result<OfflineToken>::ok(std::move(offline));
         } catch (const nlohmann::json::exception& e) {
-            return Result<OfflineLicense>::error(
+            return Result<OfflineToken>::error(
                 ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
         }
     }
 
-    Result<bool> verify_offline_license(const OfflineLicense& offline_license,
-                                        const std::string& public_key_b64) {
+    Result<bool> verify_offline_token(const OfflineToken& offline_token,
+                                      const std::string& public_key_b64) {
         // Perform basic validity checks first
-        if (offline_license.license_key.empty()) {
+        if (offline_token.token.license_key.empty()) {
             return Result<bool>::error(ErrorCode::InvalidLicenseKey, "License key is empty");
         }
 
-        if (offline_license.is_expired()) {
-            return Result<bool>::error(ErrorCode::LicenseExpired, "Offline license has expired");
+        if (offline_token.is_expired()) {
+            return Result<bool>::error(ErrorCode::LicenseExpired, "Offline token has expired");
+        }
+
+        if (offline_token.is_not_yet_valid()) {
+            return Result<bool>::error(ErrorCode::LicenseNotStarted, "Offline token is not yet valid");
         }
 
         // Determine which public key to use
         std::string key_to_use = public_key_b64;
         if (key_to_use.empty()) {
-            key_to_use = config_.offline_public_key;
+            key_to_use = config_.signing_public_key;
         }
         if (key_to_use.empty()) {
             // Try to get from cache
-            auto cached_key = storage_->get_public_key(offline_license.key_id);
+            auto cached_key = storage_->get_signing_key(offline_token.signature.key_id);
             if (cached_key) {
                 key_to_use = *cached_key;
             }
@@ -342,24 +380,25 @@ class Client::Impl {
                                        "Public key required for offline verification");
         }
 
-        // Verify the Ed25519 signature
-        auto result = crypto::verify_offline_license_signature(offline_license, key_to_use);
+        // Verify the Ed25519 signature using the canonical JSON
+        auto result = crypto::verify_offline_token_signature(offline_token, key_to_use);
         if (result.is_ok() && result.value()) {
-            event_bus_.emit(events::OFFLINE_LICENSE_VERIFIED, offline_license);
+            event_bus_.emit(events::OFFLINE_TOKEN_VERIFIED, offline_token);
         }
         return result;
     }
 
-    Result<std::string> fetch_public_key(const std::string& key_id) {
+    Result<std::string> fetch_signing_key(const std::string& key_id) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (key_id.empty()) {
             return Result<std::string>::error(ErrorCode::MissingParameter, "Key ID is required");
         }
 
+        // New URL: /signing-keys/{key_id}
         http::Request request;
         request.method = http::Method::GET;
-        request.path = "/public_keys/" + key_id;
+        request.path = "/signing-keys/" + key_id;
 
         auto response = http_client_->send(request);
 
@@ -373,10 +412,10 @@ class Client::Impl {
         // Parse response
         try {
             auto j = nlohmann::json::parse(response.body);
-            auto key = json::parse_public_key(j);
+            auto key = json::parse_signing_key(j);
 
             // Cache it
-            storage_->set_public_key(key_id, key);
+            storage_->set_signing_key(key_id, key);
 
             return Result<std::string>::ok(std::move(key));
         } catch (const nlohmann::json::exception& e) {
@@ -386,7 +425,11 @@ class Client::Impl {
     }
 
     void sync_offline_assets() {
-        std::thread([this]() { this->sync_offline_assets_impl(); }).detach();
+        if (!cached_license_) {
+            return;
+        }
+        auto license_key = cached_license_->key();
+        std::thread([this, license_key]() { this->sync_offline_assets_impl(license_key, device_id_); }).detach();
     }
 
     // ========== Auto-Validation ==========
@@ -447,7 +490,7 @@ class Client::Impl {
 
         ValidationResult result;
         result.valid = false;
-        result.reason = "No license validated";
+        result.message = "No license validated";
         return result;
     }
 
@@ -461,25 +504,25 @@ class Client::Impl {
 
         EntitlementStatus status;
 
-        if (!cached_validation_ || !cached_validation_->valid) {
+        if (!cached_license_) {
             status.active = false;
             status.reason = "no_license";
             return status;
         }
 
-        for (const auto& ent : cached_validation_->active_entitlements) {
+        for (const auto& ent : cached_license_->active_entitlements()) {
             if (ent.key == entitlement_key) {
-                if (ent.expires) {
-                    if (*ent.expires < std::chrono::system_clock::now()) {
+                if (ent.expires_at) {
+                    if (*ent.expires_at < std::chrono::system_clock::now()) {
                         status.active = false;
                         status.reason = "expired";
-                        status.expires_at = ent.expires;
+                        status.expires_at = ent.expires_at;
                         status.entitlement = ent;
                         return status;
                     }
                 }
                 status.active = true;
-                status.expires_at = ent.expires;
+                status.expires_at = ent.expires_at;
                 status.entitlement = ent;
                 return status;
             }
@@ -504,10 +547,12 @@ class Client::Impl {
 
     // ========== Releases ==========
 
-    Result<Release> get_latest_release(const std::string& product_slug, const std::string& channel,
+    Result<Release> get_latest_release(const std::string& product_slug_param,
+                                       const std::string& channel,
                                        const std::string& platform) {
         std::lock_guard<std::mutex> lock(mutex_);
 
+        std::string product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
         if (product_slug.empty()) {
             return Result<Release>::error(ErrorCode::MissingParameter, "Product slug is required");
         }
@@ -546,11 +591,12 @@ class Client::Impl {
         }
     }
 
-    Result<std::vector<Release>> list_releases(const std::string& product_slug,
+    Result<std::vector<Release>> list_releases(const std::string& product_slug_param,
                                                const std::string& channel,
                                                const std::string& platform) {
         std::lock_guard<std::mutex> lock(mutex_);
 
+        std::string product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
         if (product_slug.empty()) {
             return Result<std::vector<Release>>::error(ErrorCode::MissingParameter,
                                                        "Product slug is required");
@@ -591,7 +637,10 @@ class Client::Impl {
         }
     }
 
-    Result<DownloadToken> generate_download_token(int release_id, const std::string& license_key) {
+    Result<DownloadToken> generate_download_token(const std::string& version,
+                                                  const std::string& license_key,
+                                                  const std::string& product_slug_param,
+                                                  const std::string& platform) {
         std::lock_guard<std::mutex> lock(mutex_);
 
         if (license_key.empty()) {
@@ -599,11 +648,23 @@ class Client::Impl {
                                                 "License key is required");
         }
 
-        auto body = json::build_download_token_request(license_key);
+        if (version.empty()) {
+            return Result<DownloadToken>::error(ErrorCode::MissingParameter,
+                                                "Version is required");
+        }
+
+        std::string product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
+        if (product_slug.empty()) {
+            return Result<DownloadToken>::error(ErrorCode::MissingParameter,
+                                                "Product slug is required");
+        }
+
+        // New URL: /products/{slug}/releases/{version}/download-token
+        auto body = json::build_download_token_request(license_key, platform);
 
         http::Request request;
         request.method = http::Method::POST;
-        request.path = "/releases/" + std::to_string(release_id) + "/generate_download_token";
+        request.path = "/products/" + product_slug + "/releases/" + version + "/download-token";
         request.body = body.dump();
 
         auto response = http_client_->send(request);
@@ -626,12 +687,13 @@ class Client::Impl {
         }
     }
 
-    Result<bool> heartbeat() {
+    Result<bool> health() {
         std::lock_guard<std::mutex> lock(mutex_);
 
+        // New URL: /health
         http::Request request;
         request.method = http::Method::GET;
-        request.path = "/heartbeat";
+        request.path = "/health";
 
         auto response = http_client_->send(request);
 
@@ -659,7 +721,7 @@ class Client::Impl {
 
     const Config& config() const noexcept { return config_; }
 
-    const std::string& device_identifier() const noexcept { return device_identifier_; }
+    const std::string& device_id() const noexcept { return device_id_; }
 
   private:
     template <typename T>
@@ -670,13 +732,13 @@ class Client::Impl {
             auto api_error = json::parse_error_response(j);
 
             ErrorCode code = ErrorCode::Unknown;
-            if (!api_error.reason_code.empty()) {
-                code = json::reason_code_to_error_code(api_error.reason_code);
+            if (!api_error.code.empty()) {
+                code = json::error_code_to_error_code(api_error.code);
             } else {
                 code = http::status_code_to_error_code(response.status_code);
             }
 
-            std::string message = api_error.error;
+            std::string message = api_error.message;
             if (message.empty()) {
                 message = error_code_to_string(code);
             }
@@ -709,20 +771,20 @@ class Client::Impl {
     }
 
     Result<ValidationResult> verify_cached_offline() {
-        auto cached_offline = storage_->get_offline_license();
+        auto cached_offline = storage_->get_offline_token();
         if (!cached_offline) {
             ValidationResult result;
             result.valid = false;
             result.offline = true;
-            result.reason_code = "no_offline_license";
+            result.code = "no_offline_token";
             return Result<ValidationResult>::ok(result);
         }
 
         std::string public_key;
-        if (!config_.offline_public_key.empty()) {
-            public_key = config_.offline_public_key;
+        if (!config_.signing_public_key.empty()) {
+            public_key = config_.signing_public_key;
         } else {
-            auto cached_key = storage_->get_public_key(cached_offline->key_id);
+            auto cached_key = storage_->get_signing_key(cached_offline->signature.key_id);
             if (cached_key) {
                 public_key = *cached_key;
             }
@@ -732,21 +794,16 @@ class Client::Impl {
             ValidationResult result;
             result.valid = false;
             result.offline = true;
-            result.reason_code = "no_public_key";
+            result.code = "no_signing_key";
             return Result<ValidationResult>::ok(result);
         }
 
-        auto verify_result = verify_offline_license(*cached_offline, public_key);
+        auto verify_result = verify_offline_token(*cached_offline, public_key);
         ValidationResult result;
         result.offline = true;
 
         if (verify_result.is_ok() && verify_result.value()) {
             result.valid = true;
-
-            // Extract entitlements
-            for (const auto& ent : cached_offline->entitlements) {
-                result.active_entitlements.push_back(ent);
-            }
 
             // Check grace period
             auto last_seen = storage_->get_last_seen_timestamp();
@@ -759,37 +816,32 @@ class Client::Impl {
                             24;
                 if (days > config_.max_offline_days) {
                     result.valid = false;
-                    result.reason_code = "grace_period_expired";
+                    result.code = "grace_period_expired";
                 }
             }
         } else {
             result.valid = false;
-            result.reason_code = "signature_invalid";
+            result.code = "signature_invalid";
         }
 
         return Result<ValidationResult>::ok(result);
     }
 
-    void sync_offline_assets_impl() {
-        if (!cached_license_) {
-            return;
-        }
-
-        auto license_key = cached_license_->key();
+    void sync_offline_assets_impl(const std::string& license_key, const std::string& device_id) {
         if (license_key.empty()) {
             return;
         }
 
-        // Fetch offline license
-        auto offline_result = generate_offline_license(license_key);
+        // Fetch offline token
+        auto offline_result = generate_offline_token(license_key, device_id, 30);
         if (offline_result.is_ok()) {
             auto& offline = offline_result.value();
 
-            // Fetch public key if needed
-            if (!offline.key_id.empty()) {
-                auto cached_key = storage_->get_public_key(offline.key_id);
+            // Fetch signing key if needed
+            if (!offline.signature.key_id.empty()) {
+                auto cached_key = storage_->get_signing_key(offline.signature.key_id);
                 if (!cached_key) {
-                    (void)fetch_public_key(offline.key_id);
+                    (void)fetch_signing_key(offline.signature.key_id);
                 }
             }
         }
@@ -799,7 +851,7 @@ class Client::Impl {
                                 const ValidationResult& validation) {
         CachedLicense cached;
         cached.license_key = license_key;
-        cached.device_identifier = device_id;
+        cached.device_id = device_id;
         cached.activated_at = std::chrono::system_clock::now();
         cached.last_validated = std::chrono::system_clock::now();
         cached.validation = validation;
@@ -814,7 +866,7 @@ class Client::Impl {
     }
 
     Config config_;
-    std::string device_identifier_;
+    std::string device_id_;
     std::unique_ptr<http::HttpClient> http_client_;
     std::unique_ptr<StorageInterface> storage_;
     std::optional<Activation> current_activation_;
@@ -845,46 +897,51 @@ Client::Client(Client&&) noexcept = default;
 Client& Client::operator=(Client&&) noexcept = default;
 
 Result<ValidationResult> Client::validate(const std::string& license_key,
-                                          const std::string& device_identifier) {
-    return impl_->validate(license_key, device_identifier);
+                                          const std::string& device_id) {
+    return impl_->validate(license_key, device_id);
 }
 
 Result<Activation> Client::activate(const std::string& license_key,
-                                    const std::string& device_identifier, const Metadata& metadata) {
-    return impl_->activate(license_key, device_identifier, metadata);
+                                    const std::string& device_id,
+                                    const std::string& device_name,
+                                    const Metadata& metadata) {
+    return impl_->activate(license_key, device_id, device_name, metadata);
 }
 
-Result<Activation> Client::deactivate(const std::string& license_key,
-                                      const std::string& device_identifier) {
-    return impl_->deactivate(license_key, device_identifier);
+Result<Deactivation> Client::deactivate(const std::string& license_key,
+                                        const std::string& device_id) {
+    return impl_->deactivate(license_key, device_id);
 }
 
 void Client::validate_async(const std::string& license_key, AsyncCallback callback,
-                            const std::string& device_identifier) {
-    impl_->validate_async(license_key, std::move(callback), device_identifier);
+                            const std::string& device_id) {
+    impl_->validate_async(license_key, std::move(callback), device_id);
 }
 
 void Client::activate_async(const std::string& license_key, ActivationCallback callback,
-                            const std::string& device_identifier, const Metadata& metadata) {
-    impl_->activate_async(license_key, std::move(callback), device_identifier, metadata);
+                            const std::string& device_id, const std::string& device_name,
+                            const Metadata& metadata) {
+    impl_->activate_async(license_key, std::move(callback), device_id, device_name, metadata);
 }
 
-void Client::deactivate_async(const std::string& license_key, ActivationCallback callback,
-                              const std::string& device_identifier) {
-    impl_->deactivate_async(license_key, std::move(callback), device_identifier);
+void Client::deactivate_async(const std::string& license_key, DeactivationCallback callback,
+                              const std::string& device_id) {
+    impl_->deactivate_async(license_key, std::move(callback), device_id);
 }
 
-Result<OfflineLicense> Client::generate_offline_license(const std::string& license_key) {
-    return impl_->generate_offline_license(license_key);
+Result<OfflineToken> Client::generate_offline_token(const std::string& license_key,
+                                                    const std::string& device_id,
+                                                    int ttl_days) {
+    return impl_->generate_offline_token(license_key, device_id, ttl_days);
 }
 
-Result<bool> Client::verify_offline_license(const OfflineLicense& offline_license,
-                                            const std::string& public_key_b64) {
-    return impl_->verify_offline_license(offline_license, public_key_b64);
+Result<bool> Client::verify_offline_token(const OfflineToken& offline_token,
+                                          const std::string& public_key_b64) {
+    return impl_->verify_offline_token(offline_token, public_key_b64);
 }
 
-Result<std::string> Client::fetch_public_key(const std::string& key_id) {
-    return impl_->fetch_public_key(key_id);
+Result<std::string> Client::fetch_signing_key(const std::string& key_id) {
+    return impl_->fetch_signing_key(key_id);
 }
 
 void Client::sync_offline_assets() { impl_->sync_offline_assets(); }
@@ -925,17 +982,19 @@ Result<std::vector<Release>> Client::list_releases(const std::string& product_sl
     return impl_->list_releases(product_slug, channel, platform);
 }
 
-Result<DownloadToken> Client::generate_download_token(int release_id,
-                                                      const std::string& license_key) {
-    return impl_->generate_download_token(release_id, license_key);
+Result<DownloadToken> Client::generate_download_token(const std::string& version,
+                                                      const std::string& license_key,
+                                                      const std::string& product_slug,
+                                                      const std::string& platform) {
+    return impl_->generate_download_token(version, license_key, product_slug, platform);
 }
 
-Result<bool> Client::heartbeat() { return impl_->heartbeat(); }
+Result<bool> Client::health() { return impl_->health(); }
 
 void Client::reset() { impl_->reset(); }
 
 const Config& Client::config() const noexcept { return impl_->config(); }
 
-const std::string& Client::device_identifier() const { return impl_->device_identifier(); }
+const std::string& Client::device_id() const { return impl_->device_id(); }
 
 }  // namespace licenseseat

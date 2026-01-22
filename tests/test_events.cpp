@@ -168,8 +168,8 @@ TEST(EventConstantsTest, EventNamesAreDefined) {
     EXPECT_STREQ(events::NETWORK_OFFLINE, "network:offline");
     EXPECT_STREQ(events::AUTOVALIDATION_CYCLE, "autovalidation:cycle");
     EXPECT_STREQ(events::AUTOVALIDATION_STOPPED, "autovalidation:stopped");
-    EXPECT_STREQ(events::OFFLINE_LICENSE_READY, "offlineLicense:ready");
-    EXPECT_STREQ(events::OFFLINE_LICENSE_VERIFIED, "offlineLicense:verified");
+    EXPECT_STREQ(events::OFFLINE_TOKEN_READY, "offlineToken:ready");
+    EXPECT_STREQ(events::OFFLINE_TOKEN_VERIFIED, "offlineToken:verified");
     EXPECT_STREQ(events::SDK_RESET, "sdk:reset");
 }
 
