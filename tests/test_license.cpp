@@ -66,7 +66,7 @@ TEST_F(LicenseTest, FullConstructor) {
     EXPECT_TRUE(license.starts_at().has_value());
     EXPECT_TRUE(license.expires_at().has_value());
     EXPECT_EQ(license.metadata().at("customer"), "test");
-    EXPECT_EQ(license.active_entitlements().size(), 1);
+    EXPECT_EQ(license.active_entitlements().size(), 1U);
     EXPECT_EQ(license.product().slug, "my-product");
     EXPECT_EQ(license.product().name, "My Product");
 }

@@ -42,6 +42,7 @@ add_executable(integration_test
 target_compile_definitions(integration_test
     PRIVATE
         CPPHTTPLIB_OPENSSL_SUPPORT
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 
 target_link_libraries(integration_test
@@ -59,6 +60,7 @@ add_executable(crypto_stress_test
 target_compile_definitions(crypto_stress_test
     PRIVATE
         CPPHTTPLIB_OPENSSL_SUPPORT
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 
 target_link_libraries(crypto_stress_test
@@ -76,6 +78,7 @@ add_executable(scenario_test
 target_compile_definitions(scenario_test
     PRIVATE
         CPPHTTPLIB_OPENSSL_SUPPORT
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 
 target_link_libraries(scenario_test
