@@ -41,7 +41,7 @@ Config make_test_config(const std::string& suffix = "") {
     Config config;
     config.api_key = "test-key" + suffix;
     config.product_slug = "test-product";
-    config.device_identifier = "test-device" + suffix;
+    config.device_id = "test-device" + suffix;
     config.api_url = "http://localhost:1";  // Non-existent URL for fast failure
     config.timeout_seconds = 1;
     config.max_retries = 0;
@@ -495,35 +495,37 @@ TEST(ConfigValidationTest, ZeroTimeoutHandled) {
     EXPECT_TRUE(result.is_error());
 }
 
-// ==================== Offline License Expiration Edge Cases ====================
+// ==================== Offline Token Expiration Edge Cases ====================
 
-TEST(OfflineLicenseEdgeCasesTest, ExpiredLicenseRejected) {
+TEST(OfflineTokenEdgeCasesTest, ExpiredTokenRejected) {
     auto config = make_test_config("-offline");
     Client client(config);
 
-    OfflineLicense offline;
-    offline.license_key = "TEST-KEY";
-    offline.product_slug = "test";
-    offline.issued_at = std::time(nullptr) - (365 * 24 * 60 * 60);  // 1 year ago
-    offline.expires_at = std::time(nullptr) - (1);  // 1 second ago
+    OfflineToken offline;
+    offline.token.license_key = "TEST-KEY";
+    offline.token.product_slug = "test";
+    offline.token.iat = std::time(nullptr) - (365 * 24 * 60 * 60);  // 1 year ago
+    offline.token.nbf = offline.token.iat;
+    offline.token.exp = std::time(nullptr) - (1);  // 1 second ago
 
-    auto result = client.verify_offline_license(offline);
+    auto result = client.verify_offline_token(offline);
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::LicenseExpired);
 }
 
-TEST(OfflineLicenseEdgeCasesTest, FutureLicenseHandled) {
+TEST(OfflineTokenEdgeCasesTest, FutureTokenHandled) {
     auto config = make_test_config("-offline-future");
     Client client(config);
 
-    OfflineLicense offline;
-    offline.license_key = "TEST-KEY";
-    offline.product_slug = "test";
-    offline.issued_at = std::time(nullptr) + (365 * 24 * 60 * 60);  // 1 year in future
-    offline.expires_at = std::time(nullptr) + (2 * 365 * 24 * 60 * 60);  // 2 years in future
+    OfflineToken offline;
+    offline.token.license_key = "TEST-KEY";
+    offline.token.product_slug = "test";
+    offline.token.iat = std::time(nullptr) + (365 * 24 * 60 * 60);  // 1 year in future
+    offline.token.nbf = offline.token.iat;
+    offline.token.exp = std::time(nullptr) + static_cast<int64_t>(2) * 365 * 24 * 60 * 60;  // 2 years in future
 
     // Should handle gracefully (may reject or accept based on implementation)
-    auto result = client.verify_offline_license(offline);
+    auto result = client.verify_offline_token(offline);
     // Just verify it doesn't crash
     (void)result;
 }
@@ -553,7 +555,8 @@ TEST(LargeDataTest, LargeMetadataHandled) {
     }
 
     // Activation with large metadata should not crash
-    auto result = client.activate("TEST-KEY", "", large_metadata);
+    // activate(license_key, device_id, device_name, metadata)
+    auto result = client.activate("TEST-KEY", "test-device", "", large_metadata);
     EXPECT_TRUE(result.is_error());  // Will fail due to network, but shouldn't crash
 }
 

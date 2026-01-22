@@ -23,7 +23,7 @@ namespace licenseseat {
  */
 struct CachedLicense {
     std::string license_key;
-    std::string device_identifier;
+    std::string device_id;
     std::chrono::system_clock::time_point activated_at;
     std::chrono::system_clock::time_point last_validated;
 
@@ -50,20 +50,20 @@ class StorageInterface {
     /// Clear stored license
     virtual void clear_license() = 0;
 
-    /// Store offline license data
-    virtual bool set_offline_license(const OfflineLicense& offline) = 0;
+    /// Store offline token data
+    virtual bool set_offline_token(const OfflineToken& offline) = 0;
 
-    /// Retrieve offline license
-    virtual std::optional<OfflineLicense> get_offline_license() = 0;
+    /// Retrieve offline token
+    virtual std::optional<OfflineToken> get_offline_token() = 0;
 
-    /// Clear offline license
-    virtual void clear_offline_license() = 0;
+    /// Clear offline token
+    virtual void clear_offline_token() = 0;
 
-    /// Store public key
-    virtual bool set_public_key(const std::string& key_id, const std::string& public_key_b64) = 0;
+    /// Store signing key (for offline verification)
+    virtual bool set_signing_key(const std::string& key_id, const std::string& public_key_b64) = 0;
 
-    /// Retrieve public key
-    virtual std::optional<std::string> get_public_key(const std::string& key_id) = 0;
+    /// Retrieve signing key
+    virtual std::optional<std::string> get_signing_key(const std::string& key_id) = 0;
 
     /// Store last seen timestamp (for clock tamper detection)
     virtual bool set_last_seen_timestamp(double timestamp) = 0;
@@ -94,12 +94,12 @@ class FileStorage : public StorageInterface {
     std::optional<CachedLicense> get_license() override;
     void clear_license() override;
 
-    bool set_offline_license(const OfflineLicense& offline) override;
-    std::optional<OfflineLicense> get_offline_license() override;
-    void clear_offline_license() override;
+    bool set_offline_token(const OfflineToken& offline) override;
+    std::optional<OfflineToken> get_offline_token() override;
+    void clear_offline_token() override;
 
-    bool set_public_key(const std::string& key_id, const std::string& public_key_b64) override;
-    std::optional<std::string> get_public_key(const std::string& key_id) override;
+    bool set_signing_key(const std::string& key_id, const std::string& public_key_b64) override;
+    std::optional<std::string> get_signing_key(const std::string& key_id) override;
 
     bool set_last_seen_timestamp(double timestamp) override;
     std::optional<double> get_last_seen_timestamp() override;
@@ -108,8 +108,8 @@ class FileStorage : public StorageInterface {
 
   private:
     std::filesystem::path get_license_path() const;
-    std::filesystem::path get_offline_license_path() const;
-    std::filesystem::path get_public_key_path(const std::string& key_id) const;
+    std::filesystem::path get_offline_token_path() const;
+    std::filesystem::path get_signing_key_path(const std::string& key_id) const;
     std::filesystem::path get_timestamp_path() const;
 
     bool ensure_directory() const;
@@ -130,12 +130,12 @@ class MemoryStorage : public StorageInterface {
     std::optional<CachedLicense> get_license() override;
     void clear_license() override;
 
-    bool set_offline_license(const OfflineLicense& offline) override;
-    std::optional<OfflineLicense> get_offline_license() override;
-    void clear_offline_license() override;
+    bool set_offline_token(const OfflineToken& offline) override;
+    std::optional<OfflineToken> get_offline_token() override;
+    void clear_offline_token() override;
 
-    bool set_public_key(const std::string& key_id, const std::string& public_key_b64) override;
-    std::optional<std::string> get_public_key(const std::string& key_id) override;
+    bool set_signing_key(const std::string& key_id, const std::string& public_key_b64) override;
+    std::optional<std::string> get_signing_key(const std::string& key_id) override;
 
     bool set_last_seen_timestamp(double timestamp) override;
     std::optional<double> get_last_seen_timestamp() override;
@@ -144,8 +144,8 @@ class MemoryStorage : public StorageInterface {
 
   private:
     std::optional<CachedLicense> license_;
-    std::optional<OfflineLicense> offline_license_;
-    std::unordered_map<std::string, std::string> public_keys_;
+    std::optional<OfflineToken> offline_token_;
+    std::unordered_map<std::string, std::string> signing_keys_;
     std::optional<double> last_seen_timestamp_;
     mutable std::mutex mutex_;
 };

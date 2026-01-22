@@ -41,15 +41,15 @@ class MemoryStorageTest : public ::testing::Test {
 
 TEST_F(MemoryStorageTest, InitiallyEmpty) {
     EXPECT_FALSE(storage.get_license().has_value());
-    EXPECT_FALSE(storage.get_offline_license().has_value());
-    EXPECT_FALSE(storage.get_public_key("any").has_value());
+    EXPECT_FALSE(storage.get_offline_token().has_value());
+    EXPECT_FALSE(storage.get_signing_key("any").has_value());
     EXPECT_FALSE(storage.get_last_seen_timestamp().has_value());
 }
 
 TEST_F(MemoryStorageTest, SetAndGetLicense) {
     CachedLicense license;
     license.license_key = "KEY-123";
-    license.device_identifier = "device-abc";
+    license.device_id = "device-abc";
     license.activated_at = std::chrono::system_clock::now();
     license.last_validated = std::chrono::system_clock::now();
 
@@ -58,7 +58,7 @@ TEST_F(MemoryStorageTest, SetAndGetLicense) {
     auto retrieved = storage.get_license();
     ASSERT_TRUE(retrieved.has_value());
     EXPECT_EQ(retrieved->license_key, "KEY-123");
-    EXPECT_EQ(retrieved->device_identifier, "device-abc");
+    EXPECT_EQ(retrieved->device_id, "device-abc");
 }
 
 TEST_F(MemoryStorageTest, ClearLicense) {
@@ -71,51 +71,55 @@ TEST_F(MemoryStorageTest, ClearLicense) {
     EXPECT_FALSE(storage.get_license().has_value());
 }
 
-TEST_F(MemoryStorageTest, SetAndGetOfflineLicense) {
-    OfflineLicense offline;
-    offline.license_key = "KEY-456";
-    offline.product_slug = "my-product";
-    offline.plan_key = "pro";
-    offline.seat_limit = 5;
-    offline.issued_at = std::time(nullptr);
-    offline.expires_at = std::time(nullptr) + 86400;
+TEST_F(MemoryStorageTest, SetAndGetOfflineToken) {
+    OfflineToken offline;
+    offline.token.license_key = "KEY-456";
+    offline.token.product_slug = "my-product";
+    offline.token.plan_key = "pro";
+    offline.token.seat_limit = 5;
+    offline.token.iat = std::time(nullptr);
+    offline.token.exp = std::time(nullptr) + 86400;
+    offline.token.nbf = offline.token.iat;
+    offline.signature.value = "test-signature";
+    offline.canonical = R"({"license_key":"KEY-456"})";
 
-    EXPECT_TRUE(storage.set_offline_license(offline));
+    EXPECT_TRUE(storage.set_offline_token(offline));
 
-    auto retrieved = storage.get_offline_license();
+    auto retrieved = storage.get_offline_token();
     ASSERT_TRUE(retrieved.has_value());
-    EXPECT_EQ(retrieved->license_key, "KEY-456");
-    EXPECT_EQ(retrieved->product_slug, "my-product");
-    EXPECT_EQ(retrieved->seat_limit, 5);
+    EXPECT_EQ(retrieved->token.license_key, "KEY-456");
+    EXPECT_EQ(retrieved->token.product_slug, "my-product");
+    EXPECT_TRUE(retrieved->token.seat_limit.has_value());
+    EXPECT_EQ(retrieved->token.seat_limit.value(), 5);
 }
 
-TEST_F(MemoryStorageTest, ClearOfflineLicense) {
-    OfflineLicense offline;
-    offline.license_key = "KEY-456";
-    storage.set_offline_license(offline);
+TEST_F(MemoryStorageTest, ClearOfflineToken) {
+    OfflineToken offline;
+    offline.token.license_key = "KEY-456";
+    storage.set_offline_token(offline);
 
-    storage.clear_offline_license();
+    storage.clear_offline_token();
 
-    EXPECT_FALSE(storage.get_offline_license().has_value());
+    EXPECT_FALSE(storage.get_offline_token().has_value());
 }
 
-TEST_F(MemoryStorageTest, SetAndGetPublicKey) {
-    EXPECT_TRUE(storage.set_public_key("key-id-1", "base64-encoded-key"));
+TEST_F(MemoryStorageTest, SetAndGetSigningKey) {
+    EXPECT_TRUE(storage.set_signing_key("key-id-1", "base64-encoded-key"));
 
-    auto retrieved = storage.get_public_key("key-id-1");
+    auto retrieved = storage.get_signing_key("key-id-1");
     ASSERT_TRUE(retrieved.has_value());
     EXPECT_EQ(*retrieved, "base64-encoded-key");
 
     // Different key ID should not exist
-    EXPECT_FALSE(storage.get_public_key("key-id-2").has_value());
+    EXPECT_FALSE(storage.get_signing_key("key-id-2").has_value());
 }
 
-TEST_F(MemoryStorageTest, MultiplePublicKeys) {
-    storage.set_public_key("key-1", "pk-1");
-    storage.set_public_key("key-2", "pk-2");
+TEST_F(MemoryStorageTest, MultipleSigningKeys) {
+    storage.set_signing_key("key-1", "pk-1");
+    storage.set_signing_key("key-2", "pk-2");
 
-    EXPECT_EQ(*storage.get_public_key("key-1"), "pk-1");
-    EXPECT_EQ(*storage.get_public_key("key-2"), "pk-2");
+    EXPECT_EQ(*storage.get_signing_key("key-1"), "pk-1");
+    EXPECT_EQ(*storage.get_signing_key("key-2"), "pk-2");
 }
 
 TEST_F(MemoryStorageTest, SetAndGetTimestamp) {
@@ -133,18 +137,18 @@ TEST_F(MemoryStorageTest, ClearAll) {
     license.license_key = "KEY-123";
     storage.set_license(license);
 
-    OfflineLicense offline;
-    offline.license_key = "KEY-456";
-    storage.set_offline_license(offline);
+    OfflineToken offline;
+    offline.token.license_key = "KEY-456";
+    storage.set_offline_token(offline);
 
-    storage.set_public_key("key-1", "pk-1");
+    storage.set_signing_key("key-1", "pk-1");
     storage.set_last_seen_timestamp(123.456);
 
     storage.clear_all();
 
     EXPECT_FALSE(storage.get_license().has_value());
-    EXPECT_FALSE(storage.get_offline_license().has_value());
-    EXPECT_FALSE(storage.get_public_key("key-1").has_value());
+    EXPECT_FALSE(storage.get_offline_token().has_value());
+    EXPECT_FALSE(storage.get_signing_key("key-1").has_value());
     EXPECT_FALSE(storage.get_last_seen_timestamp().has_value());
 }
 
@@ -179,8 +183,8 @@ TEST_F(FileStorageTest, InitiallyEmpty) {
     FileStorage storage(temp_dir.path().string());
 
     EXPECT_FALSE(storage.get_license().has_value());
-    EXPECT_FALSE(storage.get_offline_license().has_value());
-    EXPECT_FALSE(storage.get_public_key("any").has_value());
+    EXPECT_FALSE(storage.get_offline_token().has_value());
+    EXPECT_FALSE(storage.get_signing_key("any").has_value());
     EXPECT_FALSE(storage.get_last_seen_timestamp().has_value());
 }
 
@@ -189,14 +193,14 @@ TEST_F(FileStorageTest, SetAndGetLicense) {
 
     CachedLicense license;
     license.license_key = "KEY-FILE-123";
-    license.device_identifier = "device-file-abc";
+    license.device_id = "device-file-abc";
     license.activated_at = std::chrono::system_clock::now();
     license.last_validated = std::chrono::system_clock::now();
 
     ValidationResult validation;
     validation.valid = true;
-    validation.reason = "Success";
-    validation.reason_code = "ok";
+    validation.message = "Success";
+    validation.code = "ok";
     license.validation = validation;
 
     EXPECT_TRUE(storage.set_license(license));
@@ -204,7 +208,7 @@ TEST_F(FileStorageTest, SetAndGetLicense) {
     auto retrieved = storage.get_license();
     ASSERT_TRUE(retrieved.has_value());
     EXPECT_EQ(retrieved->license_key, "KEY-FILE-123");
-    EXPECT_EQ(retrieved->device_identifier, "device-file-abc");
+    EXPECT_EQ(retrieved->device_id, "device-file-abc");
     ASSERT_TRUE(retrieved->validation.has_value());
     EXPECT_TRUE(retrieved->validation->valid);
 }
@@ -238,43 +242,46 @@ TEST_F(FileStorageTest, ClearLicense) {
     EXPECT_FALSE(storage.get_license().has_value());
 }
 
-TEST_F(FileStorageTest, SetAndGetOfflineLicense) {
+TEST_F(FileStorageTest, SetAndGetOfflineToken) {
     FileStorage storage(temp_dir.path().string());
 
-    OfflineLicense offline;
-    offline.license_key = "OFFLINE-KEY";
-    offline.product_slug = "test-product";
-    offline.plan_key = "enterprise";
-    offline.key_id = "key-123";
-    offline.signature_b64u = "base64-signature";
-    offline.seat_limit = 10;
-    offline.issued_at = std::time(nullptr);
-    offline.expires_at = std::time(nullptr) + 86400 * 365;
+    OfflineToken offline;
+    offline.token.license_key = "OFFLINE-KEY";
+    offline.token.product_slug = "test-product";
+    offline.token.plan_key = "enterprise";
+    offline.token.kid = "key-123";
+    offline.token.seat_limit = 10;
+    offline.token.iat = std::time(nullptr);
+    offline.token.exp = std::time(nullptr) + 86400 * 365;
+    offline.token.nbf = offline.token.iat;
+    offline.signature.key_id = "key-123";
+    offline.signature.value = "base64-signature";
+    offline.canonical = R"({"license_key":"OFFLINE-KEY"})";
 
     Entitlement ent;
     ent.key = "updates";
-    ent.name = "Software Updates";
-    offline.entitlements.push_back(ent);
+    offline.token.entitlements.push_back(ent);
 
-    EXPECT_TRUE(storage.set_offline_license(offline));
+    EXPECT_TRUE(storage.set_offline_token(offline));
 
-    auto retrieved = storage.get_offline_license();
+    auto retrieved = storage.get_offline_token();
     ASSERT_TRUE(retrieved.has_value());
-    EXPECT_EQ(retrieved->license_key, "OFFLINE-KEY");
-    EXPECT_EQ(retrieved->product_slug, "test-product");
-    EXPECT_EQ(retrieved->seat_limit, 10);
-    ASSERT_EQ(retrieved->entitlements.size(), static_cast<size_t>(1));
-    EXPECT_EQ(retrieved->entitlements[0].key, "updates");
+    EXPECT_EQ(retrieved->token.license_key, "OFFLINE-KEY");
+    EXPECT_EQ(retrieved->token.product_slug, "test-product");
+    EXPECT_TRUE(retrieved->token.seat_limit.has_value());
+    EXPECT_EQ(retrieved->token.seat_limit.value(), 10);
+    ASSERT_EQ(retrieved->token.entitlements.size(), static_cast<size_t>(1));
+    EXPECT_EQ(retrieved->token.entitlements[0].key, "updates");
 }
 
-TEST_F(FileStorageTest, SetAndGetPublicKey) {
+TEST_F(FileStorageTest, SetAndGetSigningKey) {
     FileStorage storage(temp_dir.path().string());
 
     std::string public_key_b64 = "MCowBQYDK2VwAyEA+test+public+key+";
 
-    EXPECT_TRUE(storage.set_public_key("signing-key-1", public_key_b64));
+    EXPECT_TRUE(storage.set_signing_key("signing-key-1", public_key_b64));
 
-    auto retrieved = storage.get_public_key("signing-key-1");
+    auto retrieved = storage.get_signing_key("signing-key-1");
     ASSERT_TRUE(retrieved.has_value());
     EXPECT_EQ(*retrieved, public_key_b64);
 }
@@ -298,18 +305,18 @@ TEST_F(FileStorageTest, ClearAll) {
     license.license_key = "KEY";
     storage.set_license(license);
 
-    OfflineLicense offline;
-    offline.license_key = "OFFLINE";
-    storage.set_offline_license(offline);
+    OfflineToken offline;
+    offline.token.license_key = "OFFLINE";
+    storage.set_offline_token(offline);
 
-    storage.set_public_key("key-1", "pk-1");
+    storage.set_signing_key("key-1", "pk-1");
     storage.set_last_seen_timestamp(123.0);
 
     storage.clear_all();
 
     EXPECT_FALSE(storage.get_license().has_value());
-    EXPECT_FALSE(storage.get_offline_license().has_value());
-    EXPECT_FALSE(storage.get_public_key("key-1").has_value());
+    EXPECT_FALSE(storage.get_offline_token().has_value());
+    EXPECT_FALSE(storage.get_signing_key("key-1").has_value());
     EXPECT_FALSE(storage.get_last_seen_timestamp().has_value());
 }
 

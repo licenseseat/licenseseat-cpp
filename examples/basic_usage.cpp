@@ -8,7 +8,7 @@
  * - Validate a license key (sync and async)
  * - Activate a license on a device
  * - Use auto-validation
- * - Verify an offline license
+ * - Verify an offline token
  * - Handle errors using the Result type
  */
 
@@ -24,10 +24,10 @@ int main() {
     // Configure the client
     licenseseat::Config config;
     config.api_key = "your-api-key";
-    config.api_url = "https://licenseseat.com/api";
+    config.api_url = "https://licenseseat.com/api/v1";
     config.product_slug = "your-product";
-    // Device identifier is auto-generated if not provided
-    // config.device_identifier = "custom-device-id";
+    // Device ID is auto-generated if not provided
+    // config.device_id = "custom-device-id";
 
     // Storage path for license caching (enables offline fallback)
     config.storage_path = "/tmp/licenseseat_cache";
@@ -42,7 +42,7 @@ int main() {
     licenseseat::Client client(config);
 
     // The client auto-generates a unique device identifier based on hardware
-    std::cout << "Device ID: " << client.device_identifier() << "\n";
+    std::cout << "Device ID: " << client.device_id() << "\n";
 
     // Example 0: Subscribe to SDK events
     std::cout << "\n=== Event Subscription ===\n";
@@ -82,10 +82,13 @@ int main() {
             std::cout << "License key: " << license.key() << "\n";
             std::cout << "Status: " << licenseseat::license_status_to_string(license.status())
                       << "\n";
-            std::cout << "Seats used: " << license.active_activations_count() << "/"
-                      << (license.seat_limit() == 0 ? "unlimited"
-                                                    : std::to_string(license.seat_limit()))
-                      << "\n";
+            std::cout << "Seats used: " << license.active_seats() << "/";
+            if (license.seat_limit().has_value()) {
+                std::cout << license.seat_limit().value();
+            } else {
+                std::cout << "unlimited";
+            }
+            std::cout << "\n";
         } else {
             std::cerr << "Validation failed: " << result.error_message() << "\n";
             std::cerr << "Error code: " << licenseseat::error_code_to_string(result.error_code())
@@ -125,12 +128,14 @@ int main() {
         metadata["app_version"] = "1.0.0";
         metadata["os_version"] = "macOS 14.0";
 
-        auto result = client.activate("LICENSE-KEY-HERE", "", metadata);  // Empty = auto device ID
+        // activate(license_key, device_id, device_name, metadata)
+        // Empty device_id = use auto-generated device ID from config
+        auto result = client.activate("LICENSE-KEY-HERE", "", "My Device", metadata);
 
         if (result.is_ok()) {
             const auto& activation = result.value();
             std::cout << "Activation ID: " << activation.id() << "\n";
-            std::cout << "Device: " << activation.device_identifier() << "\n";
+            std::cout << "Device: " << activation.device_id() << "\n";
             std::cout << "Active: " << (activation.is_active() ? "yes" : "no") << "\n";
         } else {
             std::cerr << "Activation failed: " << result.error_message() << "\n";
@@ -152,31 +157,31 @@ int main() {
         }
     }
 
-    // Example 3: Offline license verification
-    std::cout << "\n=== Offline License Verification ===\n";
+    // Example 3: Offline token verification
+    std::cout << "\n=== Offline Token Verification ===\n";
     {
-        // First, fetch the offline license (requires network)
-        auto offline_result = client.generate_offline_license("LICENSE-KEY-HERE");
+        // First, fetch the offline token (requires network)
+        auto offline_result = client.generate_offline_token("LICENSE-KEY-HERE");
 
         if (offline_result.is_ok()) {
             const auto& offline = offline_result.value();
-            std::cout << "Offline license obtained.\n";
-            std::cout << "Key ID: " << offline.key_id << "\n";
+            std::cout << "Offline token obtained.\n";
+            std::cout << "Key ID: " << offline.token.kid << "\n";
 
             // Later, verify offline (no network needed)
             // The public key can be embedded in your app or fetched once
             std::string public_key_b64 = "your-public-key-base64";
-            auto verify_result = client.verify_offline_license(offline, public_key_b64);
+            auto verify_result = client.verify_offline_token(offline, public_key_b64);
 
             if (verify_result.is_ok() && verify_result.value()) {
-                std::cout << "Offline license is valid!\n";
+                std::cout << "Offline token is valid!\n";
 
                 // Check entitlements
-                for (const auto& entitlement : offline.entitlements) {
+                for (const auto& entitlement : offline.token.entitlements) {
                     std::cout << "Entitlement: " << entitlement.key;
-                    if (entitlement.expires.has_value()) {
+                    if (entitlement.expires_at.has_value()) {
                         auto now = std::chrono::system_clock::now();
-                        if (entitlement.expires.value() > now) {
+                        if (entitlement.expires_at.value() > now) {
                             std::cout << " (active)\n";
                         } else {
                             std::cout << " (expired)\n";
@@ -186,10 +191,10 @@ int main() {
                     }
                 }
             } else {
-                std::cerr << "Offline license verification failed.\n";
+                std::cerr << "Offline token verification failed.\n";
             }
         } else {
-            std::cerr << "Failed to get offline license: " << offline_result.error_message()
+            std::cerr << "Failed to get offline token: " << offline_result.error_message()
                       << "\n";
         }
     }
@@ -241,7 +246,8 @@ int main() {
     // Example 6: Deactivate when done
     std::cout << "\n=== Deactivation ===\n";
     {
-        auto result = client.deactivate("LICENSE-KEY-HERE");
+        // deactivate requires both license_key and device_id
+        auto result = client.deactivate("LICENSE-KEY-HERE", client.device_id());
 
         if (result.is_ok()) {
             std::cout << "Successfully deactivated.\n";

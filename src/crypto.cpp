@@ -183,26 +183,28 @@ Result<bool> verify_ed25519_signature(const std::string& message,
     }
 }
 
-Result<bool> verify_offline_license_signature(const OfflineLicense& offline_license,
-                                              const std::string& public_key_b64) {
+Result<bool> verify_offline_token_signature(const OfflineToken& offline_token,
+                                            const std::string& public_key_b64) {
     // Check basic validity first
-    if (offline_license.license_key.empty()) {
+    if (offline_token.token.license_key.empty()) {
         return Result<bool>::error(ErrorCode::InvalidLicenseKey, "License key is empty");
     }
 
-    if (offline_license.signature_b64u.empty()) {
+    if (offline_token.signature.value.empty()) {
         return Result<bool>::error(ErrorCode::InvalidSignature, "Signature is empty");
+    }
+
+    if (offline_token.canonical.empty()) {
+        return Result<bool>::error(ErrorCode::InvalidParameter, "Canonical JSON is empty");
     }
 
     if (public_key_b64.empty()) {
         return Result<bool>::error(ErrorCode::MissingParameter, "Public key is required");
     }
 
-    // Reconstruct canonical JSON payload for verification
-    std::string canonical_payload = json::offline_license_to_canonical_json(offline_license);
-
-    // Verify the signature
-    return verify_ed25519_signature(canonical_payload, offline_license.signature_b64u,
+    // The canonical JSON string is provided by the server and is what was signed
+    // Verify the signature against the canonical JSON
+    return verify_ed25519_signature(offline_token.canonical, offline_token.signature.value,
                                     public_key_b64);
 }
 

@@ -33,3 +33,57 @@ target_link_libraries(licenseseat_tests
 # Register tests with CTest
 include(GoogleTest)
 gtest_discover_tests(licenseseat_tests)
+
+# Integration tests (live API - run manually)
+add_executable(integration_test
+    integration_test.cpp
+)
+
+target_compile_definitions(integration_test
+    PRIVATE
+        CPPHTTPLIB_OPENSSL_SUPPORT
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
+)
+
+target_link_libraries(integration_test
+    PRIVATE
+        licenseseat::licenseseat
+        nlohmann_json::nlohmann_json
+        httplib::httplib
+)
+
+# Crypto stress test (offline tokens & Ed25519)
+add_executable(crypto_stress_test
+    crypto_stress_test.cpp
+)
+
+target_compile_definitions(crypto_stress_test
+    PRIVATE
+        CPPHTTPLIB_OPENSSL_SUPPORT
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
+)
+
+target_link_libraries(crypto_stress_test
+    PRIVATE
+        licenseseat::licenseseat
+        nlohmann_json::nlohmann_json
+        httplib::httplib
+)
+
+# Scenario tests (real-world use cases)
+add_executable(scenario_test
+    scenario_test.cpp
+)
+
+target_compile_definitions(scenario_test
+    PRIVATE
+        CPPHTTPLIB_OPENSSL_SUPPORT
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
+)
+
+target_link_libraries(scenario_test
+    PRIVATE
+        licenseseat::licenseseat
+        nlohmann_json::nlohmann_json
+        httplib::httplib
+)

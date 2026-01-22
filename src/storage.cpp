@@ -19,11 +19,11 @@ std::filesystem::path FileStorage::get_license_path() const {
     return storage_path_ / (prefix_ + "_license.json");
 }
 
-std::filesystem::path FileStorage::get_offline_license_path() const {
-    return storage_path_ / (prefix_ + "_offline.json");
+std::filesystem::path FileStorage::get_offline_token_path() const {
+    return storage_path_ / (prefix_ + "_offline_token.json");
 }
 
-std::filesystem::path FileStorage::get_public_key_path(const std::string& key_id) const {
+std::filesystem::path FileStorage::get_signing_key_path(const std::string& key_id) const {
     // Sanitize key_id for filename
     std::string safe_key_id = key_id;
     for (char& c : safe_key_id) {
@@ -31,7 +31,7 @@ std::filesystem::path FileStorage::get_public_key_path(const std::string& key_id
             c = '_';
         }
     }
-    return storage_path_ / (prefix_ + "_pubkey_" + safe_key_id + ".json");
+    return storage_path_ / (prefix_ + "_signing_key_" + safe_key_id + ".json");
 }
 
 std::filesystem::path FileStorage::get_timestamp_path() const {
@@ -85,7 +85,7 @@ bool FileStorage::set_license(const CachedLicense& license) {
     try {
         nlohmann::json j;
         j["license_key"] = license.license_key;
-        j["device_identifier"] = license.device_identifier;
+        j["device_id"] = license.device_id;
         j["activated_at"] =
             std::chrono::duration_cast<std::chrono::seconds>(license.activated_at.time_since_epoch())
                 .count();
@@ -95,8 +95,8 @@ bool FileStorage::set_license(const CachedLicense& license) {
 
         if (license.validation) {
             j["validation"]["valid"] = license.validation->valid;
-            j["validation"]["reason"] = license.validation->reason;
-            j["validation"]["reason_code"] = license.validation->reason_code;
+            j["validation"]["code"] = license.validation->code;
+            j["validation"]["message"] = license.validation->message;
         }
 
         return write_file(get_license_path(), j.dump(2));
@@ -118,7 +118,7 @@ std::optional<CachedLicense> FileStorage::get_license() {
 
         CachedLicense license;
         license.license_key = j.value("license_key", "");
-        license.device_identifier = j.value("device_identifier", "");
+        license.device_id = j.value("device_id", "");
 
         auto activated_secs = j.value("activated_at", int64_t{0});
         license.activated_at = std::chrono::system_clock::time_point(
@@ -131,8 +131,8 @@ std::optional<CachedLicense> FileStorage::get_license() {
         if (j.contains("validation")) {
             ValidationResult validation;
             validation.valid = j["validation"].value("valid", false);
-            validation.reason = j["validation"].value("reason", "");
-            validation.reason_code = j["validation"].value("reason_code", "");
+            validation.code = j["validation"].value("code", "");
+            validation.message = j["validation"].value("message", "");
             license.validation = validation;
         }
 
@@ -150,120 +150,128 @@ void FileStorage::clear_license() {
     }
 }
 
-bool FileStorage::set_offline_license(const OfflineLicense& offline) {
+bool FileStorage::set_offline_token(const OfflineToken& offline) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     try {
         nlohmann::json j;
-        j["license_key"] = offline.license_key;
-        j["product_slug"] = offline.product_slug;
-        j["plan_key"] = offline.plan_key;
-        j["key_id"] = offline.key_id;
-        j["signature_b64u"] = offline.signature_b64u;
-        j["seat_limit"] = offline.seat_limit;
 
-        if (offline.issued_at > 0) {
-            j["issued_at"] = offline.issued_at;
+        // Token payload
+        j["token"]["schema_version"] = offline.token.schema_version;
+        j["token"]["license_key"] = offline.token.license_key;
+        j["token"]["product_slug"] = offline.token.product_slug;
+        j["token"]["plan_key"] = offline.token.plan_key;
+        j["token"]["mode"] = offline.token.mode;
+
+        if (offline.token.seat_limit) {
+            j["token"]["seat_limit"] = *offline.token.seat_limit;
+        } else {
+            j["token"]["seat_limit"] = nullptr;
         }
-        if (offline.expires_at > 0) {
-            j["expires_at"] = offline.expires_at;
+
+        if (offline.token.device_id) {
+            j["token"]["device_id"] = *offline.token.device_id;
+        } else {
+            j["token"]["device_id"] = nullptr;
         }
+
+        j["token"]["iat"] = offline.token.iat;
+        j["token"]["exp"] = offline.token.exp;
+        j["token"]["nbf"] = offline.token.nbf;
+
+        if (offline.token.license_expires_at) {
+            j["token"]["license_expires_at"] = *offline.token.license_expires_at;
+        } else {
+            j["token"]["license_expires_at"] = nullptr;
+        }
+
+        j["token"]["kid"] = offline.token.kid;
 
         // Serialize entitlements
         nlohmann::json ents = nlohmann::json::array();
-        for (const auto& e : offline.entitlements) {
+        for (const auto& e : offline.token.entitlements) {
             nlohmann::json ent;
             ent["key"] = e.key;
-            if (e.name) ent["name"] = *e.name;
-            if (e.description) ent["description"] = *e.description;
-            if (e.expires) {
+            if (e.expires_at) {
                 ent["expires_at"] = std::chrono::duration_cast<std::chrono::seconds>(
-                                        e.expires->time_since_epoch())
+                                        e.expires_at->time_since_epoch())
                                         .count();
+            } else {
+                ent["expires_at"] = nullptr;
+            }
+            if (!e.metadata.empty()) {
+                ent["metadata"] = json::metadata_to_json(e.metadata);
             }
             ents.push_back(ent);
         }
-        j["entitlements"] = ents;
+        j["token"]["entitlements"] = ents;
 
-        return write_file(get_offline_license_path(), j.dump(2));
+        if (!offline.token.metadata.empty()) {
+            j["token"]["metadata"] = json::metadata_to_json(offline.token.metadata);
+        }
+
+        // Signature
+        j["signature"]["algorithm"] = offline.signature.algorithm;
+        j["signature"]["key_id"] = offline.signature.key_id;
+        j["signature"]["value"] = offline.signature.value;
+
+        // Canonical JSON (store as-is)
+        j["canonical"] = offline.canonical;
+
+        return write_file(get_offline_token_path(), j.dump(2));
     } catch (...) {
         return false;
     }
 }
 
-std::optional<OfflineLicense> FileStorage::get_offline_license() {
+std::optional<OfflineToken> FileStorage::get_offline_token() {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto content = read_file(get_offline_license_path());
+    auto content = read_file(get_offline_token_path());
     if (!content) {
         return std::nullopt;
     }
 
     try {
         auto j = nlohmann::json::parse(*content);
-
-        OfflineLicense offline;
-        offline.license_key = j.value("license_key", "");
-        offline.product_slug = j.value("product_slug", "");
-        offline.plan_key = j.value("plan_key", "");
-        offline.key_id = j.value("key_id", "");
-        offline.signature_b64u = j.value("signature_b64u", "");
-        offline.seat_limit = j.value("seat_limit", 0);
-        offline.issued_at = j.value("issued_at", std::time_t{0});
-        offline.expires_at = j.value("expires_at", std::time_t{0});
-
-        if (j.contains("entitlements") && j["entitlements"].is_array()) {
-            for (const auto& ent : j["entitlements"]) {
-                Entitlement e;
-                e.key = ent.value("key", "");
-                if (ent.contains("name")) e.name = ent["name"].get<std::string>();
-                if (ent.contains("description")) e.description = ent["description"].get<std::string>();
-                if (ent.contains("expires_at")) {
-                    auto secs = ent["expires_at"].get<int64_t>();
-                    e.expires = std::chrono::system_clock::time_point(std::chrono::seconds(secs));
-                }
-                offline.entitlements.push_back(e);
-            }
-        }
-
-        return offline;
+        return json::parse_offline_token(j);
     } catch (...) {
         return std::nullopt;
     }
 }
 
-void FileStorage::clear_offline_license() {
+void FileStorage::clear_offline_token() {
     std::lock_guard<std::mutex> lock(mutex_);
     try {
-        std::filesystem::remove(get_offline_license_path());
+        std::filesystem::remove(get_offline_token_path());
     } catch (...) {
     }
 }
 
-bool FileStorage::set_public_key(const std::string& key_id, const std::string& public_key_b64) {
+bool FileStorage::set_signing_key(const std::string& key_id, const std::string& public_key_b64) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     try {
         nlohmann::json j;
         j["key_id"] = key_id;
-        j["public_key_b64"] = public_key_b64;
-        return write_file(get_public_key_path(key_id), j.dump(2));
+        j["public_key"] = public_key_b64;
+        return write_file(get_signing_key_path(key_id), j.dump(2));
     } catch (...) {
         return false;
     }
 }
 
-std::optional<std::string> FileStorage::get_public_key(const std::string& key_id) {
+std::optional<std::string> FileStorage::get_signing_key(const std::string& key_id) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto content = read_file(get_public_key_path(key_id));
+    auto content = read_file(get_signing_key_path(key_id));
     if (!content) {
         return std::nullopt;
     }
 
     try {
         auto j = nlohmann::json::parse(*content);
-        return j.value("public_key_b64", "");
+        return j.value("public_key", "");
     } catch (...) {
         return std::nullopt;
     }
@@ -329,32 +337,32 @@ void MemoryStorage::clear_license() {
     license_.reset();
 }
 
-bool MemoryStorage::set_offline_license(const OfflineLicense& offline) {
+bool MemoryStorage::set_offline_token(const OfflineToken& offline) {
     std::lock_guard<std::mutex> lock(mutex_);
-    offline_license_ = offline;
+    offline_token_ = offline;
     return true;
 }
 
-std::optional<OfflineLicense> MemoryStorage::get_offline_license() {
+std::optional<OfflineToken> MemoryStorage::get_offline_token() {
     std::lock_guard<std::mutex> lock(mutex_);
-    return offline_license_;
+    return offline_token_;
 }
 
-void MemoryStorage::clear_offline_license() {
+void MemoryStorage::clear_offline_token() {
     std::lock_guard<std::mutex> lock(mutex_);
-    offline_license_.reset();
+    offline_token_.reset();
 }
 
-bool MemoryStorage::set_public_key(const std::string& key_id, const std::string& public_key_b64) {
+bool MemoryStorage::set_signing_key(const std::string& key_id, const std::string& public_key_b64) {
     std::lock_guard<std::mutex> lock(mutex_);
-    public_keys_[key_id] = public_key_b64;
+    signing_keys_[key_id] = public_key_b64;
     return true;
 }
 
-std::optional<std::string> MemoryStorage::get_public_key(const std::string& key_id) {
+std::optional<std::string> MemoryStorage::get_signing_key(const std::string& key_id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = public_keys_.find(key_id);
-    if (it != public_keys_.end()) {
+    auto it = signing_keys_.find(key_id);
+    if (it != signing_keys_.end()) {
         return it->second;
     }
     return std::nullopt;
@@ -374,8 +382,8 @@ std::optional<double> MemoryStorage::get_last_seen_timestamp() {
 void MemoryStorage::clear_all() {
     std::lock_guard<std::mutex> lock(mutex_);
     license_.reset();
-    offline_license_.reset();
-    public_keys_.clear();
+    offline_token_.reset();
+    signing_keys_.clear();
     last_seen_timestamp_.reset();
 }
 
