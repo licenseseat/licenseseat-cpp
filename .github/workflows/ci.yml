@@ -223,7 +223,7 @@ jobs:
           /tmp/test_single_header
 
       - name: Upload amalgamated header
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: licenseseat-single-header
           path: licenseseat_single.hpp

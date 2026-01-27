@@ -44,7 +44,7 @@ jobs:
           g++ -std=c++17 -I. -I/usr/local/include -c /tmp/test.cpp -o /tmp/test.o
 
       - name: Upload single-header artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: single-header
           path: licenseseat_single.hpp
@@ -103,7 +103,7 @@ jobs:
           cd package && tar -czvf ../licenseseat-linux-x64.tar.gz .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: linux-x64
           path: licenseseat-linux-x64.tar.gz
@@ -149,7 +149,7 @@ jobs:
           cd package && tar -czvf ../licenseseat-macos-intel.tar.gz .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: macos-intel
           path: licenseseat-macos-intel.tar.gz
@@ -195,7 +195,7 @@ jobs:
           cd package && tar -czvf ../licenseseat-macos-arm64.tar.gz .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: macos-arm64
           path: licenseseat-macos-arm64.tar.gz
@@ -251,7 +251,7 @@ jobs:
           cd package && 7z a ../licenseseat-windows-x64.zip .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: windows-x64
           path: licenseseat-windows-x64.zip
