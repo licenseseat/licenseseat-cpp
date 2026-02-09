@@ -136,59 +136,70 @@ class Client::Impl {
                                 const std::string& device_id_param,
                                 const std::string& device_name,
                                 const Metadata& metadata) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        Result<Activation> result = Result<Activation>::error(ErrorCode::Unknown, "");
+        std::string resolved_device_id;
+        bool should_sync = false;
 
-        if (license_key.empty()) {
-            return Result<Activation>::error(ErrorCode::InvalidLicenseKey,
-                                             "License key cannot be empty");
-        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
 
-        if (config_.product_slug.empty()) {
-            return Result<Activation>::error(ErrorCode::MissingParameter,
-                                             "Product slug is required in config");
-        }
-
-        std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
-        if (device_id.empty()) {
-            return Result<Activation>::error(ErrorCode::MissingParameter,
-                                             "Device ID is required");
-        }
-
-        event_bus_.emit(events::ACTIVATION_START,
-                        std::map<std::string, std::string>{{"license_key", license_key},
-                                                           {"device_id", device_id}});
-
-        // Build request - new URL structure: /products/{slug}/licenses/{key}/activate
-        auto body = json::build_activate_request(device_id, device_name, metadata);
-        auto response = send_post(
-            "/products/" + config_.product_slug + "/licenses/" + license_key + "/activate", body);
-
-        if (!response.success) {
-            if (response.error_message.empty()) {
-                auto err = handle_error_response<Activation>(response);
-                event_bus_.emit(events::ACTIVATION_ERROR,
-                                std::map<std::string, std::string>{{"error", err.error_message()}});
-                return err;
+            if (license_key.empty()) {
+                return Result<Activation>::error(ErrorCode::InvalidLicenseKey,
+                                                 "License key cannot be empty");
             }
-            return Result<Activation>::error(ErrorCode::NetworkError, response.error_message);
+
+            if (config_.product_slug.empty()) {
+                return Result<Activation>::error(ErrorCode::MissingParameter,
+                                                 "Product slug is required in config");
+            }
+
+            resolved_device_id = device_id_param.empty() ? device_id_ : device_id_param;
+            if (resolved_device_id.empty()) {
+                return Result<Activation>::error(ErrorCode::MissingParameter,
+                                                 "Device ID is required");
+            }
+
+            event_bus_.emit(events::ACTIVATION_START,
+                            std::map<std::string, std::string>{{"license_key", license_key},
+                                                               {"device_id", resolved_device_id}});
+
+            // Build request - new URL structure: /products/{slug}/licenses/{key}/activate
+            auto body = json::build_activate_request(resolved_device_id, device_name, metadata);
+            auto response = send_post(
+                "/products/" + config_.product_slug + "/licenses/" + license_key + "/activate", body);
+
+            if (!response.success) {
+                if (response.error_message.empty()) {
+                    auto err = handle_error_response<Activation>(response);
+                    event_bus_.emit(events::ACTIVATION_ERROR,
+                                    std::map<std::string, std::string>{{"error", err.error_message()}});
+                    return err;
+                }
+                return Result<Activation>::error(ErrorCode::NetworkError, response.error_message);
+            }
+
+            // Parse response
+            try {
+                auto j = nlohmann::json::parse(response.body);
+                auto activation = json::parse_activation(j);
+                current_activation_ = activation;
+
+                event_bus_.emit(events::ACTIVATION_SUCCESS, activation);
+
+                result = Result<Activation>::ok(std::move(activation));
+                should_sync = true;
+            } catch (const nlohmann::json::exception& e) {
+                return Result<Activation>::error(ErrorCode::ParseError,
+                                                 std::string("Failed to parse response: ") + e.what());
+            }
+        }  // mutex released here
+
+        // Sync offline assets AFTER releasing the lock to avoid deadlock
+        if (should_sync) {
+            sync_offline_assets_impl(license_key, resolved_device_id);
         }
 
-        // Parse response
-        try {
-            auto j = nlohmann::json::parse(response.body);
-            auto activation = json::parse_activation(j);
-            current_activation_ = activation;
-
-            event_bus_.emit(events::ACTIVATION_SUCCESS, activation);
-
-            // Sync offline assets in background
-            sync_offline_assets_impl(license_key, device_id);
-
-            return Result<Activation>::ok(std::move(activation));
-        } catch (const nlohmann::json::exception& e) {
-            return Result<Activation>::error(ErrorCode::ParseError,
-                                             std::string("Failed to parse response: ") + e.what());
-        }
+        return result;
     }
 
     Result<Deactivation> deactivate(const std::string& license_key,

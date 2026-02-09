@@ -70,6 +70,24 @@ target_link_libraries(crypto_stress_test
         httplib::httplib
 )
 
+# Telemetry & heartbeat stress test
+add_executable(telemetry_stress_test
+    telemetry_stress_test.cpp
+)
+
+target_compile_definitions(telemetry_stress_test
+    PRIVATE
+        CPPHTTPLIB_OPENSSL_SUPPORT
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
+)
+
+target_link_libraries(telemetry_stress_test
+    PRIVATE
+        licenseseat::licenseseat
+        nlohmann_json::nlohmann_json
+        httplib::httplib
+)
+
 # Scenario tests (real-world use cases)
 add_executable(scenario_test
     scenario_test.cpp
