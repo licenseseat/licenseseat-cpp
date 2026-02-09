@@ -2,7 +2,7 @@
  * @file telemetry_stress_test.cpp
  * @brief Telemetry & heartbeat stress test for LicenseSeat C++ SDK
  *
- * Mirrors the Swift and JS stress tests exactly (7 scenarios).
+ * Mirrors the Swift and JS stress tests (9 scenarios).
  *
  * Required environment variables (defaults to local dev server):
  *   LICENSESEAT_API_URL      - API base URL
@@ -20,6 +20,7 @@
 #include <licenseseat/licenseseat.hpp>
 #include <licenseseat/device.hpp>
 #include <licenseseat/events.hpp>
+#include <licenseseat/telemetry.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -440,6 +441,176 @@ static void scenario7_full_lifecycle() {
     sdk.reset();
 }
 
+// ==================== Scenario 8 ====================
+// Enriched Telemetry Fields
+
+static void scenario8_enriched_telemetry() {
+    printHeader("Enriched Telemetry Fields");
+
+    // Collect telemetry locally and verify all expected fields
+    auto telemetry = licenseseat::telemetry::collect(licenseseat::VERSION, "2.0.0", "42");
+
+    // Always-present fields
+    printTest(telemetry.contains("sdk_version") && telemetry["sdk_version"] == licenseseat::VERSION,
+              "sdk_version present and correct");
+
+    printTest(telemetry.contains("os_name") && !telemetry["os_name"].get<std::string>().empty(),
+              "os_name present",
+              telemetry.value("os_name", ""));
+
+    printTest(telemetry.contains("os_version") && !telemetry["os_version"].get<std::string>().empty(),
+              "os_version present",
+              telemetry.value("os_version", ""));
+
+    printTest(telemetry.contains("platform") && telemetry["platform"] == "native",
+              "platform is 'native' (not duplicating os_name)",
+              telemetry.value("platform", ""));
+
+    // User-provided fields
+    printTest(telemetry.contains("app_version") && telemetry["app_version"] == "2.0.0",
+              "app_version included from config",
+              telemetry.value("app_version", ""));
+
+    printTest(telemetry.contains("app_build") && telemetry["app_build"] == "42",
+              "app_build included from config",
+              telemetry.value("app_build", ""));
+
+    // New enriched fields
+    printTest(telemetry.contains("device_type"),
+              "device_type present",
+              telemetry.value("device_type", "(missing)"));
+
+    {
+        auto dt = telemetry.value("device_type", "");
+        printTest(dt == "desktop" || dt == "server" || dt == "unknown",
+                  "device_type is valid value",
+                  dt);
+    }
+
+    printTest(telemetry.contains("architecture"),
+              "architecture present",
+              telemetry.value("architecture", "(missing)"));
+
+    {
+        auto arch = telemetry.value("architecture", "");
+        printTest(arch == "arm64" || arch == "x64" || arch == "x86" || arch == "arm",
+                  "architecture is valid value",
+                  arch);
+    }
+
+    printTest(telemetry.contains("cpu_cores") && telemetry["cpu_cores"].get<int>() > 0,
+              "cpu_cores present and > 0",
+              std::to_string(telemetry.value("cpu_cores", 0)));
+
+    printTest(telemetry.contains("memory_gb") && telemetry["memory_gb"].get<int>() > 0,
+              "memory_gb present and > 0",
+              std::to_string(telemetry.value("memory_gb", 0)) + " GB");
+
+    if (telemetry.contains("language")) {
+        auto lang = telemetry["language"].get<std::string>();
+        printTest(lang.length() == 2, "language is 2-char code", lang);
+    } else {
+        logInfo("language not available (LANG env not set)");
+    }
+
+    if (telemetry.contains("screen_resolution")) {
+        auto res = telemetry["screen_resolution"].get<std::string>();
+        printTest(res.find('x') != std::string::npos,
+                  "screen_resolution in WIDTHxHEIGHT format", res);
+    } else {
+        logInfo("screen_resolution not available (headless/CI)");
+    }
+
+    // Verify enriched telemetry reaches server via activation
+    auto config = makeConfig("s8_enriched");
+    config.app_version = "2.0.0";
+    config.app_build = "42";
+    auto sdk = std::make_unique<licenseseat::Client>(config);
+    sdk->reset();
+
+    auto act = sdk->activate(LICENSE_KEY);
+    bool act_ok = act.is_ok() || act.error_code() == licenseseat::ErrorCode::DeviceAlreadyActivated;
+    printTest(act_ok, "Activation with enriched telemetry sent to server");
+
+    if (act_ok) {
+        auto val = sdk->validate(LICENSE_KEY);
+        printTest(val.is_ok(), "Validation with enriched telemetry sent to server");
+    }
+
+    // Clean up
+    (void)sdk->deactivate(LICENSE_KEY, sdk->device_id());
+    sdk->reset();
+    sdk.reset();
+}
+
+// ==================== Scenario 9 ====================
+// Separate Heartbeat Timer
+
+static void scenario9_heartbeat_timer() {
+    printHeader("Separate Heartbeat Timer");
+
+    auto config = makeConfig("s9_hb_timer", /*telemetry=*/true, /*autoValidateInterval=*/0);
+    config.heartbeat_interval = 3;  // 3 seconds for fast testing
+    auto sdk = std::make_unique<licenseseat::Client>(config);
+    sdk->reset();
+
+    // Activate first
+    auto act = sdk->activate(LICENSE_KEY);
+    bool act_ok = act.is_ok() || act.error_code() == licenseseat::ErrorCode::DeviceAlreadyActivated;
+    printTest(act_ok, "Activation for heartbeat timer test");
+
+    if (!act_ok) {
+        sdk->reset();
+        sdk.reset();
+        return;
+    }
+
+    // Track heartbeat events
+    std::atomic<int> hb_success_count{0};
+    std::atomic<int> hb_error_count{0};
+    auto sub_ok = sdk->on(licenseseat::events::HEARTBEAT_SUCCESS, [&](const std::any&) {
+        ++hb_success_count;
+        logInfo("Heartbeat timer fired #" + std::to_string(hb_success_count.load()));
+    });
+    auto sub_err = sdk->on(licenseseat::events::HEARTBEAT_ERROR, [&](const std::any&) {
+        ++hb_error_count;
+    });
+
+    // Start heartbeat timer (auto-validation is OFF)
+    sdk->start_heartbeat(LICENSE_KEY);
+    printTest(sdk->is_heartbeat_running(), "Heartbeat timer started");
+    printTest(!sdk->is_auto_validating(), "Auto-validation is NOT running (independent)");
+
+    // Wait ~10 seconds for at least 2 heartbeat cycles (3s interval)
+    logInfo("Waiting 10 seconds for heartbeat timer cycles (3s interval)...");
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+
+    sdk->stop_heartbeat();
+    printTest(!sdk->is_heartbeat_running(), "Heartbeat timer stopped");
+
+    int hb_ok = hb_success_count.load();
+    int hb_err = hb_error_count.load();
+    printTest(hb_ok >= 2, "At least 2 heartbeat timer cycles fired",
+              std::to_string(hb_ok) + " successes, " + std::to_string(hb_err) + " errors");
+
+    // Test heartbeat timer disabled when interval = 0
+    {
+        auto config2 = makeConfig("s9_hb_disabled", /*telemetry=*/true, /*autoValidateInterval=*/0);
+        config2.heartbeat_interval = 0;
+        auto sdk2 = std::make_unique<licenseseat::Client>(config2);
+        sdk2->start_heartbeat(LICENSE_KEY);
+        printTest(!sdk2->is_heartbeat_running(), "Heartbeat timer does NOT start when interval=0");
+        sdk2.reset();
+    }
+
+    // Clean up
+    sub_ok.cancel();
+    sub_err.cancel();
+    (void)sdk->deactivate(LICENSE_KEY, sdk->device_id());
+    sdk->reset();
+    sdk.reset();
+}
+
 // ==================== Main ====================
 
 int main() {
@@ -472,6 +643,8 @@ int main() {
     scenario5_auto_validation();
     scenario6_concurrent_stress();
     scenario7_full_lifecycle();
+    scenario8_enriched_telemetry();
+    scenario9_heartbeat_timer();
 
     // Summary
     int passed = total_passed.load();

@@ -14,6 +14,7 @@ add_executable(licenseseat_tests
     test_events.cpp
     test_storage.cpp
     test_special_packaging.cpp
+    test_telemetry.cpp
 )
 
 target_compile_definitions(licenseseat_tests
