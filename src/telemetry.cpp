@@ -1,7 +1,6 @@
 #include "licenseseat/telemetry.hpp"
 
 #include <array>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -390,7 +389,6 @@ nlohmann::json collect(const std::string& sdk_version,
             telemetry["app_build"] = app_build;
         }
 
-        // New fields
         auto device_type = get_device_type();
         if (!device_type.empty()) {
             telemetry["device_type"] = device_type;

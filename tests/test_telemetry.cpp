@@ -11,6 +11,13 @@ namespace {
 
 // ==================== Telemetry Collection Tests ====================
 
+TEST(TelemetryTest, CollectReturnsSdkName) {
+    auto result = telemetry::collect("1.0.0");
+
+    ASSERT_TRUE(result.contains("sdk_name"));
+    EXPECT_EQ(result["sdk_name"].get<std::string>(), "cpp");
+}
+
 TEST(TelemetryTest, CollectReturnsSdkVersion) {
     auto result = telemetry::collect("1.2.3");
 
@@ -184,6 +191,7 @@ TEST(TelemetryTest, CollectReturnsAllExpectedFields) {
     auto result = telemetry::collect("0.4.0", "1.0.0", "99");
 
     // These should always be present
+    EXPECT_TRUE(result.contains("sdk_name"));
     EXPECT_TRUE(result.contains("sdk_version"));
     EXPECT_TRUE(result.contains("os_name"));
     EXPECT_TRUE(result.contains("os_version"));
