@@ -32,6 +32,7 @@ HEADERS = [
     "include/licenseseat/http.hpp",
     "include/licenseseat/json.hpp",
     "include/licenseseat/storage.hpp",
+    "include/licenseseat/telemetry.hpp",
 ]
 
 # Source files for implementation
@@ -40,6 +41,7 @@ SOURCES = [
     "src/device.cpp",
     "src/http.cpp",
     "src/storage.cpp",
+    "src/telemetry.cpp",
     "src/client.cpp",
 ]
 
@@ -77,6 +79,7 @@ REMOVE_INCLUDES = {
     '"licenseseat/http.hpp"',
     '"licenseseat/json.hpp"',
     '"licenseseat/storage.hpp"',
+    '"licenseseat/telemetry.hpp"',
     # Relative paths (used by include/licenseseat/*.hpp)
     '"licenseseat.hpp"',
     '"crypto.hpp"',
@@ -85,6 +88,7 @@ REMOVE_INCLUDES = {
     '"http.hpp"',
     '"json.hpp"',
     '"storage.hpp"',
+    '"telemetry.hpp"',
     # Vendored dependencies
     '"ed25519/ed25519.h"',
     '"PicoSHA2/picosha2.h"',
@@ -203,16 +207,24 @@ def add_namespace_prefix_to_crypto(content):
     return content
 
 
+def get_version():
+    """Extract version from licenseseat.hpp."""
+    content = read_file("include/licenseseat/licenseseat.hpp")
+    match = re.search(r'VERSION\s*=\s*"([^"]+)"', content)
+    return match.group(1) if match else "unknown"
+
+
 def generate_header():
     """Generate the amalgamated header."""
     output = []
+    version = get_version()
 
     # Header
     output.append(f'''/*
  * LicenseSeat C++ SDK - Single Header Distribution
  *
  * Generated: {datetime.now().isoformat()}
- * Version: 0.1.0
+ * Version: {version}
  *
  * This is an amalgamated single-header version of the LicenseSeat SDK.
  * It is designed for easy integration into:

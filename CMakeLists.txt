@@ -94,6 +94,7 @@ target_include_directories(licenseseat
 target_compile_definitions(licenseseat
     PRIVATE
         CPPHTTPLIB_OPENSSL_SUPPORT
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 
 # Link libraries
