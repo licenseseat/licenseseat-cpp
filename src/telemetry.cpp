@@ -6,12 +6,14 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <thread>
 
 // Platform detection
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#include <CoreGraphics/CGDirectDisplay.h>
 #define LICENSESEAT_PLATFORM_MACOS 1
 #elif defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -46,7 +48,7 @@ std::string get_os_version() {
     return "";
 }
 
-std::string get_platform() { return "macOS"; }
+std::string get_platform() { return "native"; }
 
 std::string get_device_model() {
     char model[128] = {0};
@@ -77,6 +79,27 @@ std::string get_timezone() {
     return "";
 }
 
+std::string get_device_type() { return "desktop"; }
+
+int get_memory_gb() {
+    int64_t memsize = 0;
+    size_t len = sizeof(memsize);
+    if (sysctlbyname("hw.memsize", &memsize, &len, nullptr, 0) == 0) {
+        // Round to nearest GB
+        return static_cast<int>((memsize + 536870912LL) / 1073741824LL);
+    }
+    return 0;
+}
+
+std::string get_screen_resolution() {
+    auto width = CGDisplayPixelsWide(kCGDirectMainDisplay);
+    auto height = CGDisplayPixelsHigh(kCGDirectMainDisplay);
+    if (width > 0 && height > 0) {
+        return std::to_string(width) + "x" + std::to_string(height);
+    }
+    return "";
+}
+
 #elif defined(LICENSESEAT_PLATFORM_LINUX)
 
 std::string get_os_name() { return "Linux"; }
@@ -89,7 +112,7 @@ std::string get_os_version() {
     return "";
 }
 
-std::string get_platform() { return "Linux"; }
+std::string get_platform() { return "native"; }
 
 std::string get_device_model() {
     std::ifstream file("/sys/class/dmi/id/product_name");
@@ -123,6 +146,56 @@ std::string get_timezone() {
     return "";
 }
 
+std::string get_device_type() {
+    const char* display = std::getenv("DISPLAY");
+    if (display == nullptr || std::strlen(display) == 0) {
+        return "server";
+    }
+    return "desktop";
+}
+
+int get_memory_gb() {
+    std::ifstream file("/proc/meminfo");
+    if (file.is_open()) {
+        std::string line;
+        if (std::getline(file, line)) {
+            // "MemTotal:       16384000 kB"
+            auto colon = line.find(':');
+            if (colon != std::string::npos) {
+                auto val_str = line.substr(colon + 1);
+                // Trim leading whitespace
+                auto start = val_str.find_first_not_of(" \t");
+                if (start != std::string::npos) {
+                    val_str = val_str.substr(start);
+                }
+                try {
+                    long long kb = std::stoll(val_str);
+                    // Round to nearest GB (1 GB = 1048576 kB)
+                    return static_cast<int>((kb + 524288LL) / 1048576LL);
+                } catch (...) {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+std::string get_screen_resolution() {
+    // Try reading from DRM subsystem
+    std::ifstream file("/sys/class/drm/card0-eDP-1/modes");
+    if (!file.is_open()) {
+        file.open("/sys/class/drm/card0-HDMI-A-1/modes");
+    }
+    if (file.is_open()) {
+        std::string mode;
+        if (std::getline(file, mode) && !mode.empty()) {
+            return mode;
+        }
+    }
+    return "";
+}
+
 #elif defined(LICENSESEAT_PLATFORM_WINDOWS)
 
 std::string get_os_name() { return "Windows"; }
@@ -147,7 +220,7 @@ std::string get_os_version() {
     return "";
 }
 
-std::string get_platform() { return "Windows"; }
+std::string get_platform() { return "native"; }
 
 std::string get_device_model() {
     // Read from registry
@@ -184,13 +257,37 @@ std::string get_timezone() {
     return "";
 }
 
+std::string get_device_type() { return "desktop"; }
+
+int get_memory_gb() {
+    MEMORYSTATUSEX statex{};
+    statex.dwLength = sizeof(statex);
+    if (GlobalMemoryStatusEx(&statex)) {
+        // Round to nearest GB
+        return static_cast<int>((statex.ullTotalPhys + 536870912ULL) / 1073741824ULL);
+    }
+    return 0;
+}
+
+std::string get_screen_resolution() {
+    int width = GetSystemMetrics(SM_CXSCREEN);
+    int height = GetSystemMetrics(SM_CYSCREEN);
+    if (width > 0 && height > 0) {
+        return std::to_string(width) + "x" + std::to_string(height);
+    }
+    return "";
+}
+
 #else
 
 std::string get_os_name() { return ""; }
 std::string get_os_version() { return ""; }
-std::string get_platform() { return ""; }
+std::string get_platform() { return "native"; }
 std::string get_device_model() { return ""; }
 std::string get_timezone() { return ""; }
+std::string get_device_type() { return "unknown"; }
+int get_memory_gb() { return 0; }
+std::string get_screen_resolution() { return ""; }
 
 #endif
 
@@ -207,43 +304,123 @@ std::string get_locale() {
     return "";
 }
 
+std::string get_architecture() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return "arm64";
+#elif defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
+    return "x64";
+#elif defined(__i386__) || defined(_M_IX86)
+    return "x86";
+#elif defined(__arm__) || defined(_M_ARM)
+    return "arm";
+#else
+    return "";
+#endif
+}
+
+int get_cpu_cores() {
+    auto cores = std::thread::hardware_concurrency();
+    return cores > 0 ? static_cast<int>(cores) : 0;
+}
+
+std::string get_language() {
+    const char* lang = std::getenv("LANG");
+    if (lang != nullptr && std::strlen(lang) >= 2) {
+        std::string full(lang);
+        // Extract first 2 chars (the language code)
+        auto code = full.substr(0, 2);
+        // Validate it's alphabetic
+        if (std::isalpha(static_cast<unsigned char>(code[0])) &&
+            std::isalpha(static_cast<unsigned char>(code[1]))) {
+            return code;
+        }
+    }
+    return "";
+}
+
 }  // namespace
 
-nlohmann::json collect(const std::string& sdk_version) {
+nlohmann::json collect(const std::string& sdk_version,
+                       const std::string& app_version,
+                       const std::string& app_build) {
     nlohmann::json telemetry = nlohmann::json::object();
 
-    // Always include sdk_version
-    telemetry["sdk_version"] = sdk_version;
+    try {
+        // Always include sdk_version
+        telemetry["sdk_version"] = sdk_version;
 
-    // Only include non-empty values
-    auto os_name = get_os_name();
-    if (!os_name.empty()) {
-        telemetry["os_name"] = os_name;
-    }
+        // Only include non-empty values
+        auto os_name = get_os_name();
+        if (!os_name.empty()) {
+            telemetry["os_name"] = os_name;
+        }
 
-    auto os_version = get_os_version();
-    if (!os_version.empty()) {
-        telemetry["os_version"] = os_version;
-    }
+        auto os_version = get_os_version();
+        if (!os_version.empty()) {
+            telemetry["os_version"] = os_version;
+        }
 
-    auto platform = get_platform();
-    if (!platform.empty()) {
-        telemetry["platform"] = platform;
-    }
+        auto platform = get_platform();
+        if (!platform.empty()) {
+            telemetry["platform"] = platform;
+        }
 
-    auto device_model = get_device_model();
-    if (!device_model.empty()) {
-        telemetry["device_model"] = device_model;
-    }
+        auto device_model = get_device_model();
+        if (!device_model.empty()) {
+            telemetry["device_model"] = device_model;
+        }
 
-    auto locale = get_locale();
-    if (!locale.empty()) {
-        telemetry["locale"] = locale;
-    }
+        auto locale = get_locale();
+        if (!locale.empty()) {
+            telemetry["locale"] = locale;
+        }
 
-    auto timezone = get_timezone();
-    if (!timezone.empty()) {
-        telemetry["timezone"] = timezone;
+        auto timezone = get_timezone();
+        if (!timezone.empty()) {
+            telemetry["timezone"] = timezone;
+        }
+
+        // User-provided fields
+        if (!app_version.empty()) {
+            telemetry["app_version"] = app_version;
+        }
+
+        if (!app_build.empty()) {
+            telemetry["app_build"] = app_build;
+        }
+
+        // New fields
+        auto device_type = get_device_type();
+        if (!device_type.empty()) {
+            telemetry["device_type"] = device_type;
+        }
+
+        auto architecture = get_architecture();
+        if (!architecture.empty()) {
+            telemetry["architecture"] = architecture;
+        }
+
+        auto cpu_cores = get_cpu_cores();
+        if (cpu_cores > 0) {
+            telemetry["cpu_cores"] = cpu_cores;
+        }
+
+        auto memory_gb = get_memory_gb();
+        if (memory_gb > 0) {
+            telemetry["memory_gb"] = memory_gb;
+        }
+
+        auto language = get_language();
+        if (!language.empty()) {
+            telemetry["language"] = language;
+        }
+
+        auto screen_resolution = get_screen_resolution();
+        if (!screen_resolution.empty()) {
+            telemetry["screen_resolution"] = screen_resolution;
+        }
+    } catch (...) {
+        // Never let telemetry crash the application
     }
 
     return telemetry;

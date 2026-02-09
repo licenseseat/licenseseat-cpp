@@ -58,7 +58,10 @@ class Client::Impl {
         }
     }
 
-    ~Impl() { stop_auto_validation(); }
+    ~Impl() {
+        stop_heartbeat();
+        stop_auto_validation();
+    }
 
     // ========== Synchronous API ==========
 
@@ -531,6 +534,47 @@ class Client::Impl {
 
     bool is_auto_validating() const { return auto_validate_running_; }
 
+    // ========== Heartbeat Timer ==========
+
+    void start_heartbeat(const std::string& license_key) {
+        stop_heartbeat();
+
+        if (config_.heartbeat_interval <= 0) {
+            return;
+        }
+
+        heartbeat_running_ = true;
+
+        heartbeat_thread_ = std::thread([this, license_key]() {
+            while (heartbeat_running_) {
+                std::unique_lock<std::mutex> lock(heartbeat_mutex_);
+                heartbeat_cv_.wait_for(
+                    lock, std::chrono::seconds(config_.heartbeat_interval),
+                    [this]() { return !heartbeat_running_; });
+
+                if (!heartbeat_running_) {
+                    break;
+                }
+
+                // Send heartbeat (fire-and-forget)
+                (void)this->heartbeat(license_key, "");
+            }
+        });
+    }
+
+    void stop_heartbeat() {
+        if (heartbeat_running_) {
+            heartbeat_running_ = false;
+            heartbeat_cv_.notify_all();
+
+            if (heartbeat_thread_.joinable()) {
+                heartbeat_thread_.join();
+            }
+        }
+    }
+
+    bool is_heartbeat_running() const { return heartbeat_running_; }
+
     // ========== Status & State ==========
 
     ValidationResult get_status() const {
@@ -758,6 +802,7 @@ class Client::Impl {
     }
 
     void reset() {
+        stop_heartbeat();
         stop_auto_validation();
         storage_->clear_all();
         cached_license_.reset();
@@ -774,7 +819,7 @@ class Client::Impl {
     /// Send a POST request, injecting telemetry if enabled
     http::Response send_post(const std::string& path, nlohmann::json body) {
         if (config_.telemetry_enabled) {
-            body["telemetry"] = telemetry::collect(VERSION);
+            body["telemetry"] = telemetry::collect(VERSION, config_.app_version, config_.app_build);
         }
         http::Request request;
         request.method = http::Method::POST;
@@ -943,6 +988,12 @@ class Client::Impl {
     std::condition_variable auto_validate_cv_;
     std::string current_auto_license_key_;
 
+    // Heartbeat timer
+    std::atomic<bool> heartbeat_running_{false};
+    std::thread heartbeat_thread_;
+    std::mutex heartbeat_mutex_;
+    std::condition_variable heartbeat_cv_;
+
     // Network status
     std::atomic<bool> is_online_{true};
 };
@@ -1022,6 +1073,14 @@ void Client::start_auto_validation(const std::string& license_key) {
 void Client::stop_auto_validation() { impl_->stop_auto_validation(); }
 
 bool Client::is_auto_validating() const { return impl_->is_auto_validating(); }
+
+void Client::start_heartbeat(const std::string& license_key) {
+    impl_->start_heartbeat(license_key);
+}
+
+void Client::stop_heartbeat() { impl_->stop_heartbeat(); }
+
+bool Client::is_heartbeat_running() const { return impl_->is_heartbeat_running(); }
 
 ValidationResult Client::get_status() const { return impl_->get_status(); }
 

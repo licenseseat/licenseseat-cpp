@@ -22,9 +22,13 @@ namespace telemetry {
  * locale, and timezone. Null/empty values are omitted from the result.
  *
  * @param sdk_version The SDK version string
+ * @param app_version User-provided app version (optional)
+ * @param app_build User-provided build number (optional)
  * @return JSON object with telemetry fields
  */
-[[nodiscard]] nlohmann::json collect(const std::string& sdk_version);
+[[nodiscard]] nlohmann::json collect(const std::string& sdk_version,
+                                     const std::string& app_version = "",
+                                     const std::string& app_build = "");
 
 }  // namespace telemetry
 }  // namespace licenseseat

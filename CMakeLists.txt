@@ -111,6 +111,7 @@ if(APPLE)
     target_link_libraries(licenseseat PRIVATE
         "-framework CoreFoundation"
         "-framework IOKit"
+        "-framework CoreGraphics"
     )
 endif()
 
