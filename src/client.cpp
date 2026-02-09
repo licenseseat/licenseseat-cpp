@@ -5,6 +5,7 @@
 #include "licenseseat/http.hpp"
 #include "licenseseat/json.hpp"
 #include "licenseseat/storage.hpp"
+#include "licenseseat/telemetry.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -82,13 +83,8 @@ class Client::Impl {
 
         // Build request - new URL structure: /products/{slug}/licenses/{key}/validate
         auto body = json::build_validate_request(device_id);
-
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/validate";
-        request.body = body.dump();
-
-        auto response = http_client_->send(request);
+        auto response = send_post(
+            "/products/" + config_.product_slug + "/licenses/" + license_key + "/validate", body);
 
         if (!response.success) {
             // Check if we should fallback to offline
@@ -164,13 +160,8 @@ class Client::Impl {
 
         // Build request - new URL structure: /products/{slug}/licenses/{key}/activate
         auto body = json::build_activate_request(device_id, device_name, metadata);
-
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/activate";
-        request.body = body.dump();
-
-        auto response = http_client_->send(request);
+        auto response = send_post(
+            "/products/" + config_.product_slug + "/licenses/" + license_key + "/activate", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -224,13 +215,8 @@ class Client::Impl {
 
         // Build request - new URL structure: /products/{slug}/licenses/{key}/deactivate
         auto body = json::build_deactivate_request(device_id);
-
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/deactivate";
-        request.body = body.dump();
-
-        auto response = http_client_->send(request);
+        auto response = send_post(
+            "/products/" + config_.product_slug + "/licenses/" + license_key + "/deactivate", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -294,6 +280,63 @@ class Client::Impl {
         }).detach();
     }
 
+    // ========== Heartbeat ==========
+
+    Result<HeartbeatResponse> heartbeat(const std::string& license_key,
+                                        const std::string& device_id_param) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (license_key.empty()) {
+            return Result<HeartbeatResponse>::error(ErrorCode::InvalidLicenseKey,
+                                                    "License key cannot be empty");
+        }
+
+        if (config_.product_slug.empty()) {
+            return Result<HeartbeatResponse>::error(ErrorCode::MissingParameter,
+                                                    "Product slug is required in config");
+        }
+
+        std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
+
+        nlohmann::json body = {{"device_id", device_id}};
+        auto response = send_post(
+            "/products/" + config_.product_slug + "/licenses/" + license_key + "/heartbeat", body);
+
+        if (!response.success) {
+            if (response.error_message.empty()) {
+                auto err = handle_error_response<HeartbeatResponse>(response);
+                event_bus_.emit(events::HEARTBEAT_ERROR,
+                                std::map<std::string, std::string>{{"error", err.error_message()}});
+                return err;
+            }
+            event_bus_.emit(events::HEARTBEAT_ERROR,
+                            std::map<std::string, std::string>{{"error", response.error_message}});
+            return Result<HeartbeatResponse>::error(ErrorCode::NetworkError, response.error_message);
+        }
+
+        try {
+            auto j = nlohmann::json::parse(response.body);
+            HeartbeatResponse result;
+            result.object = j.value("object", "");
+            result.received_at = j.value("received_at", "");
+            event_bus_.emit(events::HEARTBEAT_SUCCESS, result);
+            return Result<HeartbeatResponse>::ok(std::move(result));
+        } catch (const nlohmann::json::exception& e) {
+            return Result<HeartbeatResponse>::error(
+                ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
+        }
+    }
+
+    void heartbeat_async(const std::string& license_key, HeartbeatCallback callback,
+                         const std::string& device_id) {
+        std::thread([this, license_key, callback, device_id]() {
+            auto result = this->heartbeat(license_key, device_id);
+            if (callback) {
+                callback(std::move(result));
+            }
+        }).detach();
+    }
+
     // ========== Offline Tokens ==========
 
     Result<OfflineToken> generate_offline_token(const std::string& license_key,
@@ -315,13 +358,8 @@ class Client::Impl {
 
         // Build request - URL: /products/{slug}/licenses/{key}/offline_token
         auto body = json::build_offline_token_request(device_id, ttl_days);
-
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/offline_token";
-        request.body = body.dump();
-
-        auto response = http_client_->send(request);
+        auto response = send_post(
+            "/products/" + config_.product_slug + "/licenses/" + license_key + "/offline_token", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -457,6 +495,9 @@ class Client::Impl {
 
                 // Perform validation
                 auto result = this->validate(license_key, "");
+
+                // Piggyback heartbeat (fire-and-forget, ignore errors)
+                (void)this->heartbeat(license_key, "");
 
                 event_bus_.emit(events::AUTOVALIDATION_CYCLE,
                                 std::map<std::string, std::string>{{"license_key", license_key}});
@@ -661,13 +702,8 @@ class Client::Impl {
 
         // URL: /products/{slug}/releases/{version}/download_token
         auto body = json::build_download_token_request(license_key, platform);
-
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = "/products/" + product_slug + "/releases/" + version + "/download_token";
-        request.body = body.dump();
-
-        auto response = http_client_->send(request);
+        auto response = send_post(
+            "/products/" + product_slug + "/releases/" + version + "/download_token", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -724,6 +760,18 @@ class Client::Impl {
     const std::string& device_id() const noexcept { return device_id_; }
 
   private:
+    /// Send a POST request, injecting telemetry if enabled
+    http::Response send_post(const std::string& path, nlohmann::json body) {
+        if (config_.telemetry_enabled) {
+            body["telemetry"] = telemetry::collect(VERSION);
+        }
+        http::Request request;
+        request.method = http::Method::POST;
+        request.path = path;
+        request.body = body.dump();
+        return http_client_->send(request);
+    }
+
     template <typename T>
     Result<T> handle_error_response(const http::Response& response) {
         // Try to parse error response
@@ -927,6 +975,16 @@ void Client::activate_async(const std::string& license_key, ActivationCallback c
 void Client::deactivate_async(const std::string& license_key, DeactivationCallback callback,
                               const std::string& device_id) {
     impl_->deactivate_async(license_key, std::move(callback), device_id);
+}
+
+Result<HeartbeatResponse> Client::heartbeat(const std::string& license_key,
+                                            const std::string& device_id) {
+    return impl_->heartbeat(license_key, device_id);
+}
+
+void Client::heartbeat_async(const std::string& license_key, HeartbeatCallback callback,
+                              const std::string& device_id) {
+    impl_->heartbeat_async(license_key, std::move(callback), device_id);
 }
 
 Result<OfflineToken> Client::generate_offline_token(const std::string& license_key,

@@ -223,6 +223,45 @@ config.auto_validate_interval = 3600.0;  // Seconds between background validatio
 | `max_offline_days`       | int    | `0`                                | Maximum days license works offline (0 = disabled)  |
 | `storage_path`           | string | `""`                               | Path for license cache (empty = no persistence)    |
 | `auto_validate_interval` | double | `3600.0`                           | Seconds between auto-validation cycles             |
+| `telemetry_enabled`      | bool   | `true`                             | Enable anonymous telemetry collection              |
+
+---
+
+## Telemetry & Privacy
+
+The SDK collects anonymous platform telemetry to help developers understand their user base. This data is sent alongside API requests and includes:
+
+- `sdk_version` -- SDK version (e.g., "0.4.0")
+- `os_name` -- Operating system name (e.g., "macOS", "Windows", "Linux")
+- `os_version` -- OS version string
+- `platform` -- Platform name (same as `os_name` for native SDKs)
+- `device_model` -- Hardware model identifier (e.g., "Mac14,2")
+- `locale` -- System locale (e.g., "en_US.UTF-8")
+- `timezone` -- System timezone (e.g., "America/New_York")
+
+No personally identifiable information is collected. Fields that cannot be determined are omitted.
+
+To disable telemetry:
+
+```cpp
+config.telemetry_enabled = false;
+```
+
+---
+
+## Heartbeat
+
+Send heartbeats to track active usage of a license:
+
+```cpp
+auto result = client.heartbeat("LICENSE-KEY");
+
+if (result.is_ok()) {
+    std::cout << "Heartbeat received at: " << result.value().received_at << "\n";
+}
+```
+
+Heartbeats are also sent automatically during auto-validation cycles.
 
 ---
 

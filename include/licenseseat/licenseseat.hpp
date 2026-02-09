@@ -21,7 +21,7 @@
 namespace licenseseat {
 
 /// Library version
-constexpr const char* VERSION = "0.1.0";
+constexpr const char* VERSION = "0.4.0";
 
 /// Metadata type used throughout the SDK
 using Metadata = std::map<std::string, std::string>;
@@ -605,6 +605,14 @@ struct Deactivation {
 };
 
 /**
+ * @brief Heartbeat response from the API
+ */
+struct HeartbeatResponse {
+    std::string object;
+    std::string received_at;
+};
+
+/**
  * @brief Warning in validation response
  */
 struct ValidationWarning {
@@ -683,6 +691,11 @@ struct Config {
     /// Interval for refreshing offline license (seconds)
     double offline_license_refresh_interval = 86400.0;  // 24 hours
 
+    // ========== Telemetry Settings ==========
+
+    /// Enable telemetry collection (set false to disable)
+    bool telemetry_enabled = true;
+
     // ========== Debug Settings ==========
 
     /// Enable debug logging
@@ -709,6 +722,7 @@ using AsyncCallback = std::function<void(Result<ValidationResult>)>;
 using ActivationCallback = std::function<void(Result<Activation>)>;
 using DeactivationCallback = std::function<void(Result<Deactivation>)>;
 using OfflineTokenCallback = std::function<void(Result<OfflineToken>)>;
+using HeartbeatCallback = std::function<void(Result<HeartbeatResponse>)>;
 
 /**
  * @brief Entitlement check result
@@ -825,6 +839,24 @@ class Client {
         const std::string& license_key,
         DeactivationCallback callback,
         const std::string& device_id);
+
+    // ========== Heartbeat ==========
+
+    /// Send a heartbeat for a license
+    /// @param license_key The license key
+    /// @param device_id Optional device ID (uses config if empty)
+    [[nodiscard]] Result<HeartbeatResponse> heartbeat(
+        const std::string& license_key,
+        const std::string& device_id = "");
+
+    /// Send a heartbeat asynchronously
+    /// @param license_key The license key
+    /// @param callback Called when heartbeat completes
+    /// @param device_id Optional device ID (uses config if empty)
+    void heartbeat_async(
+        const std::string& license_key,
+        HeartbeatCallback callback,
+        const std::string& device_id = "");
 
     // ========== Offline Tokens ==========
 

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 
 project(licenseseat
-    VERSION 0.3.0
+    VERSION 0.4.0
     DESCRIPTION "C++ SDK for LicenseSeat licensing API"
     HOMEPAGE_URL "https://github.com/licenseseat/licenseseat-cpp"
     LANGUAGES CXX C
@@ -73,6 +73,7 @@ set(LICENSESEAT_SOURCES
     src/device.cpp
     src/storage.cpp
     src/crypto.cpp
+    src/telemetry.cpp
     ${ED25519_SOURCES}
 )
 
