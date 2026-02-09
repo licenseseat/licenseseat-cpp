@@ -346,7 +346,8 @@ nlohmann::json collect(const std::string& sdk_version,
     nlohmann::json telemetry = nlohmann::json::object();
 
     try {
-        // Always include sdk_version
+        // Always include sdk identifiers
+        telemetry["sdk_name"] = "cpp";
         telemetry["sdk_version"] = sdk_version;
 
         // Only include non-empty values
