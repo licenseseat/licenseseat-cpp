@@ -19,7 +19,9 @@ The official C++ SDK for [LicenseSeat](https://licenseseat.com) – the licensin
 - **Entitlement checking** – Check feature access with `has_entitlement()` and `check_entitlement()`
 - **Local caching** – File-based caching with clock tamper detection
 - **Auto-validation** – Background validation with configurable intervals
-- **Event system** – Subscribe to license events (validation success/failure, offline token ready, etc.)
+- **Heartbeat** – Track active device usage with manual or automatic heartbeats
+- **Telemetry** – Anonymous platform telemetry (16 fields, opt-out with one flag)
+- **Event system** – Subscribe to license events (validation success/failure, heartbeat, offline token ready, etc.)
 - **Thread-safe** – All public methods are safe to call from multiple threads
 - **Cross-platform** – Windows, macOS, and Linux support
 - **Exception-free** – Uses `Result<T, Error>` pattern for error handling
@@ -207,6 +209,14 @@ config.storage_path = "";  // Path for license cache (empty = no persistence)
 
 // Optional - Auto-validation
 config.auto_validate_interval = 3600.0;  // Seconds between background validations
+
+// Optional - Heartbeat
+config.heartbeat_interval = 300;  // Seconds between auto-heartbeats (0 to disable)
+
+// Optional - Telemetry
+config.telemetry_enabled = true;   // Set false to disable
+config.app_version = "2.1.0";     // Included in telemetry
+config.app_build = "142";         // Included in telemetry
 ```
 
 ### Configuration Options
@@ -224,24 +234,45 @@ config.auto_validate_interval = 3600.0;  // Seconds between background validatio
 | `storage_path`           | string | `""`                               | Path for license cache (empty = no persistence)    |
 | `auto_validate_interval` | double | `3600.0`                           | Seconds between auto-validation cycles             |
 | `telemetry_enabled`      | bool   | `true`                             | Enable anonymous telemetry collection              |
+| `app_version`            | string | `""`                               | App version included in telemetry                  |
+| `app_build`              | string | `""`                               | Build number included in telemetry                 |
+| `heartbeat_interval`     | int    | `300`                              | Seconds between auto-heartbeats (0 to disable)     |
 
 ---
 
 ## Telemetry & Privacy
 
-The SDK collects anonymous platform telemetry to help developers understand their user base. This data is sent alongside API requests and includes:
+The SDK collects anonymous platform telemetry to help developers understand their user base. This data is sent alongside every API request (validation, activation, heartbeat, etc.) and includes the following fields:
 
-- `sdk_version` -- SDK version (e.g., "0.4.0")
-- `os_name` -- Operating system name (e.g., "macOS", "Windows", "Linux")
-- `os_version` -- OS version string
-- `platform` -- Platform name (same as `os_name` for native SDKs)
-- `device_model` -- Hardware model identifier (e.g., "Mac14,2")
-- `locale` -- System locale (e.g., "en_US.UTF-8")
-- `timezone` -- System timezone (e.g., "America/New_York")
+| Field               | Type   | Example                  | Description                                            |
+| ------------------- | ------ | ------------------------ | ------------------------------------------------------ |
+| `sdk_name`          | string | `"cpp"`                  | Always `"cpp"` for this SDK                            |
+| `sdk_version`       | string | `"0.4.0"`               | SDK version                                            |
+| `os_name`           | string | `"macOS"`                | Operating system (`"macOS"`, `"Windows"`, `"Linux"`)   |
+| `os_version`        | string | `"15.3"`                 | OS version string                                      |
+| `platform`          | string | `"native"`               | Always `"native"` for this SDK                         |
+| `device_model`      | string | `"Mac14,2"`              | Hardware model identifier                              |
+| `device_type`       | string | `"desktop"`              | Device type (`"desktop"`, `"server"`, `"unknown"`)     |
+| `architecture`      | string | `"arm64"`                | CPU architecture (`"arm64"`, `"x64"`, `"x86"`, `"arm"`) |
+| `cpu_cores`         | int    | `10`                     | Number of logical CPU cores                            |
+| `memory_gb`         | int    | `16`                     | Total system RAM in GB (rounded)                       |
+| `locale`            | string | `"en_US.UTF-8"`          | System locale string                                   |
+| `language`           | string | `"en"`                   | Two-letter language code extracted from locale          |
+| `timezone`          | string | `"America/New_York"`     | System timezone                                        |
+| `screen_resolution` | string | `"1920x1080"`            | Primary display resolution                             |
+| `app_version`       | string | `"2.1.0"`               | User-provided via `config.app_version`                 |
+| `app_build`         | string | `"142"`                  | User-provided via `config.app_build`                   |
 
-No personally identifiable information is collected. Fields that cannot be determined are omitted.
+No personally identifiable information is collected. Fields that cannot be determined on a given platform are omitted from the payload.
 
-To disable telemetry:
+To include your application version in telemetry:
+
+```cpp
+config.app_version = "2.1.0";
+config.app_build = "142";
+```
+
+To disable telemetry entirely:
 
 ```cpp
 config.telemetry_enabled = false;
@@ -251,7 +282,11 @@ config.telemetry_enabled = false;
 
 ## Heartbeat
 
-Send heartbeats to track active usage of a license:
+Heartbeats let the server know a device is actively using a license. This powers the "last seen" timestamp and active-device analytics in the LicenseSeat dashboard.
+
+### Manual Heartbeat
+
+Send a one-off heartbeat at any time:
 
 ```cpp
 auto result = client.heartbeat("LICENSE-KEY");
@@ -259,9 +294,38 @@ auto result = client.heartbeat("LICENSE-KEY");
 if (result.is_ok()) {
     std::cout << "Heartbeat received at: " << result.value().received_at << "\n";
 }
+
+// Async variant
+client.heartbeat_async("LICENSE-KEY", [](auto result) {
+    if (result.is_ok()) {
+        std::cout << "Heartbeat sent\n";
+    }
+});
 ```
 
-Heartbeats are also sent automatically during auto-validation cycles.
+### Auto-Heartbeat Timer
+
+Start a background timer that sends heartbeats at a regular interval:
+
+```cpp
+// Configure interval (default is 300 seconds / 5 minutes)
+config.heartbeat_interval = 600;  // Every 10 minutes (0 to disable)
+
+licenseseat::Client client(config);
+
+// Start the timer
+client.start_heartbeat("LICENSE-KEY");
+
+// Check if running
+if (client.is_heartbeat_running()) {
+    std::cout << "Heartbeat timer is active\n";
+}
+
+// Stop when done (also stops automatically on destruction)
+client.stop_heartbeat();
+```
+
+Heartbeats are also sent automatically as part of each auto-validation cycle, so if you are already using `start_auto_validation()` you may not need a separate heartbeat timer.
 
 ---
 
@@ -554,6 +618,8 @@ sub3.cancel();
 | `AUTOVALIDATION_STOPPED` | Auto-validation stopped                      |
 | `OFFLINE_TOKEN_READY`    | Offline token generated                      |
 | `OFFLINE_TOKEN_VERIFIED` | Offline token verified                       |
+| `HEARTBEAT_SUCCESS`      | Heartbeat sent successfully                  |
+| `HEARTBEAT_ERROR`        | Heartbeat request failed                     |
 | `SDK_RESET`              | SDK state reset                              |
 
 ---
