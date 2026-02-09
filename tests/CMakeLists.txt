@@ -14,6 +14,7 @@ add_executable(licenseseat_tests
     test_events.cpp
     test_storage.cpp
     test_special_packaging.cpp
+    test_telemetry.cpp
 )
 
 target_compile_definitions(licenseseat_tests
@@ -64,6 +65,24 @@ target_compile_definitions(crypto_stress_test
 )
 
 target_link_libraries(crypto_stress_test
+    PRIVATE
+        licenseseat::licenseseat
+        nlohmann_json::nlohmann_json
+        httplib::httplib
+)
+
+# Telemetry & heartbeat stress test
+add_executable(telemetry_stress_test
+    telemetry_stress_test.cpp
+)
+
+target_compile_definitions(telemetry_stress_test
+    PRIVATE
+        CPPHTTPLIB_OPENSSL_SUPPORT
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
+)
+
+target_link_libraries(telemetry_stress_test
     PRIVATE
         licenseseat::licenseseat
         nlohmann_json::nlohmann_json

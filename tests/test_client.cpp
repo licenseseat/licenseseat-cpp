@@ -422,7 +422,7 @@ TEST_F(ClientTest, DeactivateAsyncCallsCallback) {
 // ==================== Version ====================
 
 TEST(VersionTest, VersionIsSet) {
-    EXPECT_STREQ(VERSION, "0.1.0");
+    EXPECT_STREQ(VERSION, "0.4.0");
 }
 
 }  // namespace

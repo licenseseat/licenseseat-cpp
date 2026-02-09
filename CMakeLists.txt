@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 
 project(licenseseat
-    VERSION 0.3.0
+    VERSION 0.4.0
     DESCRIPTION "C++ SDK for LicenseSeat licensing API"
     HOMEPAGE_URL "https://github.com/licenseseat/licenseseat-cpp"
     LANGUAGES CXX C
@@ -73,6 +73,7 @@ set(LICENSESEAT_SOURCES
     src/device.cpp
     src/storage.cpp
     src/crypto.cpp
+    src/telemetry.cpp
     ${ED25519_SOURCES}
 )
 
@@ -93,6 +94,7 @@ target_include_directories(licenseseat
 target_compile_definitions(licenseseat
     PRIVATE
         CPPHTTPLIB_OPENSSL_SUPPORT
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 
 # Link libraries
@@ -110,6 +112,7 @@ if(APPLE)
     target_link_libraries(licenseseat PRIVATE
         "-framework CoreFoundation"
         "-framework IOKit"
+        "-framework CoreGraphics"
     )
 endif()
 

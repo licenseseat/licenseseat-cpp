@@ -5,6 +5,7 @@
 #include "licenseseat/http.hpp"
 #include "licenseseat/json.hpp"
 #include "licenseseat/storage.hpp"
+#include "licenseseat/telemetry.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -57,7 +58,10 @@ class Client::Impl {
         }
     }
 
-    ~Impl() { stop_auto_validation(); }
+    ~Impl() {
+        stop_heartbeat();
+        stop_auto_validation();
+    }
 
     // ========== Synchronous API ==========
 
@@ -82,13 +86,8 @@ class Client::Impl {
 
         // Build request - new URL structure: /products/{slug}/licenses/{key}/validate
         auto body = json::build_validate_request(device_id);
-
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/validate";
-        request.body = body.dump();
-
-        auto response = http_client_->send(request);
+        auto response = send_post(
+            "/products/" + config_.product_slug + "/licenses/" + license_key + "/validate", body);
 
         if (!response.success) {
             // Check if we should fallback to offline
@@ -140,64 +139,70 @@ class Client::Impl {
                                 const std::string& device_id_param,
                                 const std::string& device_name,
                                 const Metadata& metadata) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        Result<Activation> result = Result<Activation>::error(ErrorCode::Unknown, "");
+        std::string resolved_device_id;
+        bool should_sync = false;
 
-        if (license_key.empty()) {
-            return Result<Activation>::error(ErrorCode::InvalidLicenseKey,
-                                             "License key cannot be empty");
-        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
 
-        if (config_.product_slug.empty()) {
-            return Result<Activation>::error(ErrorCode::MissingParameter,
-                                             "Product slug is required in config");
-        }
-
-        std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
-        if (device_id.empty()) {
-            return Result<Activation>::error(ErrorCode::MissingParameter,
-                                             "Device ID is required");
-        }
-
-        event_bus_.emit(events::ACTIVATION_START,
-                        std::map<std::string, std::string>{{"license_key", license_key},
-                                                           {"device_id", device_id}});
-
-        // Build request - new URL structure: /products/{slug}/licenses/{key}/activate
-        auto body = json::build_activate_request(device_id, device_name, metadata);
-
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/activate";
-        request.body = body.dump();
-
-        auto response = http_client_->send(request);
-
-        if (!response.success) {
-            if (response.error_message.empty()) {
-                auto err = handle_error_response<Activation>(response);
-                event_bus_.emit(events::ACTIVATION_ERROR,
-                                std::map<std::string, std::string>{{"error", err.error_message()}});
-                return err;
+            if (license_key.empty()) {
+                return Result<Activation>::error(ErrorCode::InvalidLicenseKey,
+                                                 "License key cannot be empty");
             }
-            return Result<Activation>::error(ErrorCode::NetworkError, response.error_message);
+
+            if (config_.product_slug.empty()) {
+                return Result<Activation>::error(ErrorCode::MissingParameter,
+                                                 "Product slug is required in config");
+            }
+
+            resolved_device_id = device_id_param.empty() ? device_id_ : device_id_param;
+            if (resolved_device_id.empty()) {
+                return Result<Activation>::error(ErrorCode::MissingParameter,
+                                                 "Device ID is required");
+            }
+
+            event_bus_.emit(events::ACTIVATION_START,
+                            std::map<std::string, std::string>{{"license_key", license_key},
+                                                               {"device_id", resolved_device_id}});
+
+            // Build request - new URL structure: /products/{slug}/licenses/{key}/activate
+            auto body = json::build_activate_request(resolved_device_id, device_name, metadata);
+            auto response = send_post(
+                "/products/" + config_.product_slug + "/licenses/" + license_key + "/activate", body);
+
+            if (!response.success) {
+                if (response.error_message.empty()) {
+                    auto err = handle_error_response<Activation>(response);
+                    event_bus_.emit(events::ACTIVATION_ERROR,
+                                    std::map<std::string, std::string>{{"error", err.error_message()}});
+                    return err;
+                }
+                return Result<Activation>::error(ErrorCode::NetworkError, response.error_message);
+            }
+
+            // Parse response
+            try {
+                auto j = nlohmann::json::parse(response.body);
+                auto activation = json::parse_activation(j);
+                current_activation_ = activation;
+
+                event_bus_.emit(events::ACTIVATION_SUCCESS, activation);
+
+                result = Result<Activation>::ok(std::move(activation));
+                should_sync = true;
+            } catch (const nlohmann::json::exception& e) {
+                return Result<Activation>::error(ErrorCode::ParseError,
+                                                 std::string("Failed to parse response: ") + e.what());
+            }
+        }  // mutex released here
+
+        // Sync offline assets AFTER releasing the lock to avoid deadlock
+        if (should_sync) {
+            sync_offline_assets_impl(license_key, resolved_device_id);
         }
 
-        // Parse response
-        try {
-            auto j = nlohmann::json::parse(response.body);
-            auto activation = json::parse_activation(j);
-            current_activation_ = activation;
-
-            event_bus_.emit(events::ACTIVATION_SUCCESS, activation);
-
-            // Sync offline assets in background
-            sync_offline_assets_impl(license_key, device_id);
-
-            return Result<Activation>::ok(std::move(activation));
-        } catch (const nlohmann::json::exception& e) {
-            return Result<Activation>::error(ErrorCode::ParseError,
-                                             std::string("Failed to parse response: ") + e.what());
-        }
+        return result;
     }
 
     Result<Deactivation> deactivate(const std::string& license_key,
@@ -224,13 +229,8 @@ class Client::Impl {
 
         // Build request - new URL structure: /products/{slug}/licenses/{key}/deactivate
         auto body = json::build_deactivate_request(device_id);
-
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/deactivate";
-        request.body = body.dump();
-
-        auto response = http_client_->send(request);
+        auto response = send_post(
+            "/products/" + config_.product_slug + "/licenses/" + license_key + "/deactivate", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -294,6 +294,63 @@ class Client::Impl {
         }).detach();
     }
 
+    // ========== Heartbeat ==========
+
+    Result<HeartbeatResponse> heartbeat(const std::string& license_key,
+                                        const std::string& device_id_param) {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (license_key.empty()) {
+            return Result<HeartbeatResponse>::error(ErrorCode::InvalidLicenseKey,
+                                                    "License key cannot be empty");
+        }
+
+        if (config_.product_slug.empty()) {
+            return Result<HeartbeatResponse>::error(ErrorCode::MissingParameter,
+                                                    "Product slug is required in config");
+        }
+
+        std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
+
+        nlohmann::json body = {{"device_id", device_id}};
+        auto response = send_post(
+            "/products/" + config_.product_slug + "/licenses/" + license_key + "/heartbeat", body);
+
+        if (!response.success) {
+            if (response.error_message.empty()) {
+                auto err = handle_error_response<HeartbeatResponse>(response);
+                event_bus_.emit(events::HEARTBEAT_ERROR,
+                                std::map<std::string, std::string>{{"error", err.error_message()}});
+                return err;
+            }
+            event_bus_.emit(events::HEARTBEAT_ERROR,
+                            std::map<std::string, std::string>{{"error", response.error_message}});
+            return Result<HeartbeatResponse>::error(ErrorCode::NetworkError, response.error_message);
+        }
+
+        try {
+            auto j = nlohmann::json::parse(response.body);
+            HeartbeatResponse result;
+            result.object = j.value("object", "");
+            result.received_at = j.value("received_at", "");
+            event_bus_.emit(events::HEARTBEAT_SUCCESS, result);
+            return Result<HeartbeatResponse>::ok(std::move(result));
+        } catch (const nlohmann::json::exception& e) {
+            return Result<HeartbeatResponse>::error(
+                ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
+        }
+    }
+
+    void heartbeat_async(const std::string& license_key, HeartbeatCallback callback,
+                         const std::string& device_id) {
+        std::thread([this, license_key, callback, device_id]() {
+            auto result = this->heartbeat(license_key, device_id);
+            if (callback) {
+                callback(std::move(result));
+            }
+        }).detach();
+    }
+
     // ========== Offline Tokens ==========
 
     Result<OfflineToken> generate_offline_token(const std::string& license_key,
@@ -315,13 +372,8 @@ class Client::Impl {
 
         // Build request - URL: /products/{slug}/licenses/{key}/offline_token
         auto body = json::build_offline_token_request(device_id, ttl_days);
-
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = "/products/" + config_.product_slug + "/licenses/" + license_key + "/offline_token";
-        request.body = body.dump();
-
-        auto response = http_client_->send(request);
+        auto response = send_post(
+            "/products/" + config_.product_slug + "/licenses/" + license_key + "/offline_token", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -458,6 +510,9 @@ class Client::Impl {
                 // Perform validation
                 auto result = this->validate(license_key, "");
 
+                // Piggyback heartbeat (fire-and-forget, ignore errors)
+                (void)this->heartbeat(license_key, "");
+
                 event_bus_.emit(events::AUTOVALIDATION_CYCLE,
                                 std::map<std::string, std::string>{{"license_key", license_key}});
             }
@@ -478,6 +533,47 @@ class Client::Impl {
     }
 
     bool is_auto_validating() const { return auto_validate_running_; }
+
+    // ========== Heartbeat Timer ==========
+
+    void start_heartbeat(const std::string& license_key) {
+        stop_heartbeat();
+
+        if (config_.heartbeat_interval <= 0) {
+            return;
+        }
+
+        heartbeat_running_ = true;
+
+        heartbeat_thread_ = std::thread([this, license_key]() {
+            while (heartbeat_running_) {
+                std::unique_lock<std::mutex> lock(heartbeat_mutex_);
+                heartbeat_cv_.wait_for(
+                    lock, std::chrono::seconds(config_.heartbeat_interval),
+                    [this]() { return !heartbeat_running_; });
+
+                if (!heartbeat_running_) {
+                    break;
+                }
+
+                // Send heartbeat (fire-and-forget)
+                (void)this->heartbeat(license_key, "");
+            }
+        });
+    }
+
+    void stop_heartbeat() {
+        if (heartbeat_running_) {
+            heartbeat_running_ = false;
+            heartbeat_cv_.notify_all();
+
+            if (heartbeat_thread_.joinable()) {
+                heartbeat_thread_.join();
+            }
+        }
+    }
+
+    bool is_heartbeat_running() const { return heartbeat_running_; }
 
     // ========== Status & State ==========
 
@@ -661,13 +757,8 @@ class Client::Impl {
 
         // URL: /products/{slug}/releases/{version}/download_token
         auto body = json::build_download_token_request(license_key, platform);
-
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = "/products/" + product_slug + "/releases/" + version + "/download_token";
-        request.body = body.dump();
-
-        auto response = http_client_->send(request);
+        auto response = send_post(
+            "/products/" + product_slug + "/releases/" + version + "/download_token", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -711,6 +802,7 @@ class Client::Impl {
     }
 
     void reset() {
+        stop_heartbeat();
         stop_auto_validation();
         storage_->clear_all();
         cached_license_.reset();
@@ -724,6 +816,18 @@ class Client::Impl {
     const std::string& device_id() const noexcept { return device_id_; }
 
   private:
+    /// Send a POST request, injecting telemetry if enabled
+    http::Response send_post(const std::string& path, nlohmann::json body) {
+        if (config_.telemetry_enabled) {
+            body["telemetry"] = telemetry::collect(VERSION, config_.app_version, config_.app_build);
+        }
+        http::Request request;
+        request.method = http::Method::POST;
+        request.path = path;
+        request.body = body.dump();
+        return http_client_->send(request);
+    }
+
     template <typename T>
     Result<T> handle_error_response(const http::Response& response) {
         // Try to parse error response
@@ -884,6 +988,12 @@ class Client::Impl {
     std::condition_variable auto_validate_cv_;
     std::string current_auto_license_key_;
 
+    // Heartbeat timer
+    std::atomic<bool> heartbeat_running_{false};
+    std::thread heartbeat_thread_;
+    std::mutex heartbeat_mutex_;
+    std::condition_variable heartbeat_cv_;
+
     // Network status
     std::atomic<bool> is_online_{true};
 };
@@ -929,6 +1039,16 @@ void Client::deactivate_async(const std::string& license_key, DeactivationCallba
     impl_->deactivate_async(license_key, std::move(callback), device_id);
 }
 
+Result<HeartbeatResponse> Client::heartbeat(const std::string& license_key,
+                                            const std::string& device_id) {
+    return impl_->heartbeat(license_key, device_id);
+}
+
+void Client::heartbeat_async(const std::string& license_key, HeartbeatCallback callback,
+                              const std::string& device_id) {
+    impl_->heartbeat_async(license_key, std::move(callback), device_id);
+}
+
 Result<OfflineToken> Client::generate_offline_token(const std::string& license_key,
                                                     const std::string& device_id,
                                                     int ttl_days) {
@@ -953,6 +1073,14 @@ void Client::start_auto_validation(const std::string& license_key) {
 void Client::stop_auto_validation() { impl_->stop_auto_validation(); }
 
 bool Client::is_auto_validating() const { return impl_->is_auto_validating(); }
+
+void Client::start_heartbeat(const std::string& license_key) {
+    impl_->start_heartbeat(license_key);
+}
+
+void Client::stop_heartbeat() { impl_->stop_heartbeat(); }
+
+bool Client::is_heartbeat_running() const { return impl_->is_heartbeat_running(); }
 
 ValidationResult Client::get_status() const { return impl_->get_status(); }
 

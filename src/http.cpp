@@ -114,7 +114,7 @@ class HttpClient::Impl {
             headers.emplace("Authorization", "Bearer " + config_.api_key);
         }
         headers.emplace("Content-Type", request.content_type);
-        headers.emplace("User-Agent", "LicenseSeat-CPP-SDK/0.1.0");
+        headers.emplace("User-Agent", std::string("LicenseSeat-CPP-SDK/") + licenseseat::VERSION);
 
         // Retry loop
         for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
