@@ -40,18 +40,24 @@ std::string get_env(const char* name) {
 std::string API_KEY;
 std::string PRODUCT_SLUG;
 std::string LICENSE_KEY;
+std::string API_URL;
 
 bool load_credentials() {
     API_KEY = get_env("LICENSESEAT_API_KEY");
     PRODUCT_SLUG = get_env("LICENSESEAT_PRODUCT_SLUG");
     LICENSE_KEY = get_env("LICENSESEAT_LICENSE_KEY");
+    API_URL = get_env("LICENSESEAT_API_URL");
+    if (API_URL.empty()) {
+        API_URL = "https://licenseseat.com/api/v1";
+    }
 
     if (API_KEY.empty() || PRODUCT_SLUG.empty() || LICENSE_KEY.empty()) {
         std::cerr << "Error: Missing required environment variables.\n\n";
         std::cerr << "Please set the following environment variables:\n";
         std::cerr << "  LICENSESEAT_API_KEY      - Your LicenseSeat API key\n";
         std::cerr << "  LICENSESEAT_PRODUCT_SLUG - Your product slug\n";
-        std::cerr << "  LICENSESEAT_LICENSE_KEY  - A valid license key for testing\n\n";
+        std::cerr << "  LICENSESEAT_LICENSE_KEY  - A valid license key for testing\n";
+        std::cerr << "  LICENSESEAT_API_URL      - (Optional) API endpoint URL\n\n";
         std::cerr << "Example:\n";
         std::cerr << "  export LICENSESEAT_API_KEY=\"ls_your_api_key\"\n";
         std::cerr << "  export LICENSESEAT_PRODUCT_SLUG=\"your-product\"\n";
@@ -99,7 +105,7 @@ licenseseat::Config make_config() {
     licenseseat::Config config;
     config.api_key = API_KEY;
     config.product_slug = PRODUCT_SLUG;
-    config.api_url = "https://licenseseat.com/api/v1";
+    config.api_url = API_URL;
     config.timeout_seconds = 30;
     config.max_retries = 2;
     config.storage_path = "/tmp/licenseseat_integration_test";
@@ -1153,7 +1159,7 @@ int main() {
     std::cout << CYAN << "║     LicenseSeat C++ SDK - Live Integration Test Suite         ║" << RESET << "\n";
     std::cout << CYAN << "╚═══════════════════════════════════════════════════════════════╝" << RESET << "\n";
 
-    info("API URL: https://licenseseat.com/api/v1");
+    info("API URL: " + API_URL);
     info("Product: " + PRODUCT_SLUG);
     info("License: " + LICENSE_KEY.substr(0, 5) + "..." + LICENSE_KEY.substr(LICENSE_KEY.length() - 5));
 
