@@ -1,0 +1,146 @@
+/**
+ * Offline Workflow Test
+ *
+ * Demonstrates both automatic and manual offline storage workflows.
+ *
+ * Environment variables:
+ *   LICENSESEAT_API_KEY        - API key
+ *   LICENSESEAT_PRODUCT_SLUG   - Product slug
+ *   LICENSESEAT_LICENSE_KEY    - License key to test
+ */
+
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <licenseseat/json.hpp>
+#include <licenseseat/licenseseat.hpp>
+
+namespace fs = std::filesystem;
+
+struct TestConfig {
+    std::string api_key;
+    std::string product_slug;
+    std::string license_key;
+    std::string storage_path;
+
+    static TestConfig from_env() {
+        TestConfig cfg;
+        auto get_env = [](const char* name) -> std::string {
+            const char* val = std::getenv(name);
+            return val ? val : "";
+        };
+
+        cfg.api_key = get_env("LICENSESEAT_API_KEY");
+        cfg.product_slug = get_env("LICENSESEAT_PRODUCT_SLUG");
+        cfg.license_key = get_env("LICENSESEAT_LICENSE_KEY");
+
+        if (cfg.api_key.empty() || cfg.product_slug.empty() || cfg.license_key.empty()) {
+            std::cerr << "Missing: LICENSESEAT_API_KEY, LICENSESEAT_PRODUCT_SLUG, LICENSESEAT_LICENSE_KEY\n";
+            std::exit(1);
+        }
+
+        cfg.storage_path = fs::temp_directory_path() / "licenseseat_test";
+        fs::create_directories(cfg.storage_path);
+        return cfg;
+    }
+};
+
+// Test 1: Automatic storage (recommended)
+bool test_automatic() {
+    std::cout << "\n=== Test: Automatic Storage ===\n";
+    auto cfg = TestConfig::from_env();
+
+    licenseseat::Config client_cfg;
+    client_cfg.api_key = cfg.api_key;
+    client_cfg.product_slug = cfg.product_slug;
+    client_cfg.storage_path = cfg.storage_path;
+
+    licenseseat::Client client(client_cfg);
+
+    // Just activate - SDK handles offline sync automatically
+    auto result = client.activate(cfg.license_key);
+    if (result.is_error()) {
+        std::cerr << "FAIL: " << result.error_message() << "\n";
+        return false;
+    }
+
+    std::cout << "OK: Activated. Offline assets synced automatically.\n";
+
+    // Verify files were created
+    for (const auto& entry : fs::directory_iterator(cfg.storage_path)) {
+        std::cout << "  Cached: " << entry.path().filename().string() << "\n";
+    }
+
+    return true;
+}
+
+// Test 2: Manual storage with serialization helpers
+bool test_manual() {
+    std::cout << "\n=== Test: Manual Storage ===\n";
+    auto cfg = TestConfig::from_env();
+
+    licenseseat::Config client_cfg;
+    client_cfg.api_key = cfg.api_key;
+    client_cfg.product_slug = cfg.product_slug;
+
+    licenseseat::Client client(client_cfg);
+
+    // Generate offline token
+    auto token_result = client.generate_offline_token(cfg.license_key);
+    if (token_result.is_error()) {
+        std::cerr << "FAIL: " << token_result.error_message() << "\n";
+        return false;
+    }
+    auto token = token_result.value();
+
+    // Fetch public key
+    auto key_result = client.fetch_signing_key(token.token.kid);
+    if (key_result.is_error()) {
+        std::cerr << "FAIL: " << key_result.error_message() << "\n";
+        return false;
+    }
+    auto public_key = key_result.value();
+
+    // Serialize with one-liner
+    std::string json_str = licenseseat::json::offline_token_to_json(token);
+    std::cout << "OK: Serialized (" << json_str.size() << " bytes)\n";
+
+    // Deserialize
+    auto loaded = licenseseat::json::offline_token_from_json(json_str);
+
+    // Verify offline
+    auto verify = client.verify_offline_token(loaded, public_key);
+    if (verify.is_error() || !verify.value()) {
+        std::cerr << "FAIL: Verification failed\n";
+        return false;
+    }
+
+    std::cout << "OK: Verified offline\n";
+    std::cout << "  License: " << loaded.token.license_key << "\n";
+    std::cout << "  Plan: " << loaded.token.plan_key << "\n";
+
+    // Access metadata
+    for (const auto& [k, v] : loaded.token.metadata) {
+        std::cout << "  Metadata: " << k << " = " << v << "\n";
+    }
+
+    return true;
+}
+
+int main() {
+    std::cout << "LicenseSeat C++ SDK - Offline Workflow Test\n";
+
+    int passed = 0, failed = 0;
+
+    test_automatic() ? passed++ : failed++;
+    test_manual() ? passed++ : failed++;
+
+    std::cout << "\nResult: " << passed << " passed, " << failed << " failed\n";
+
+    // Cleanup
+    auto cfg = TestConfig::from_env();
+    fs::remove_all(cfg.storage_path);
+
+    return failed == 0 ? 0 : 1;
+}

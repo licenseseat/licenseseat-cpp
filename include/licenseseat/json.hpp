@@ -455,6 +455,74 @@ using nlohmann::json;
     return offline;
 }
 
+/// Convert Entitlement to JSON (for offline token serialization)
+[[nodiscard]] inline json entitlement_to_json(const Entitlement& ent) {
+    json j;
+    j["key"] = ent.key;
+    if (ent.expires_at.has_value()) {
+        j["expires_at"] = std::chrono::system_clock::to_time_t(*ent.expires_at);
+    }
+    if (!ent.metadata.empty()) {
+        j["metadata"] = metadata_to_json(ent.metadata);
+    }
+    return j;
+}
+
+/// Convert OfflineToken to JSON string for manual storage
+/// Use this when you need to save the offline token to your own storage system.
+[[nodiscard]] inline std::string offline_token_to_json(const OfflineToken& offline) {
+    json j;
+
+    // Token payload
+    j["token"]["schema_version"] = offline.token.schema_version;
+    j["token"]["license_key"] = offline.token.license_key;
+    j["token"]["product_slug"] = offline.token.product_slug;
+    j["token"]["plan_key"] = offline.token.plan_key;
+    j["token"]["mode"] = offline.token.mode;
+    j["token"]["iat"] = offline.token.iat;
+    j["token"]["exp"] = offline.token.exp;
+    j["token"]["nbf"] = offline.token.nbf;
+    j["token"]["kid"] = offline.token.kid;
+
+    if (offline.token.seat_limit.has_value()) {
+        j["token"]["seat_limit"] = *offline.token.seat_limit;
+    }
+    if (offline.token.device_id.has_value()) {
+        j["token"]["device_id"] = *offline.token.device_id;
+    }
+    if (offline.token.license_expires_at.has_value()) {
+        j["token"]["license_expires_at"] = *offline.token.license_expires_at;
+    }
+
+    // Entitlements
+    j["token"]["entitlements"] = json::array();
+    for (const auto& ent : offline.token.entitlements) {
+        j["token"]["entitlements"].push_back(entitlement_to_json(ent));
+    }
+
+    // Metadata
+    if (!offline.token.metadata.empty()) {
+        j["token"]["metadata"] = metadata_to_json(offline.token.metadata);
+    }
+
+    // Signature
+    j["signature"]["algorithm"] = offline.signature.algorithm;
+    j["signature"]["key_id"] = offline.signature.key_id;
+    j["signature"]["value"] = offline.signature.value;
+
+    // Canonical (needed for signature verification)
+    j["canonical"] = offline.canonical;
+
+    return j.dump();
+}
+
+/// Parse OfflineToken from JSON string (for manual storage)
+/// Use this when loading a previously saved offline token.
+[[nodiscard]] inline OfflineToken offline_token_from_json(const std::string& json_str) {
+    auto j = json::parse(json_str);
+    return parse_offline_token(j);
+}
+
 // ==================== Release Parsing ====================
 
 /// Parse Release from JSON response

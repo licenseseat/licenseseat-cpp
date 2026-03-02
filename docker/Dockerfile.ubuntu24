@@ -1,0 +1,24 @@
+# LicenseSeat C++ SDK - Ubuntu 24.04 Build
+#
+# All dependencies are bundled except OpenSSL.
+#
+# Build: docker build -f docker/Dockerfile.ubuntu24 -t licenseseat-cpp .
+# Test:  docker run licenseseat-cpp
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Only need build tools and OpenSSL
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /licenseseat-cpp
+COPY . .
+
+RUN cmake -B build -DLICENSESEAT_BUILD_TESTS=ON && cmake --build build
+
+CMD ["./build/tests/licenseseat_tests"]

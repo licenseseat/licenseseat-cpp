@@ -1,0 +1,39 @@
+# Docker Compose for LicenseSeat C++ SDK testing
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# Integration tests (requires credentials):
+#   LICENSESEAT_API_KEY=ls_xxx LICENSESEAT_PRODUCT_SLUG=your-product LICENSESEAT_LICENSE_KEY=XXXX-XXXX \
+#     docker compose -f docker/docker-compose.yml run integration-tests
+
+services:
+  # Build and run unit tests
+  unit-tests:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ubuntu24
+    command: ./build/tests/licenseseat_tests
+
+  # Run integration tests (requires env vars)
+  integration-tests:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ubuntu24
+    environment:
+      - LICENSESEAT_API_KEY
+      - LICENSESEAT_PRODUCT_SLUG
+      - LICENSESEAT_LICENSE_KEY
+      - LICENSESEAT_BASE_URL=${LICENSESEAT_BASE_URL:-https://licenseseat.com/api/v1}
+    command: ./build/tests/integration_test
+
+  # Run offline workflow tests
+  offline-tests:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ubuntu24
+    environment:
+      - LICENSESEAT_API_KEY
+      - LICENSESEAT_PRODUCT_SLUG
+      - LICENSESEAT_LICENSE_KEY
+    command: ./build/tests/crypto_stress_test

@@ -135,10 +135,27 @@ sudo cmake --install build
 
 ### Dependencies
 
-- **nlohmann/json** – JSON parsing
-- **cpp-httplib** – HTTP client (with OpenSSL for HTTPS)
+**Bundled (no installation needed):**
+- nlohmann/json – JSON parsing
+- cpp-httplib – HTTP client
+- ed25519 – Cryptographic signatures
+- PicoSHA2 – SHA-256 hashing
 
-Cryptographic operations (Ed25519, SHA-256) use vendored libraries with no external dependencies.
+**External (the only thing you need to install):**
+- OpenSSL – for HTTPS
+
+```bash
+# Ubuntu/Debian
+sudo apt install libssl-dev
+
+# macOS (usually pre-installed, or:)
+brew install openssl
+
+# Windows
+# vcpkg install openssl
+```
+
+That's it. No other dependencies to install.
 
 ---
 
@@ -435,6 +452,60 @@ if (entitlement.active) {
 }
 ```
 
+### Metadata Access
+
+Licenses can have custom key-value metadata attached. Access it from the `License` object:
+
+```cpp
+auto result = client.validate("LICENSE-KEY");
+if (result.is_ok() && result.value().valid) {
+    const auto& license = result.value().license;
+
+    // Access license-level metadata
+    const auto& metadata = license.metadata();  // std::map<std::string, std::string>
+
+    // Check for a specific key
+    if (metadata.count("customer_id")) {
+        std::string customer_id = metadata.at("customer_id");
+        std::cout << "Customer ID: " << customer_id << "\n";
+    }
+
+    // Iterate all metadata
+    for (const auto& [key, value] : metadata) {
+        std::cout << key << " = " << value << "\n";
+    }
+}
+```
+
+Entitlements can also have their own per-feature metadata:
+
+```cpp
+for (const auto& ent : license.active_entitlements()) {
+    std::cout << "Entitlement: " << ent.key << "\n";
+
+    // Per-entitlement metadata
+    for (const auto& [key, value] : ent.metadata) {
+        std::cout << "  " << key << " = " << value << "\n";
+    }
+}
+```
+
+From offline tokens, metadata is accessed directly:
+
+```cpp
+// License metadata from offline token
+for (const auto& [key, value] : offline_token.token.metadata) {
+    std::cout << key << " = " << value << "\n";
+}
+
+// Entitlement metadata from offline token
+for (const auto& ent : offline_token.token.entitlements) {
+    for (const auto& [key, value] : ent.metadata) {
+        std::cout << "  " << key << " = " << value << "\n";
+    }
+}
+```
+
 ### Status
 
 Get the current cached license status without making a network request.
@@ -458,50 +529,43 @@ client.reset();
 
 ## Offline Support
 
-The SDK supports offline license validation using Ed25519 cryptographic signatures. This allows your application to work without network access after initial setup.
+The SDK supports offline license validation using Ed25519 cryptographic signatures.
 
-### Offline Token Workflow
+### Automatic (Recommended)
 
-**Step 1: Generate and cache offline token while online**
+Just set `storage_path` and call `activate()` — the SDK handles everything:
 
 ```cpp
-// Generate offline token (requires network)
-auto token_result = client.generate_offline_token("LICENSE-KEY");
-if (token_result.is_error()) {
-    std::cerr << "Failed to generate token: " << token_result.error_message() << "\n";
-    return;
-}
-auto offline_token = token_result.value();
+config.storage_path = "/path/to/cache";
+licenseseat::Client client(config);
 
-// Fetch signing key (requires network)
-auto key_result = client.fetch_signing_key(offline_token.token.kid);
-if (key_result.is_error()) {
-    std::cerr << "Failed to fetch key: " << key_result.error_message() << "\n";
-    return;
-}
-std::string public_key = key_result.value();
+client.activate("LICENSE-KEY");  // Automatically syncs offline assets
 
-// Store both for offline use
-save_to_disk(offline_token, public_key);
+// If network fails later, validation automatically falls back to cached offline token
+auto result = client.validate("LICENSE-KEY");  // Works offline!
 ```
 
-**Step 2: Verify offline (no network required)**
+### Manual Storage
+
+For custom storage (encrypted, database, etc.), use the serialization helpers:
 
 ```cpp
-// Load cached data
-auto [offline_token, public_key] = load_from_disk();
+#include <licenseseat/json.hpp>
 
-// Verify signature locally
-auto verify_result = client.verify_offline_token(offline_token, public_key);
-if (verify_result.is_ok() && verify_result.value()) {
-    // Token is valid - license data available in offline_token.token
-    std::cout << "License: " << offline_token.token.license_key << "\n";
-    std::cout << "Plan: " << offline_token.token.plan_key << "\n";
-    std::cout << "Expires: " << offline_token.token.exp << "\n";
+// Save (online)
+auto token = client.generate_offline_token("LICENSE-KEY").value();
+auto key = client.fetch_signing_key(token.token.kid).value();
 
-    // Check entitlements from token
-    for (const auto& ent : offline_token.token.entitlements) {
-        std::cout << "Entitlement: " << ent.key << "\n";
+std::string token_json = licenseseat::json::offline_token_to_json(token);
+// Save token_json and key to your storage
+
+// Load and verify (offline)
+auto loaded = licenseseat::json::offline_token_from_json(token_json);
+if (client.verify_offline_token(loaded, key).value()) {
+    // Access license data
+    std::cout << "Plan: " << loaded.token.plan_key << "\n";
+    for (const auto& [k, v] : loaded.token.metadata) {
+        std::cout << k << " = " << v << "\n";
     }
 }
 ```
@@ -729,6 +793,8 @@ The SDK automatically generates a unique device identifier:
 
 ---
 
+---
+
 ## Testing
 
 ```bash
@@ -752,6 +818,7 @@ The SDK includes comprehensive tests:
 | Crypto stress tests  | 44    | Yes     | Ed25519, Base64, offline token verification |
 | Integration tests    | 48    | Yes     | Full API testing                            |
 | Scenario tests       | 38    | Yes     | Real-world workflows (10 scenarios)         |
+| Offline workflow     | 4     | Yes     | Manual & automatic offline storage          |
 
 ### Running Integration Tests
 

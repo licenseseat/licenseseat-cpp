@@ -47,10 +47,10 @@ if(LICENSESEAT_ENABLE_CLANG_TIDY)
     endif()
 endif()
 
-# Find dependencies (JSON and HTTP only - crypto is vendored)
-find_package(nlohmann_json REQUIRED)
-find_package(httplib REQUIRED)
+# OpenSSL is the only external dependency (for HTTPS)
 find_package(OpenSSL REQUIRED)
+
+# JSON and HTTP are bundled (no installation needed)
 
 # Vendored ed25519 sources
 set(ED25519_SOURCES
@@ -97,14 +97,11 @@ target_compile_definitions(licenseseat
         $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
 )
 
-# Link libraries
+# Link libraries (only OpenSSL - JSON and HTTP are header-only bundled deps)
 target_link_libraries(licenseseat
     PUBLIC
         OpenSSL::SSL
         OpenSSL::Crypto
-    PRIVATE
-        nlohmann_json::nlohmann_json
-        httplib::httplib
 )
 
 # Platform-specific libraries for device identification
@@ -195,5 +192,6 @@ message(STATUS "LicenseSeat C++ SDK ${PROJECT_VERSION}")
 message(STATUS "  Build tests:    ${LICENSESEAT_BUILD_TESTS}")
 message(STATUS "  Build examples: ${LICENSESEAT_BUILD_EXAMPLES}")
 message(STATUS "  clang-tidy:     ${LICENSESEAT_ENABLE_CLANG_TIDY}")
-message(STATUS "  Crypto:         Vendored (ed25519 + PicoSHA2)")
+message(STATUS "  Dependencies:   Bundled (nlohmann/json, cpp-httplib, ed25519, PicoSHA2)")
+message(STATUS "  External:       OpenSSL only")
 message(STATUS "")
