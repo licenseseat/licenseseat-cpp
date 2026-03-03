@@ -41,15 +41,10 @@ set(MACOSX_BUNDLE_COPYRIGHT "Copyright 2026 LicenseSeat")
 set(APP_ICON_MACOS "${CMAKE_CURRENT_SOURCE_DIR}/resources/AppIcon.icns")
 set_source_files_properties(${APP_ICON_MACOS} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
 
-# Font file (copy to app bundle)
-set(APP_FONT "${CMAKE_CURRENT_SOURCE_DIR}/resources/Inter-Medium.ttf")
-set_source_files_properties(${APP_FONT} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
-
 # Demo executable
 add_executable(synthdemo MACOSX_BUNDLE
     main_gui.cpp
     ${APP_ICON_MACOS}
-    ${APP_FONT}
 )
 
 target_link_libraries(synthdemo PRIVATE raylib licenseseat::licenseseat)
@@ -57,7 +52,6 @@ target_link_libraries(synthdemo PRIVATE raylib licenseseat::licenseseat)
 # Include raygui header and SDK
 target_include_directories(synthdemo PRIVATE
     ${raygui_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}  # For style_dark.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../include  # LicenseSeat SDK headers
 )
 
@@ -68,11 +62,6 @@ if(APPLE)
     set_target_properties(synthdemo PROPERTIES
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
-    )
-
-    add_custom_command(TARGET synthdemo POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:synthdemo>/Resources"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${APP_FONT}" "$<TARGET_BUNDLE_CONTENT_DIR:synthdemo>/Resources/"
     )
 elseif(UNIX)
     target_link_libraries(synthdemo PRIVATE m pthread dl)
