@@ -106,6 +106,31 @@ license.validateAsync("LICENSE-KEY", [](auto& result)
 
 ---
 
+### Demo App (ImageTool Pro)
+
+A complete GUI demo application showing how to integrate LicenseSeat into a desktop app. Built with raylib + raygui.
+
+```bash
+cd demo
+cmake -B build
+cmake --build build
+open build/imagetool_demo.app  # macOS
+```
+
+**Features demonstrated:**
+- License validation and activation flow
+- Feature gating with entitlements (free vs Pro features)
+- Upgrade prompts for locked features
+- Toast notifications for user feedback
+- Dark theme UI with PRO badges
+
+**Location:** [`demo/`](demo/)
+
+> [!NOTE]
+> **macOS users:** Window management apps like Magnet or Rectangle can cause click delays due to how they intercept mouse events. If you experience slow button responses, try excluding the app from your window manager's settings.
+
+---
+
 ## Installation
 
 ### CMake (FetchContent)
@@ -196,6 +221,97 @@ int main()
 
     return 0;
 }
+```
+
+---
+
+## Integration Guide
+
+Step-by-step guide to integrating LicenseSeat into your C++ application.
+
+### 1. Get Your Credentials
+
+From your [LicenseSeat Dashboard](https://licenseseat.com/dashboard):
+
+1. **API Key** — Go to Settings → API Keys → Copy your `pk_live_*` key
+2. **Product Slug** — Go to Products → Click your product → Copy the slug from the URL
+
+> [!NOTE]
+> Use `pk_*` (publishable) keys in client applications. They're safe to embed. Keep `sk_*` (secret) keys server-side only.
+
+### 2. Add the SDK
+
+**CMake FetchContent (recommended):**
+```cmake
+include(FetchContent)
+FetchContent_Declare(licenseseat
+    GIT_REPOSITORY https://github.com/licenseseat/licenseseat-cpp.git
+    GIT_TAG main)
+FetchContent_MakeAvailable(licenseseat)
+target_link_libraries(your_target PRIVATE licenseseat::licenseseat)
+```
+
+### 3. Initialize & Validate
+
+```cpp
+#include <licenseseat/licenseseat.hpp>
+
+licenseseat::Config config;
+config.api_key = "pk_live_xxxxxxxx";
+config.product_slug = "your-product";
+config.storage_path = "/path/to/cache";  // Enables offline fallback
+config.app_version = "1.0.0";
+
+licenseseat::Client client(config);
+
+auto result = client.validate("XXXX-XXXX-XXXX-XXXX");
+if (result.is_ok() && result.value().valid) {
+    // License valid — enable features
+    if (client.has_entitlement("pro")) {
+        enable_pro_mode();
+    }
+}
+```
+
+### 4. Activate Device (for hardware-locked licenses)
+
+```cpp
+std::string device_id = licenseseat::generate_device_id();
+auto result = client.activate("LICENSE-KEY", device_id, "User's MacBook");
+
+if (result.is_ok()) {
+    std::cout << "Activated!\n";
+} else if (result.error_code() == licenseseat::ErrorCode::SeatLimitExceeded) {
+    std::cout << "No seats available\n";
+}
+```
+
+### 5. Enable Offline Support (optional)
+
+```cpp
+// Generate and save offline token while online
+auto token = client.generate_offline_token("LICENSE-KEY").value();
+auto key = client.fetch_signing_key(token.token.kid).value();
+std::string json = licenseseat::json::offline_token_to_json(token);
+save_to_disk(json, key);
+
+// Later, verify offline
+auto [loaded, pub_key] = load_from_disk();
+if (client.verify_offline_token(loaded, pub_key).value()) {
+    // Valid! Access: loaded.token.plan_key, .metadata, .entitlements
+}
+```
+
+### 6. Background Validation
+
+```cpp
+// Keep license fresh with background checks
+client.start_auto_validation("LICENSE-KEY");
+
+// Subscribe to changes
+client.on(licenseseat::events::VALIDATION_FAILED, [](auto) {
+    show_license_expired_dialog();
+});
 ```
 
 ---
