@@ -21,7 +21,7 @@
 namespace licenseseat {
 
 /// Library version
-constexpr const char* VERSION = "0.4.0";
+constexpr const char* VERSION = "0.4.1";
 
 /// Metadata type used throughout the SDK
 using Metadata = std::map<std::string, std::string>;
