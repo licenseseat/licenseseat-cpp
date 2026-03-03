@@ -368,6 +368,45 @@ TEST_F(ClientTest, StopAutoValidationWhenNotRunningDoesNotCrash) {
     EXPECT_FALSE(client.is_auto_validating());
 }
 
+// ==================== Heartbeat ====================
+
+TEST_F(ClientTest, HeartbeatNotRunningByDefault) {
+    Client client(config_);
+
+    EXPECT_FALSE(client.is_heartbeat_running());
+}
+
+TEST_F(ClientTest, StartAndStopHeartbeat) {
+    Client client(config_);
+
+    client.start_heartbeat("TEST-KEY");
+    EXPECT_TRUE(client.is_heartbeat_running());
+
+    client.stop_heartbeat();
+    EXPECT_FALSE(client.is_heartbeat_running());
+}
+
+TEST_F(ClientTest, StartHeartbeatTwiceDoesNotCrash) {
+    Client client(config_);
+
+    client.start_heartbeat("TEST-KEY");
+    client.start_heartbeat("TEST-KEY-2");  // Should not crash
+
+    EXPECT_TRUE(client.is_heartbeat_running());
+
+    client.stop_heartbeat();
+}
+
+TEST_F(ClientTest, StopHeartbeatWhenNotRunningDoesNotCrash) {
+    Client client(config_);
+
+    // Should not crash
+    client.stop_heartbeat();
+    client.stop_heartbeat();
+
+    EXPECT_FALSE(client.is_heartbeat_running());
+}
+
 // ==================== Reset ====================
 
 TEST_F(ClientTest, ResetStopsAutoValidation) {
@@ -379,6 +418,17 @@ TEST_F(ClientTest, ResetStopsAutoValidation) {
     client.reset();
 
     EXPECT_FALSE(client.is_auto_validating());
+}
+
+TEST_F(ClientTest, ResetStopsHeartbeat) {
+    Client client(config_);
+
+    client.start_heartbeat("TEST-KEY");
+    EXPECT_TRUE(client.is_heartbeat_running());
+
+    client.reset();
+
+    EXPECT_FALSE(client.is_heartbeat_running());
 }
 
 // ==================== Async API ====================
@@ -547,6 +597,158 @@ TEST_F(ClientTest, MultipleAsyncOpsDoNotCrash) {
     }
 
     EXPECT_EQ(completed, 20);
+}
+
+// ==================== Timer Thread Safety Tests ====================
+
+TEST_F(ClientTest, StopAutoValidationSafeWhenCalledRapidly) {
+    Client client(config_);
+
+    // Start and stop rapidly multiple times - should not crash
+    for (int i = 0; i < 10; i++) {
+        client.start_auto_validation("KEY-" + std::to_string(i));
+        client.stop_auto_validation();
+    }
+
+    EXPECT_FALSE(client.is_auto_validating());
+}
+
+TEST_F(ClientTest, StopHeartbeatSafeWhenCalledRapidly) {
+    Client client(config_);
+
+    // Start and stop rapidly multiple times - should not crash
+    for (int i = 0; i < 10; i++) {
+        client.start_heartbeat("KEY-" + std::to_string(i));
+        client.stop_heartbeat();
+    }
+
+    EXPECT_FALSE(client.is_heartbeat_running());
+}
+
+TEST_F(ClientTest, ConcurrentStartStopAutoValidationDoesNotCrash) {
+    Client client(config_);
+    std::atomic<bool> done{false};
+
+    // Start auto-validation
+    client.start_auto_validation("TEST-KEY");
+
+    // Spawn thread that will stop it
+    std::thread stopper([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        client.stop_auto_validation();
+        done = true;
+    });
+
+    // Meanwhile, try to start another one (should safely replace)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    client.start_auto_validation("TEST-KEY-2");
+
+    stopper.join();
+
+    // Clean up
+    client.stop_auto_validation();
+    EXPECT_FALSE(client.is_auto_validating());
+}
+
+TEST_F(ClientTest, ConcurrentStartStopHeartbeatDoesNotCrash) {
+    Client client(config_);
+
+    // Start heartbeat
+    client.start_heartbeat("TEST-KEY");
+
+    // Spawn thread that will stop it
+    std::thread stopper([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        client.stop_heartbeat();
+    });
+
+    // Meanwhile, try to start another one (should safely replace)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    client.start_heartbeat("TEST-KEY-2");
+
+    stopper.join();
+
+    // Clean up
+    client.stop_heartbeat();
+    EXPECT_FALSE(client.is_heartbeat_running());
+}
+
+TEST_F(ClientTest, GetClientStatusDoesNotBlockDuringAsyncOps) {
+    Client client(config_);
+
+    // Start an async validation (will fail due to no server)
+    std::atomic<bool> callback_called{false};
+    client.validate_async("TEST-KEY", [&](Result<ValidationResult> /*result*/) {
+        callback_called = true;
+    });
+
+    // This should return quickly, not block waiting for the async op
+    auto start = std::chrono::steady_clock::now();
+    auto status = client.get_client_status();
+    auto elapsed = std::chrono::steady_clock::now() - start;
+
+    // Should complete in under 50ms (not waiting for network timeout)
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 50);
+    EXPECT_EQ(status, ClientStatus::Inactive);
+
+    // Wait for async to complete
+    int attempts = 0;
+    while (!callback_called && attempts++ < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    EXPECT_TRUE(callback_called);
+}
+
+TEST_F(ClientTest, IsOnlineDoesNotBlockDuringAsyncOps) {
+    Client client(config_);
+
+    // Start an async validation
+    std::atomic<bool> callback_called{false};
+    client.validate_async("TEST-KEY", [&](Result<ValidationResult> /*result*/) {
+        callback_called = true;
+    });
+
+    // This should return quickly
+    auto start = std::chrono::steady_clock::now();
+    bool online = client.is_online();
+    auto elapsed = std::chrono::steady_clock::now() - start;
+
+    // Should complete in under 10ms
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 10);
+    (void)online;  // Value doesn't matter for this test
+
+    // Wait for async to complete
+    int attempts = 0;
+    while (!callback_called && attempts++ < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
+TEST_F(ClientTest, DestructorSafeWithRunningTimers) {
+    // Create client, start timers, then destroy - should not crash or hang
+    {
+        Client client(config_);
+        client.start_auto_validation("TEST-KEY");
+        client.start_heartbeat("TEST-KEY");
+        // Destructor should cleanly stop timers
+    }
+    // If we get here without crashing or hanging, test passes
+    SUCCEED();
+}
+
+TEST_F(ClientTest, ResetSafeWithRunningTimers) {
+    Client client(config_);
+
+    client.start_auto_validation("TEST-KEY");
+    client.start_heartbeat("TEST-KEY");
+    EXPECT_TRUE(client.is_auto_validating());
+    EXPECT_TRUE(client.is_heartbeat_running());
+
+    // Reset should stop all timers
+    client.reset();
+
+    EXPECT_FALSE(client.is_auto_validating());
+    EXPECT_FALSE(client.is_heartbeat_running());
 }
 
 // ==================== Network Recheck Timer Tests ====================
