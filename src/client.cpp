@@ -74,27 +74,35 @@ class Client::Impl {
 
     Result<ValidationResult> validate(const std::string& license_key,
                                       const std::string& device_id_param) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // Prepare request data while holding mutex
+        std::string product_slug;
+        std::string device_id;
+        bool has_cached_license = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
 
-        if (license_key.empty()) {
-            return Result<ValidationResult>::error(ErrorCode::InvalidLicenseKey,
-                                                   "License key cannot be empty");
+            if (license_key.empty()) {
+                return Result<ValidationResult>::error(ErrorCode::InvalidLicenseKey,
+                                                       "License key cannot be empty");
+            }
+
+            if (config_.product_slug.empty()) {
+                return Result<ValidationResult>::error(ErrorCode::MissingParameter,
+                                                       "Product slug is required in config");
+            }
+
+            product_slug = config_.product_slug;
+            device_id = device_id_param.empty() ? device_id_ : device_id_param;
+            has_cached_license = cached_license_.has_value();
         }
-
-        if (config_.product_slug.empty()) {
-            return Result<ValidationResult>::error(ErrorCode::MissingParameter,
-                                                   "Product slug is required in config");
-        }
-
-        std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
 
         event_bus_.emit(events::VALIDATION_START,
                         std::map<std::string, std::string>{{"license_key", license_key}});
 
-        // Build request - new URL structure: /products/{slug}/licenses/{key}/validate
+        // Make HTTP call without holding mutex
         auto body = json::build_validate_request(device_id);
         auto response = send_post(
-            "/products/" + config_.product_slug + "/licenses/" + license_key + "/validate", body);
+            "/products/" + product_slug + "/licenses/" + license_key + "/validate", body);
 
         if (!response.success) {
             // Check for authentication failure (401) - emit auth-failed event (matches Swift SDK)
@@ -104,7 +112,7 @@ class Client::Impl {
                                 std::map<std::string, std::string>{
                                     {"licenseKey", license_key},
                                     {"error", err.error_message()},
-                                    {"cached", cached_license_.has_value() ? "true" : "false"}});
+                                    {"cached", has_cached_license ? "true" : "false"}});
                 event_bus_.emit(events::VALIDATION_ERROR,
                                 std::map<std::string, std::string>{{"error", err.error_message()}});
                 return err;
@@ -124,8 +132,11 @@ class Client::Impl {
                 auto offline_result = verify_cached_offline();
                 if (offline_result.is_ok() && offline_result.value().valid) {
                     // Update cached state so get_client_status() returns OfflineValid
-                    cached_validation_ = offline_result.value();
-                    is_online_ = false;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        cached_validation_ = offline_result.value();
+                        is_online_ = false;
+                    }
                     event_bus_.emit(events::NETWORK_OFFLINE, std::map<std::string, std::string>{});
                     event_bus_.emit(events::VALIDATION_OFFLINE_SUCCESS, offline_result.value());
 
@@ -146,12 +157,19 @@ class Client::Impl {
                 return err;
             }
 
-            is_online_ = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                is_online_ = false;
+            }
             event_bus_.emit(events::NETWORK_OFFLINE, std::map<std::string, std::string>{});
             return Result<ValidationResult>::error(ErrorCode::NetworkError, response.error_message);
         }
 
-        is_online_ = true;
+        // Success - update state with mutex
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            is_online_ = true;
+        }
 
         // Parse response
         try {
@@ -168,8 +186,11 @@ class Client::Impl {
 
             // Cache the result
             if (result.valid) {
-                cached_license_ = result.license;
-                cached_validation_ = result;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    cached_license_ = result.license;
+                    cached_validation_ = result;
+                }
                 update_storage_license(license_key, device_id, result);
                 event_bus_.emit(events::VALIDATION_SUCCESS, result);
             } else {
@@ -187,10 +208,9 @@ class Client::Impl {
                                 const std::string& device_id_param,
                                 const std::string& device_name,
                                 const Metadata& metadata) {
-        Result<Activation> result = Result<Activation>::error(ErrorCode::Unknown, "");
+        // Prepare request data while holding mutex
+        std::string product_slug;
         std::string resolved_device_id;
-        bool should_sync = false;
-
         {
             std::lock_guard<std::mutex> lock(mutex_);
 
@@ -210,75 +230,83 @@ class Client::Impl {
                                                  "Device ID is required");
             }
 
-            event_bus_.emit(events::ACTIVATION_START,
-                            std::map<std::string, std::string>{{"license_key", license_key},
-                                                               {"device_id", resolved_device_id}});
-
-            // Build request - new URL structure: /products/{slug}/licenses/{key}/activate
-            auto body = json::build_activate_request(resolved_device_id, device_name, metadata);
-            auto response = send_post(
-                "/products/" + config_.product_slug + "/licenses/" + license_key + "/activate", body);
-
-            if (!response.success) {
-                if (response.error_message.empty()) {
-                    auto err = handle_error_response<Activation>(response);
-                    event_bus_.emit(events::ACTIVATION_ERROR,
-                                    std::map<std::string, std::string>{{"error", err.error_message()}});
-                    return err;
-                }
-                return Result<Activation>::error(ErrorCode::NetworkError, response.error_message);
-            }
-
-            // Parse response
-            try {
-                auto j = nlohmann::json::parse(response.body);
-                auto activation = json::parse_activation(j);
-                current_activation_ = activation;
-
-                event_bus_.emit(events::ACTIVATION_SUCCESS, activation);
-
-                result = Result<Activation>::ok(std::move(activation));
-                should_sync = true;
-            } catch (const nlohmann::json::exception& e) {
-                return Result<Activation>::error(ErrorCode::ParseError,
-                                                 std::string("Failed to parse response: ") + e.what());
-            }
-        }  // mutex released here
-
-        // Sync offline assets AFTER releasing the lock to avoid deadlock
-        if (should_sync) {
-            sync_offline_assets_impl(license_key, resolved_device_id);
+            product_slug = config_.product_slug;
         }
 
-        return result;
+        event_bus_.emit(events::ACTIVATION_START,
+                        std::map<std::string, std::string>{{"license_key", license_key},
+                                                           {"device_id", resolved_device_id}});
+
+        // Make HTTP call without holding mutex
+        auto body = json::build_activate_request(resolved_device_id, device_name, metadata);
+        auto response = send_post(
+            "/products/" + product_slug + "/licenses/" + license_key + "/activate", body);
+
+        if (!response.success) {
+            if (response.error_message.empty()) {
+                auto err = handle_error_response<Activation>(response);
+                event_bus_.emit(events::ACTIVATION_ERROR,
+                                std::map<std::string, std::string>{{"error", err.error_message()}});
+                return err;
+            }
+            return Result<Activation>::error(ErrorCode::NetworkError, response.error_message);
+        }
+
+        // Parse response
+        try {
+            auto j = nlohmann::json::parse(response.body);
+            auto activation = json::parse_activation(j);
+
+            // Update state with mutex
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                current_activation_ = activation;
+            }
+
+            event_bus_.emit(events::ACTIVATION_SUCCESS, activation);
+
+            // Sync offline assets AFTER releasing the lock to avoid deadlock
+            sync_offline_assets_impl(license_key, resolved_device_id);
+
+            return Result<Activation>::ok(std::move(activation));
+        } catch (const nlohmann::json::exception& e) {
+            return Result<Activation>::error(ErrorCode::ParseError,
+                                             std::string("Failed to parse response: ") + e.what());
+        }
     }
 
     Result<Deactivation> deactivate(const std::string& license_key,
                                     const std::string& device_id) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // Prepare request data while holding mutex
+        std::string product_slug;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
 
-        if (license_key.empty()) {
-            return Result<Deactivation>::error(ErrorCode::InvalidLicenseKey,
-                                               "License key cannot be empty");
-        }
+            if (license_key.empty()) {
+                return Result<Deactivation>::error(ErrorCode::InvalidLicenseKey,
+                                                   "License key cannot be empty");
+            }
 
-        if (device_id.empty()) {
-            return Result<Deactivation>::error(ErrorCode::MissingParameter,
-                                               "Device ID is required");
-        }
+            if (device_id.empty()) {
+                return Result<Deactivation>::error(ErrorCode::MissingParameter,
+                                                   "Device ID is required");
+            }
 
-        if (config_.product_slug.empty()) {
-            return Result<Deactivation>::error(ErrorCode::MissingParameter,
-                                               "Product slug is required in config");
+            if (config_.product_slug.empty()) {
+                return Result<Deactivation>::error(ErrorCode::MissingParameter,
+                                                   "Product slug is required in config");
+            }
+
+            product_slug = config_.product_slug;
         }
 
         event_bus_.emit(events::DEACTIVATION_START,
                         std::map<std::string, std::string>{{"license_key", license_key}});
 
-        // Build request - new URL structure: /products/{slug}/licenses/{key}/deactivate
+        // Make HTTP call without holding mutex
         auto body = json::build_deactivate_request(device_id);
         auto response = send_post(
-            "/products/" + config_.product_slug + "/licenses/" + license_key + "/deactivate", body);
+            "/products/" + product_slug + "/licenses/" + license_key + "/deactivate", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -294,9 +322,14 @@ class Client::Impl {
         try {
             auto j = nlohmann::json::parse(response.body);
             auto deactivation = json::parse_deactivation(j);
-            current_activation_.reset();
-            cached_license_.reset();
-            cached_validation_.reset();
+
+            // Clear cached state with mutex
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                current_activation_.reset();
+                cached_license_.reset();
+                cached_validation_.reset();
+            }
             storage_->clear_license();
             storage_->clear_offline_token();
 
@@ -349,23 +382,30 @@ class Client::Impl {
 
     Result<HeartbeatResponse> heartbeat(const std::string& license_key,
                                         const std::string& device_id_param) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // Prepare request data while holding mutex
+        std::string product_slug;
+        std::string device_id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
 
-        if (license_key.empty()) {
-            return Result<HeartbeatResponse>::error(ErrorCode::InvalidLicenseKey,
-                                                    "License key cannot be empty");
+            if (license_key.empty()) {
+                return Result<HeartbeatResponse>::error(ErrorCode::InvalidLicenseKey,
+                                                        "License key cannot be empty");
+            }
+
+            if (config_.product_slug.empty()) {
+                return Result<HeartbeatResponse>::error(ErrorCode::MissingParameter,
+                                                        "Product slug is required in config");
+            }
+
+            product_slug = config_.product_slug;
+            device_id = device_id_param.empty() ? device_id_ : device_id_param;
         }
 
-        if (config_.product_slug.empty()) {
-            return Result<HeartbeatResponse>::error(ErrorCode::MissingParameter,
-                                                    "Product slug is required in config");
-        }
-
-        std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
-
+        // Make HTTP call without holding mutex
         nlohmann::json body = {{"device_id", device_id}};
         auto response = send_post(
-            "/products/" + config_.product_slug + "/licenses/" + license_key + "/heartbeat", body);
+            "/products/" + product_slug + "/licenses/" + license_key + "/heartbeat", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -408,24 +448,30 @@ class Client::Impl {
     Result<OfflineToken> generate_offline_token(const std::string& license_key,
                                                 const std::string& device_id_param,
                                                 int ttl_days) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // Prepare request data while holding mutex
+        std::string product_slug;
+        std::string device_id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
 
-        if (license_key.empty()) {
-            return Result<OfflineToken>::error(ErrorCode::InvalidLicenseKey,
-                                               "License key cannot be empty");
+            if (license_key.empty()) {
+                return Result<OfflineToken>::error(ErrorCode::InvalidLicenseKey,
+                                                   "License key cannot be empty");
+            }
+
+            if (config_.product_slug.empty()) {
+                return Result<OfflineToken>::error(ErrorCode::MissingParameter,
+                                                   "Product slug is required in config");
+            }
+
+            product_slug = config_.product_slug;
+            device_id = device_id_param.empty() ? device_id_ : device_id_param;
         }
 
-        if (config_.product_slug.empty()) {
-            return Result<OfflineToken>::error(ErrorCode::MissingParameter,
-                                               "Product slug is required in config");
-        }
-
-        std::string device_id = device_id_param.empty() ? device_id_ : device_id_param;
-
-        // Build request - URL: /products/{slug}/licenses/{key}/offline_token
+        // Make HTTP call without holding mutex
         auto body = json::build_offline_token_request(device_id, ttl_days);
         auto response = send_post(
-            "/products/" + config_.product_slug + "/licenses/" + license_key + "/offline_token", body);
+            "/products/" + product_slug + "/licenses/" + license_key + "/offline_token", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -493,13 +539,12 @@ class Client::Impl {
     }
 
     Result<std::string> fetch_signing_key(const std::string& key_id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-
+        // Validate input without holding mutex for long
         if (key_id.empty()) {
             return Result<std::string>::error(ErrorCode::MissingParameter, "Key ID is required");
         }
 
-        // URL: /signing_keys/{key_id}
+        // Make HTTP call without holding mutex
         http::Request request;
         request.method = http::Method::GET;
         request.path = "/signing_keys/" + key_id;
@@ -692,14 +737,15 @@ class Client::Impl {
     }
 
     void stop_auto_validation() {
-        if (auto_validate_running_) {
-            auto_validate_running_ = false;
-            auto_validate_cv_.notify_all();
+        bool was_running = auto_validate_running_.exchange(false);
+        auto_validate_cv_.notify_all();
 
-            if (auto_validate_thread_.joinable()) {
-                auto_validate_thread_.join();
-            }
+        // Always check joinable regardless of running flag (race condition safety)
+        if (auto_validate_thread_.joinable()) {
+            auto_validate_thread_.join();
+        }
 
+        if (was_running) {
             event_bus_.emit(events::AUTOVALIDATION_STOPPED, std::map<std::string, std::string>{});
         }
     }
@@ -715,6 +761,7 @@ class Client::Impl {
             return;
         }
 
+        current_heartbeat_license_key_ = license_key;
         heartbeat_running_ = true;
 
         heartbeat_thread_ = std::thread([this, license_key]() {
@@ -735,13 +782,12 @@ class Client::Impl {
     }
 
     void stop_heartbeat() {
-        if (heartbeat_running_) {
-            heartbeat_running_ = false;
-            heartbeat_cv_.notify_all();
+        heartbeat_running_ = false;
+        heartbeat_cv_.notify_all();
 
-            if (heartbeat_thread_.joinable()) {
-                heartbeat_thread_.join();
-            }
+        // Always check joinable regardless of running flag (race condition safety)
+        if (heartbeat_thread_.joinable()) {
+            heartbeat_thread_.join();
         }
     }
 
@@ -837,9 +883,13 @@ class Client::Impl {
     Result<Release> get_latest_release(const std::string& product_slug_param,
                                        const std::string& channel,
                                        const std::string& platform) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // Prepare request data while holding mutex briefly
+        std::string product_slug;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
+        }
 
-        std::string product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
         if (product_slug.empty()) {
             return Result<Release>::error(ErrorCode::MissingParameter, "Product slug is required");
         }
@@ -854,6 +904,7 @@ class Client::Impl {
             query += (query.empty() ? "?" : "&") + std::string("platform=") + platform;
         }
 
+        // Make HTTP call without holding mutex
         http::Request request;
         request.method = http::Method::GET;
         request.path = path + query;
@@ -881,9 +932,13 @@ class Client::Impl {
     Result<std::vector<Release>> list_releases(const std::string& product_slug_param,
                                                const std::string& channel,
                                                const std::string& platform) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // Prepare request data while holding mutex briefly
+        std::string product_slug;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
+        }
 
-        std::string product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
         if (product_slug.empty()) {
             return Result<std::vector<Release>>::error(ErrorCode::MissingParameter,
                                                        "Product slug is required");
@@ -899,6 +954,7 @@ class Client::Impl {
             query += (query.empty() ? "?" : "&") + std::string("platform=") + platform;
         }
 
+        // Make HTTP call without holding mutex
         http::Request request;
         request.method = http::Method::GET;
         request.path = path + query;
@@ -928,8 +984,7 @@ class Client::Impl {
                                                   const std::string& license_key,
                                                   const std::string& product_slug_param,
                                                   const std::string& platform) {
-        std::lock_guard<std::mutex> lock(mutex_);
-
+        // Validate inputs before mutex
         if (license_key.empty()) {
             return Result<DownloadToken>::error(ErrorCode::InvalidLicenseKey,
                                                 "License key is required");
@@ -940,13 +995,19 @@ class Client::Impl {
                                                 "Version is required");
         }
 
-        std::string product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
+        // Get product_slug while holding mutex briefly
+        std::string product_slug;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
+        }
+
         if (product_slug.empty()) {
             return Result<DownloadToken>::error(ErrorCode::MissingParameter,
                                                 "Product slug is required");
         }
 
-        // URL: /products/{slug}/releases/{version}/download_token
+        // Make HTTP call without holding mutex
         auto body = json::build_download_token_request(license_key, platform);
         auto response = send_post(
             "/products/" + product_slug + "/releases/" + version + "/download_token", body);
@@ -970,38 +1031,41 @@ class Client::Impl {
     }
 
     Result<bool> health() {
-        Result<bool> result = Result<bool>::error(ErrorCode::Unknown, "");
         bool was_online = is_online_;
+
+        // Make HTTP call without holding mutex
+        http::Request request;
+        request.method = http::Method::GET;
+        request.path = "/health";
+
+        auto response = http_client_->send(request);
+
+        Result<bool> result = Result<bool>::error(ErrorCode::Unknown, "");
         bool should_start_recheck = false;
 
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-
-            // New URL: /health
-            http::Request request;
-            request.method = http::Method::GET;
-            request.path = "/health";
-
-            auto response = http_client_->send(request);
-
-            if (!response.success) {
+        if (!response.success) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
                 is_online_ = false;
-                if (was_online) {
-                    event_bus_.emit(events::NETWORK_OFFLINE, std::map<std::string, std::string>{});
-                    should_start_recheck = true;
-                }
-                if (response.error_message.empty()) {
-                    result = handle_error_response<bool>(response);
-                } else {
-                    result = Result<bool>::error(ErrorCode::NetworkError, response.error_message);
-                }
-            } else {
-                is_online_ = true;
-                if (!was_online) {
-                    event_bus_.emit(events::NETWORK_ONLINE, std::map<std::string, std::string>{});
-                }
-                result = Result<bool>::ok(true);
             }
+            if (was_online) {
+                event_bus_.emit(events::NETWORK_OFFLINE, std::map<std::string, std::string>{});
+                should_start_recheck = true;
+            }
+            if (response.error_message.empty()) {
+                result = handle_error_response<bool>(response);
+            } else {
+                result = Result<bool>::error(ErrorCode::NetworkError, response.error_message);
+            }
+        } else {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                is_online_ = true;
+            }
+            if (!was_online) {
+                event_bus_.emit(events::NETWORK_ONLINE, std::map<std::string, std::string>{});
+            }
+            result = Result<bool>::ok(true);
         }
 
         // Start network recheck timer outside the lock to avoid deadlock
@@ -1432,11 +1496,16 @@ class Client::Impl {
                     // Stop the recheck timer since we're online now
                     network_recheck_running_ = false;
 
-                    // Restart auto-validation if we have a license key
+                    // Restart auto-validation and heartbeat if we have license keys
                     if (!current_auto_license_key_.empty()) {
-                        // Use async to avoid blocking
                         auto future = std::async(std::launch::async, [this]() {
                             this->start_auto_validation(current_auto_license_key_);
+                        });
+                        store_future(std::move(future));
+                    }
+                    if (!current_heartbeat_license_key_.empty()) {
+                        auto future = std::async(std::launch::async, [this]() {
+                            this->start_heartbeat(current_heartbeat_license_key_);
                         });
                         store_future(std::move(future));
                     }
@@ -1446,13 +1515,12 @@ class Client::Impl {
     }
 
     void stop_network_recheck() {
-        if (network_recheck_running_) {
-            network_recheck_running_ = false;
-            network_recheck_cv_.notify_all();
+        network_recheck_running_ = false;
+        network_recheck_cv_.notify_all();
 
-            if (network_recheck_thread_.joinable()) {
-                network_recheck_thread_.join();
-            }
+        // Always check joinable regardless of running flag (race condition safety)
+        if (network_recheck_thread_.joinable()) {
+            network_recheck_thread_.join();
         }
     }
 
@@ -1487,13 +1555,12 @@ class Client::Impl {
     }
 
     void stop_offline_refresh() {
-        if (offline_refresh_running_) {
-            offline_refresh_running_ = false;
-            offline_refresh_cv_.notify_all();
+        offline_refresh_running_ = false;
+        offline_refresh_cv_.notify_all();
 
-            if (offline_refresh_thread_.joinable()) {
-                offline_refresh_thread_.join();
-            }
+        // Always check joinable regardless of running flag (race condition safety)
+        if (offline_refresh_thread_.joinable()) {
+            offline_refresh_thread_.join();
         }
     }
 
@@ -1525,6 +1592,7 @@ class Client::Impl {
     std::mutex auto_validate_mutex_;
     std::condition_variable auto_validate_cv_;
     std::string current_auto_license_key_;
+    std::string current_heartbeat_license_key_;
 
     // Heartbeat timer
     std::atomic<bool> heartbeat_running_{false};
