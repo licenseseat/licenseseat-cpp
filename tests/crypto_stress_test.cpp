@@ -47,11 +47,16 @@ std::string get_env(const char* name) {
 std::string API_KEY;
 std::string PRODUCT_SLUG;
 std::string LICENSE_KEY;
+std::string API_URL;
 
 bool load_credentials() {
     API_KEY = get_env("LICENSESEAT_API_KEY");
     PRODUCT_SLUG = get_env("LICENSESEAT_PRODUCT_SLUG");
     LICENSE_KEY = get_env("LICENSESEAT_LICENSE_KEY");
+    API_URL = get_env("LICENSESEAT_API_URL");
+    if (API_URL.empty()) {
+        API_URL = "https://licenseseat.com/api/v1";
+    }
 
     if (API_KEY.empty() || PRODUCT_SLUG.empty() || LICENSE_KEY.empty()) {
         std::cerr << "Error: Missing required environment variables.\n\n";
@@ -106,7 +111,7 @@ licenseseat::Config make_config() {
     licenseseat::Config config;
     config.api_key = API_KEY;
     config.product_slug = PRODUCT_SLUG;
-    config.api_url = "https://licenseseat.com/api/v1";
+    config.api_url = API_URL;
     config.timeout_seconds = 30;
     config.max_retries = 2;
     return config;

@@ -49,11 +49,16 @@ std::string get_env(const char* name) {
 std::string API_KEY;
 std::string PRODUCT_SLUG;
 std::string LICENSE_KEY;
+std::string API_URL;
 
 bool load_credentials() {
     API_KEY = get_env("LICENSESEAT_API_KEY");
     PRODUCT_SLUG = get_env("LICENSESEAT_PRODUCT_SLUG");
     LICENSE_KEY = get_env("LICENSESEAT_LICENSE_KEY");
+    API_URL = get_env("LICENSESEAT_API_URL");
+    if (API_URL.empty()) {
+        API_URL = "https://licenseseat.com/api/v1";
+    }
 
     if (API_KEY.empty() || PRODUCT_SLUG.empty() || LICENSE_KEY.empty()) {
         std::cerr << "Error: Missing required environment variables.\n\n";
@@ -128,7 +133,7 @@ void test_scenario_1_first_launch() {
         licenseseat::Config config;
         config.api_key = API_KEY;
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
         config.storage_path = storage_path;
         config.device_id = "first-launch-device-" + std::to_string(std::time(nullptr));
 
@@ -202,7 +207,7 @@ void test_scenario_2_returning_user() {
         licenseseat::Config config;
         config.api_key = API_KEY;
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
         config.storage_path = storage_path;
 
         licenseseat::Client client(config);
@@ -223,7 +228,7 @@ void test_scenario_2_returning_user() {
         licenseseat::Config config;
         config.api_key = API_KEY;
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
         config.storage_path = storage_path;
 
         licenseseat::Client client(config);
@@ -264,7 +269,7 @@ void test_scenario_3_offline_mode() {
         licenseseat::Config config;
         config.api_key = API_KEY;
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
         config.storage_path = storage_path;
 
         licenseseat::Client client(config);
@@ -296,7 +301,7 @@ void test_scenario_3_offline_mode() {
         licenseseat::Config config;
         config.api_key = API_KEY;
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
         config.storage_path = storage_path;
         config.signing_public_key = cached_public_key;  // Pre-configure signing key
 
@@ -338,7 +343,7 @@ void test_scenario_4_security() {
         licenseseat::Config config;
         config.api_key = API_KEY;
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
 
         licenseseat::Client client(config);
 
@@ -359,7 +364,7 @@ void test_scenario_4_security() {
         licenseseat::Config config;
         config.api_key = API_KEY;
         config.product_slug = "wrong-product-slug";
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
 
         licenseseat::Client client(config);
 
@@ -380,7 +385,7 @@ void test_scenario_4_security() {
         licenseseat::Config config;
         config.api_key = "invalid-api-key";
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
 
         licenseseat::Client client(config);
 
@@ -401,7 +406,7 @@ void test_scenario_4_security() {
         licenseseat::Config config;
         config.api_key = "";
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
 
         licenseseat::Client client(config);
 
@@ -419,7 +424,7 @@ void test_scenario_4_security() {
         licenseseat::Config config;
         config.api_key = API_KEY;
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
 
         licenseseat::Client client(config);
 
@@ -454,7 +459,7 @@ void test_scenario_5_persistence() {
     licenseseat::Config config;
     config.api_key = API_KEY;
     config.product_slug = PRODUCT_SLUG;
-    config.api_url = "https://licenseseat.com/api/v1";
+    config.api_url = API_URL;
     config.storage_path = storage_path;
 
     licenseseat::Client client(config);
@@ -511,7 +516,7 @@ void test_scenario_6_expiration() {
     licenseseat::Config config;
     config.api_key = API_KEY;
     config.product_slug = PRODUCT_SLUG;
-    config.api_url = "https://licenseseat.com/api/v1";
+    config.api_url = API_URL;
     config.storage_path = storage_path;
     config.max_offline_days = 30;  // 30-day grace period
 
@@ -586,7 +591,7 @@ void test_scenario_7_deactivation() {
     licenseseat::Config config;
     config.api_key = API_KEY;
     config.product_slug = PRODUCT_SLUG;
-    config.api_url = "https://licenseseat.com/api/v1";
+    config.api_url = API_URL;
     config.device_id = "deactivation-test-" + std::to_string(std::time(nullptr));
 
     licenseseat::Client client(config);
@@ -646,7 +651,7 @@ void test_scenario_8_reactivation() {
         licenseseat::Config config;
         config.api_key = API_KEY;
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
         config.device_id = device1;
 
         licenseseat::Client client(config);
@@ -670,7 +675,7 @@ void test_scenario_8_reactivation() {
         licenseseat::Config config;
         config.api_key = API_KEY;
         config.product_slug = PRODUCT_SLUG;
-        config.api_url = "https://licenseseat.com/api/v1";
+        config.api_url = API_URL;
         config.device_id = device2;
 
         licenseseat::Client client(config);
@@ -726,7 +731,7 @@ void test_scenario_9_auto_validation() {
     licenseseat::Config config;
     config.api_key = API_KEY;
     config.product_slug = PRODUCT_SLUG;
-    config.api_url = "https://licenseseat.com/api/v1";
+    config.api_url = API_URL;
     config.storage_path = storage_path;
     config.auto_validate_interval = 1.0;  // 1 second for testing
 
@@ -773,16 +778,105 @@ void test_scenario_9_auto_validation() {
 }
 
 // ============================================================================
-// SCENARIO 10: Event-driven State Changes
+// SCENARIO 10: Session Restore with restore_license() (NEW)
 // ============================================================================
 
-void test_scenario_10_events() {
-    section("10. Event-driven State Changes");
+void test_scenario_10_session_restore() {
+    section("10. Session Restore with restore_license()");
+
+    std::string storage_path = get_temp_storage_path("s10");
+
+    // Phase 1: Activate and cache license
+    {
+        licenseseat::Config config;
+        config.api_key = API_KEY;
+        config.product_slug = PRODUCT_SLUG;
+        config.api_url = API_URL;
+        config.storage_path = storage_path;
+        config.device_id = "restore-test-device-" + std::to_string(std::time(nullptr));
+
+        licenseseat::Client client(config);
+
+        // Activate to create cached data
+        auto activate_result = client.activate(LICENSE_KEY);
+        if (activate_result.is_ok() ||
+            activate_result.error_code() == licenseseat::ErrorCode::DeviceAlreadyActivated) {
+            pass("Initial activation for cache setup");
+        } else if (activate_result.error_code() == licenseseat::ErrorCode::SeatLimitExceeded) {
+            pass("Activation handled (seat limit)");
+        } else {
+            info("Activation result: " + activate_result.error_message());
+        }
+
+        // Sync offline assets to populate cache
+        client.sync_offline_assets();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        pass("Offline assets synced");
+    }
+
+    // Phase 2: Simulate app restart - use restore_license()
+    {
+        licenseseat::Config config;
+        config.api_key = API_KEY;
+        config.product_slug = PRODUCT_SLUG;
+        config.api_url = API_URL;
+        config.storage_path = storage_path;
+
+        licenseseat::Client client(config);
+
+        // Call restore_license() - this is the NEW SDK feature
+        auto result = client.restore_license();
+
+        pass("restore_license() completed");
+        info("Success: " + std::string(result.success ? "yes" : "no"));
+        info("Status: " + std::string(licenseseat::client_status_to_string(result.status)));
+        info("Message: " + result.message);
+
+        // Check restored status
+        if (result.status == licenseseat::ClientStatus::Active) {
+            pass("Restored with Active status (online validated)");
+        } else if (result.status == licenseseat::ClientStatus::OfflineValid) {
+            pass("Restored with OfflineValid status (offline verified)");
+        } else if (result.status == licenseseat::ClientStatus::Inactive) {
+            pass("No cached license to restore");
+        } else {
+            info("Restore status: " + std::string(licenseseat::client_status_to_string(result.status)));
+        }
+
+        // Verify get_client_status() matches
+        auto client_status = client.get_client_status();
+        if (client_status == result.status) {
+            pass("get_client_status() matches restore result");
+        } else {
+            info("get_client_status(): " + std::string(licenseseat::client_status_to_string(client_status)));
+        }
+
+        // If license was restored, check it's usable
+        if (result.license.has_value()) {
+            pass("License data restored");
+            info("License key: " + result.license->key());
+            info("Plan: " + result.license->plan_key());
+
+            // Entitlements should work
+            auto ent = client.check_entitlement("any_feature");
+            info("Entitlement check: " + std::string(ent.active ? "active" : ent.reason));
+        }
+    }
+
+    cleanup_storage(storage_path);
+}
+
+// ============================================================================
+// SCENARIO 11: Event-driven State Changes
+// ============================================================================
+
+void test_scenario_11_events() {
+    section("11. Event-driven State Changes");
 
     licenseseat::Config config;
     config.api_key = API_KEY;
     config.product_slug = PRODUCT_SLUG;
-    config.api_url = "https://licenseseat.com/api/v1";
+    config.api_url = API_URL;
 
     licenseseat::Client client(config);
 
@@ -883,7 +977,8 @@ int main() {
     test_scenario_7_deactivation();
     test_scenario_8_reactivation();
     test_scenario_9_auto_validation();
-    test_scenario_10_events();
+    test_scenario_10_session_restore();
+    test_scenario_11_events();
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);

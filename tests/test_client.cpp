@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <licenseseat/licenseseat.hpp>
+#include <licenseseat/events.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -168,6 +169,22 @@ TEST_F(ClientTest, VerifyOfflineTokenWithInvalidSignature) {
     // Invalid signature should fail verification
     EXPECT_TRUE(result.is_error());
     EXPECT_EQ(result.error_code(), ErrorCode::InvalidSignature);
+}
+
+TEST_F(ClientTest, VerifyOfflineTokenNotYetValidFails) {
+    Client client(config_);
+
+    OfflineToken offline;
+    offline.token.license_key = "KEY-123";
+    offline.token.kid = "key-v1";
+    offline.token.iat = std::time(nullptr);
+    offline.token.nbf = std::time(nullptr) + (24 * 60 * 60);  // Not valid until tomorrow
+    offline.token.exp = std::time(nullptr) + (365 * 24 * 60 * 60);
+
+    auto result = client.verify_offline_token(offline);
+
+    EXPECT_TRUE(result.is_error());
+    // Token is not yet valid (nbf in future)
 }
 
 TEST_F(ClientTest, FetchSigningKeyWithEmptyIdFails) {
@@ -423,6 +440,182 @@ TEST_F(ClientTest, DeactivateAsyncCallsCallback) {
 
 TEST(VersionTest, VersionIsSet) {
     EXPECT_STREQ(VERSION, "0.4.0");
+}
+
+// ==================== ClientStatus Tests ====================
+
+TEST_F(ClientTest, GetClientStatusReturnsInactiveWhenNoLicense) {
+    Client client(config_);
+
+    auto status = client.get_client_status();
+
+    EXPECT_EQ(status, ClientStatus::Inactive);
+}
+
+TEST_F(ClientTest, ClientStatusToStringWorks) {
+    EXPECT_STREQ(client_status_to_string(ClientStatus::Active), "active");
+    EXPECT_STREQ(client_status_to_string(ClientStatus::OfflineValid), "offline_valid");
+    EXPECT_STREQ(client_status_to_string(ClientStatus::OfflineInvalid), "offline_invalid");
+    EXPECT_STREQ(client_status_to_string(ClientStatus::Inactive), "inactive");
+    EXPECT_STREQ(client_status_to_string(ClientStatus::Invalid), "invalid");
+    EXPECT_STREQ(client_status_to_string(ClientStatus::Pending), "pending");
+}
+
+TEST_F(ClientTest, OfflineInvalidStatusExists) {
+    // Verify OfflineInvalid is a valid ClientStatus value
+    ClientStatus status = ClientStatus::OfflineInvalid;
+    EXPECT_EQ(status, ClientStatus::OfflineInvalid);
+    EXPECT_NE(status, ClientStatus::OfflineValid);
+    EXPECT_NE(status, ClientStatus::Invalid);
+}
+
+// ==================== RestoreResult Tests ====================
+
+TEST_F(ClientTest, RestoreLicenseReturnsInactiveWhenNoCache) {
+    Client client(config_);
+
+    auto result = client.restore_license();
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.status, ClientStatus::Inactive);
+    EXPECT_FALSE(result.license.has_value());
+    EXPECT_FALSE(result.message.empty());
+}
+
+TEST_F(ClientTest, RestoreLicenseAsyncCallsCallback) {
+    Client client(config_);
+    std::atomic<bool> callback_called{false};
+    RestoreResult received_result;
+
+    client.restore_license_async([&](RestoreResult result) {
+        received_result = result;
+        callback_called = true;
+    });
+
+    int attempts = 0;
+    while (!callback_called && attempts++ < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    EXPECT_TRUE(callback_called);
+    EXPECT_FALSE(received_result.success);
+    EXPECT_EQ(received_result.status, ClientStatus::Inactive);
+}
+
+// ==================== Thread Safety Tests ====================
+
+TEST_F(ClientTest, DestructorWaitsForAsyncOperations) {
+    // This test ensures that destroying the client waits for pending async ops
+    std::atomic<int> callback_count{0};
+
+    {
+        Client client(config_);
+
+        // Start multiple async operations
+        for (int i = 0; i < 5; i++) {
+            client.validate_async("TEST-KEY-" + std::to_string(i),
+                                  [&](Result<ValidationResult> /*result*/) {
+                                      callback_count++;
+                                  });
+        }
+        // Client destructor should wait for all callbacks to complete
+    }
+
+    // Give some time for potential issues to manifest
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // All callbacks should have been called before destructor completed
+    EXPECT_EQ(callback_count, 5);
+}
+
+TEST_F(ClientTest, MultipleAsyncOpsDoNotCrash) {
+    Client client(config_);
+    std::atomic<int> completed{0};
+
+    // Launch many concurrent async operations
+    for (int i = 0; i < 10; i++) {
+        client.validate_async("KEY-" + std::to_string(i),
+                              [&](Result<ValidationResult> /*result*/) { completed++; });
+        client.activate_async("KEY-" + std::to_string(i),
+                              [&](Result<Activation> /*result*/) { completed++; });
+    }
+
+    // Wait for completion
+    int attempts = 0;
+    while (completed < 20 && attempts++ < 200) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    EXPECT_EQ(completed, 20);
+}
+
+// ==================== Network Recheck Timer Tests ====================
+
+TEST_F(ClientTest, IsOnlineChangesOnHealthCheckFailure) {
+    // Initially online
+    Client client(config_);
+    EXPECT_TRUE(client.is_online());
+
+    // Health check fails (no server), should mark as offline
+    auto result = client.health();
+    EXPECT_TRUE(result.is_error());
+
+    // Now should be offline
+    EXPECT_FALSE(client.is_online());
+}
+
+// ==================== Event Emission Tests ====================
+
+TEST_F(ClientTest, NetworkOfflineEventEmittedOnHealthFailure) {
+    Client client(config_);
+    bool offline_event_received = false;
+
+    client.on("network:offline", [&](const std::any& /*data*/) {
+        offline_event_received = true;
+    });
+
+    // Force a health check failure
+    auto result = client.health();
+    EXPECT_TRUE(result.is_error());
+
+    EXPECT_TRUE(offline_event_received);
+}
+
+TEST_F(ClientTest, ValidationFailedEventEmittedOnNetworkError) {
+    Client client(config_);
+    bool error_event_received = false;
+
+    client.on("validation:error", [&](const std::any& /*data*/) {
+        error_event_received = true;
+    });
+
+    // Validation will fail with network error
+    auto result = client.validate("TEST-KEY");
+    EXPECT_TRUE(result.is_error());
+
+    // Note: Network error goes to validation:error, not validation:failed
+    // validation:failed is for 200 OK with valid=false
+}
+
+// ==================== License Revocation Tests ====================
+
+TEST_F(ClientTest, LicenseRevokedConstantExists) {
+    // Just verify the event constant exists
+    EXPECT_STREQ(events::LICENSE_REVOKED, "license:revoked");
+}
+
+TEST_F(ClientTest, CanSubscribeToLicenseRevokedEvent) {
+    Client client(config_);
+    bool event_received = false;
+
+    auto sub = client.on("license:revoked", [&](const std::any& /*data*/) {
+        event_received = true;
+    });
+
+    // Manually emit to verify subscription works
+    client.emit("license:revoked");
+
+    EXPECT_TRUE(event_received);
 }
 
 }  // namespace

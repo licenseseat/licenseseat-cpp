@@ -151,26 +151,53 @@ TEST_F(EventBusTest, ThreadSafetyMultipleThreadsEmitting) {
 // ==================== Event Constants Tests ====================
 
 TEST(EventConstantsTest, EventNamesAreDefined) {
+    // License lifecycle events
     EXPECT_STREQ(events::LICENSE_LOADED, "license:loaded");
+    EXPECT_STREQ(events::LICENSE_REVOKED, "license:revoked");
+
+    // Activation events
     EXPECT_STREQ(events::ACTIVATION_START, "activation:start");
     EXPECT_STREQ(events::ACTIVATION_SUCCESS, "activation:success");
     EXPECT_STREQ(events::ACTIVATION_ERROR, "activation:error");
+
+    // Validation events
     EXPECT_STREQ(events::VALIDATION_START, "validation:start");
     EXPECT_STREQ(events::VALIDATION_SUCCESS, "validation:success");
     EXPECT_STREQ(events::VALIDATION_FAILED, "validation:failed");
     EXPECT_STREQ(events::VALIDATION_ERROR, "validation:error");
     EXPECT_STREQ(events::VALIDATION_OFFLINE_SUCCESS, "validation:offline-success");
     EXPECT_STREQ(events::VALIDATION_OFFLINE_FAILED, "validation:offline-failed");
+    EXPECT_STREQ(events::VALIDATION_AUTH_FAILED, "validation:auth-failed");
+    EXPECT_STREQ(events::VALIDATION_AUTO_FAILED, "validation:auto-failed");
+
+    // Deactivation events
     EXPECT_STREQ(events::DEACTIVATION_START, "deactivation:start");
     EXPECT_STREQ(events::DEACTIVATION_SUCCESS, "deactivation:success");
     EXPECT_STREQ(events::DEACTIVATION_ERROR, "deactivation:error");
+
+    // Network events
     EXPECT_STREQ(events::NETWORK_ONLINE, "network:online");
     EXPECT_STREQ(events::NETWORK_OFFLINE, "network:offline");
+
+    // Auto-validation events
     EXPECT_STREQ(events::AUTOVALIDATION_CYCLE, "autovalidation:cycle");
     EXPECT_STREQ(events::AUTOVALIDATION_STOPPED, "autovalidation:stopped");
+
+    // Offline token events
+    EXPECT_STREQ(events::OFFLINE_TOKEN_FETCHING, "offlineToken:fetching");
+    EXPECT_STREQ(events::OFFLINE_TOKEN_FETCHED, "offlineToken:fetched");
+    EXPECT_STREQ(events::OFFLINE_TOKEN_FETCH_ERROR, "offlineToken:fetchError");
     EXPECT_STREQ(events::OFFLINE_TOKEN_READY, "offlineToken:ready");
     EXPECT_STREQ(events::OFFLINE_TOKEN_VERIFIED, "offlineToken:verified");
+    EXPECT_STREQ(events::OFFLINE_TOKEN_VERIFICATION_FAILED, "offlineToken:verificationFailed");
+
+    // Heartbeat events
+    EXPECT_STREQ(events::HEARTBEAT_SUCCESS, "heartbeat:success");
+    EXPECT_STREQ(events::HEARTBEAT_ERROR, "heartbeat:error");
+
+    // SDK events
     EXPECT_STREQ(events::SDK_RESET, "sdk:reset");
+    EXPECT_STREQ(events::SDK_ERROR, "sdk:error");
 }
 
 }  // namespace

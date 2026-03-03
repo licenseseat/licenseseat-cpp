@@ -367,5 +367,132 @@ TEST_F(FileStorageTest, CreatesDirectoryIfNotExists) {
     EXPECT_TRUE(std::filesystem::exists(new_dir));
 }
 
+// ==================== Full License Data Serialization Tests ====================
+
+TEST_F(FileStorageTest, SerializesFullLicenseData) {
+    FileStorage storage(temp_dir.path().string());
+
+    // Create a full license
+    License license(
+        "LS-TEST-KEY",
+        LicenseStatus::Active,
+        LicenseMode::HardwareLocked,
+        "pro-annual",
+        std::optional<int>(5),
+        2,
+        std::nullopt,
+        std::nullopt,
+        std::vector<Entitlement>{},
+        Metadata{{"customer_id", "cust_123"}},
+        Product{"test-product", "Test Product"}
+    );
+
+    CachedLicense cached;
+    cached.license_key = "LS-TEST-KEY";
+    cached.device_id = "device-001";
+    cached.activated_at = std::chrono::system_clock::now();
+    cached.last_validated = std::chrono::system_clock::now();
+    cached.license_data = license;
+
+    ValidationResult validation;
+    validation.valid = true;
+    validation.offline = false;
+    cached.validation = validation;
+
+    EXPECT_TRUE(storage.set_license(cached));
+
+    auto result = storage.get_license();
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->license_key, "LS-TEST-KEY");
+    EXPECT_EQ(result->device_id, "device-001");
+
+    // Verify full license data is restored
+    ASSERT_TRUE(result->license_data.has_value());
+    EXPECT_EQ(result->license_data->key(), "LS-TEST-KEY");
+    EXPECT_EQ(result->license_data->status(), LicenseStatus::Active);
+    EXPECT_EQ(result->license_data->mode(), LicenseMode::HardwareLocked);
+    EXPECT_EQ(result->license_data->plan_key(), "pro-annual");
+    ASSERT_TRUE(result->license_data->seat_limit().has_value());
+    EXPECT_EQ(*result->license_data->seat_limit(), 5);
+    EXPECT_EQ(result->license_data->active_seats(), 2);
+    EXPECT_EQ(result->license_data->product().slug, "test-product");
+    EXPECT_EQ(result->license_data->product().name, "Test Product");
+
+    // Verify metadata is restored
+    auto& meta = result->license_data->metadata();
+    ASSERT_TRUE(meta.count("customer_id") > 0);
+    EXPECT_EQ(meta.at("customer_id"), "cust_123");
+}
+
+TEST_F(FileStorageTest, SerializesValidationOfflineFlag) {
+    FileStorage storage(temp_dir.path().string());
+
+    CachedLicense cached;
+    cached.license_key = "KEY";
+    cached.device_id = "device";
+    cached.activated_at = std::chrono::system_clock::now();
+    cached.last_validated = std::chrono::system_clock::now();
+
+    ValidationResult validation;
+    validation.valid = true;
+    validation.offline = true;
+    validation.code = "offline_verified";
+    validation.message = "Verified offline";
+    cached.validation = validation;
+
+    EXPECT_TRUE(storage.set_license(cached));
+
+    auto result = storage.get_license();
+    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result->validation.has_value());
+    EXPECT_TRUE(result->validation->valid);
+    EXPECT_TRUE(result->validation->offline);
+    EXPECT_EQ(result->validation->code, "offline_verified");
+    EXPECT_EQ(result->validation->message, "Verified offline");
+}
+
+TEST_F(FileStorageTest, HandlesLicenseWithEntitlements) {
+    FileStorage storage(temp_dir.path().string());
+
+    std::vector<Entitlement> entitlements = {
+        {"updates", std::nullopt, {}},
+        {"premium", std::nullopt, {{"tier", "gold"}}}
+    };
+
+    License license(
+        "LS-ENT-KEY",
+        LicenseStatus::Active,
+        LicenseMode::HardwareLocked,
+        "pro",
+        std::nullopt,
+        1,
+        std::nullopt,
+        std::nullopt,
+        entitlements,
+        {},
+        Product{"prod", "Product"}
+    );
+
+    CachedLicense cached;
+    cached.license_key = "LS-ENT-KEY";
+    cached.device_id = "device";
+    cached.activated_at = std::chrono::system_clock::now();
+    cached.last_validated = std::chrono::system_clock::now();
+    cached.license_data = license;
+
+    EXPECT_TRUE(storage.set_license(cached));
+
+    auto result = storage.get_license();
+    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result->license_data.has_value());
+
+    auto& ents = result->license_data->active_entitlements();
+    EXPECT_EQ(ents.size(), 2);
+    EXPECT_EQ(ents[0].key, "updates");
+    EXPECT_EQ(ents[1].key, "premium");
+    ASSERT_TRUE(ents[1].metadata.count("tier") > 0);
+    EXPECT_EQ(ents[1].metadata.at("tier"), "gold");
+}
+
 }  // namespace
 }  // namespace licenseseat
