@@ -3,7 +3,8 @@
 find_package(GTest REQUIRED)
 
 # Bundled deps are in deps/ (nlohmann/json.hpp, httplib.h)
-set(BUNDLED_DEPS_INCLUDE ${CMAKE_SOURCE_DIR}/deps)
+# Use CMAKE_CURRENT_LIST_DIR to work correctly when included as subdirectory
+set(BUNDLED_DEPS_INCLUDE ${CMAKE_CURRENT_LIST_DIR}/../deps)
 
 # Unit tests
 add_executable(licenseseat_tests
