@@ -167,30 +167,55 @@ class EventBus {
     uint64_t next_id_ = 0;
 };
 
-// Common event names as constants
+// Common event names as constants (matches Swift SDK EventBus)
 namespace events {
+// License lifecycle events
 constexpr const char* LICENSE_LOADED = "license:loaded";
+constexpr const char* LICENSE_REVOKED = "license:revoked";
+
+// Activation events
 constexpr const char* ACTIVATION_START = "activation:start";
 constexpr const char* ACTIVATION_SUCCESS = "activation:success";
 constexpr const char* ACTIVATION_ERROR = "activation:error";
+
+// Validation events
 constexpr const char* VALIDATION_START = "validation:start";
 constexpr const char* VALIDATION_SUCCESS = "validation:success";
 constexpr const char* VALIDATION_FAILED = "validation:failed";
 constexpr const char* VALIDATION_ERROR = "validation:error";
 constexpr const char* VALIDATION_OFFLINE_SUCCESS = "validation:offline-success";
 constexpr const char* VALIDATION_OFFLINE_FAILED = "validation:offline-failed";
+constexpr const char* VALIDATION_AUTH_FAILED = "validation:auth-failed";
+constexpr const char* VALIDATION_AUTO_FAILED = "validation:auto-failed";
+
+// Deactivation events
 constexpr const char* DEACTIVATION_START = "deactivation:start";
 constexpr const char* DEACTIVATION_SUCCESS = "deactivation:success";
 constexpr const char* DEACTIVATION_ERROR = "deactivation:error";
+
+// Network events
 constexpr const char* NETWORK_ONLINE = "network:online";
 constexpr const char* NETWORK_OFFLINE = "network:offline";
+
+// Auto-validation events
 constexpr const char* AUTOVALIDATION_CYCLE = "autovalidation:cycle";
 constexpr const char* AUTOVALIDATION_STOPPED = "autovalidation:stopped";
+
+// Offline token events
+constexpr const char* OFFLINE_TOKEN_FETCHING = "offlineToken:fetching";
+constexpr const char* OFFLINE_TOKEN_FETCHED = "offlineToken:fetched";
+constexpr const char* OFFLINE_TOKEN_FETCH_ERROR = "offlineToken:fetchError";
 constexpr const char* OFFLINE_TOKEN_READY = "offlineToken:ready";
 constexpr const char* OFFLINE_TOKEN_VERIFIED = "offlineToken:verified";
+constexpr const char* OFFLINE_TOKEN_VERIFICATION_FAILED = "offlineToken:verificationFailed";
+
+// Heartbeat events
 constexpr const char* HEARTBEAT_SUCCESS = "heartbeat:success";
 constexpr const char* HEARTBEAT_ERROR = "heartbeat:error";
+
+// SDK events
 constexpr const char* SDK_RESET = "sdk:reset";
+constexpr const char* SDK_ERROR = "sdk:error";
 }  // namespace events
 
 }  // namespace licenseseat
