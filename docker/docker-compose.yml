@@ -12,14 +12,14 @@ services:
   unit-tests:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.ubuntu24
+      dockerfile: docker/Dockerfile.alpine
     command: ./build/tests/licenseseat_tests
 
   # Run integration tests (requires env vars)
   integration-tests:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.ubuntu24
+      dockerfile: docker/Dockerfile.alpine
     environment:
       - LICENSESEAT_API_KEY
       - LICENSESEAT_PRODUCT_SLUG
@@ -31,7 +31,7 @@ services:
   offline-tests:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.ubuntu24
+      dockerfile: docker/Dockerfile.alpine
     environment:
       - LICENSESEAT_API_KEY
       - LICENSESEAT_PRODUCT_SLUG
