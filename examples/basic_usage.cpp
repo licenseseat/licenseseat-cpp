@@ -13,6 +13,7 @@
  */
 
 #include <licenseseat/licenseseat.hpp>
+#include <licenseseat/events.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -44,29 +45,85 @@ int main() {
     // The client auto-generates a unique device identifier based on hardware
     std::cout << "Device ID: " << client.device_id() << "\n";
 
-    // Example 0: Subscribe to SDK events
+    // Example 0: Subscribe to SDK events (using event constants)
     std::cout << "\n=== Event Subscription ===\n";
     {
-        // Subscribe to validation events
-        auto sub1 = client.on("validation:success", [](const std::any& /*data*/) {
+        // Subscribe to validation events using event constants
+        auto sub1 = client.on(licenseseat::events::VALIDATION_SUCCESS, [](const std::any& /*data*/) {
             std::cout << "[Event] License validated successfully!\n";
         });
 
-        auto sub2 = client.on("validation:failed", [](const std::any& /*data*/) {
+        auto sub2 = client.on(licenseseat::events::VALIDATION_FAILED, [](const std::any& /*data*/) {
             std::cout << "[Event] License validation failed.\n";
         });
 
-        auto sub3 = client.on("network:offline", [](const std::any& /*data*/) {
+        auto sub3 = client.on(licenseseat::events::NETWORK_OFFLINE, [](const std::any& /*data*/) {
             std::cout << "[Event] Network went offline, falling back to cached license.\n";
         });
 
-        auto sub4 = client.on("network:online", [](const std::any& /*data*/) {
+        auto sub4 = client.on(licenseseat::events::NETWORK_ONLINE, [](const std::any& /*data*/) {
             std::cout << "[Event] Network is back online.\n";
+        });
+
+        // Critical: license revocation detection
+        auto sub5 = client.on(licenseseat::events::LICENSE_REVOKED, [](const std::any& /*data*/) {
+            std::cout << "[Event] License has been revoked!\n";
+        });
+
+        // Offline validation events
+        auto sub6 = client.on(licenseseat::events::VALIDATION_OFFLINE_SUCCESS, [](const std::any& /*data*/) {
+            std::cout << "[Event] Offline validation succeeded (using cached token).\n";
         });
 
         std::cout << "Subscribed to validation and network events.\n";
         // Subscriptions are automatically cancelled when they go out of scope,
         // or you can call sub.cancel() to unsubscribe early.
+    }
+
+    // Example 0.5: Restore license on app startup (NEW in SDK 0.4)
+    std::cout << "\n=== Session Restore ===\n";
+    {
+        // restore_license() handles everything:
+        // - Loads cached license key from storage
+        // - Checks connectivity
+        // - If online: validates with server
+        // - If offline: verifies cached offline token
+        // - Starts appropriate timers (auto-validation, heartbeat)
+        // - Returns comprehensive result with status
+
+        auto result = client.restore_license();
+
+        std::cout << "Restore status: " << licenseseat::client_status_to_string(result.status) << "\n";
+        std::cout << "Success: " << (result.success ? "yes" : "no") << "\n";
+        std::cout << "Message: " << result.message << "\n";
+
+        if (result.license.has_value()) {
+            std::cout << "License key: " << result.license->key() << "\n";
+            std::cout << "Plan: " << result.license->plan_key() << "\n";
+        }
+
+        // Check the overall client status
+        auto status = client.get_client_status();
+        switch (status) {
+            case licenseseat::ClientStatus::Active:
+                std::cout << "Client is active (online validated)\n";
+                break;
+            case licenseseat::ClientStatus::OfflineValid:
+                std::cout << "Client is offline-valid (cached token verified)\n";
+                break;
+            case licenseseat::ClientStatus::OfflineInvalid:
+                std::cout << "Client is offline-invalid (cached token failed verification)\n";
+                break;
+            case licenseseat::ClientStatus::Inactive:
+                std::cout << "Client is inactive (no license)\n";
+                break;
+            case licenseseat::ClientStatus::Invalid:
+                std::cout << "Client is invalid (license validation failed)\n";
+                break;
+            case licenseseat::ClientStatus::Pending:
+                std::cout << "Client is pending (validation in progress)\n";
+                break;
+        }
     }
 
     // Example 1: Validate a license key
