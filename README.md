@@ -134,6 +134,9 @@ brew install cmake openssl
 # Ubuntu/Debian
 sudo apt install cmake libssl-dev libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
 
+# Alpine Linux
+apk add build-base cmake openssl-dev mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+
 # Windows (with vcpkg)
 vcpkg install openssl
 ```

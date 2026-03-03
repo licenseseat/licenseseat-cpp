@@ -104,6 +104,12 @@ std::string get_linux_machine_id() {
         }
     }
 
+    // Final fallback: hostname (for minimal containers like Alpine Docker)
+    char hostname[256] = {0};
+    if (gethostname(hostname, sizeof(hostname)) == 0 && hostname[0] != '\0') {
+        return std::string("hostname:") + hostname;
+    }
+
     return "";
 }
 
