@@ -16,13 +16,15 @@ The official C++ SDK for [LicenseSeat](https://licenseseat.com) – the licensin
 
 - **License activation & deactivation** – Activate licenses with automatic device fingerprinting
 - **Online & offline validation** – Validate licenses with Ed25519 cryptographic verification
+- **Session restore** – `restore_license()` handles startup logic (check cache, validate, fallback to offline)
+- **Client status** – `get_client_status()` returns `Active`, `OfflineValid`, `Inactive`, `Invalid`, or `Pending`
 - **Entitlement checking** – Check feature access with `has_entitlement()` and `check_entitlement()`
-- **Local caching** – File-based caching with clock tamper detection
+- **Local caching** – File-based caching with automatic offline fallback
 - **Auto-validation** – Background validation with configurable intervals
 - **Heartbeat** – Track active device usage with manual or automatic heartbeats
-- **Telemetry** – Anonymous platform telemetry (16 fields, opt-out with one flag)
-- **Event system** – Subscribe to license events (validation success/failure, heartbeat, offline token ready, etc.)
-- **Thread-safe** – All public methods are safe to call from multiple threads
+- **Network recovery** – Auto-restarts validation/heartbeat when connectivity returns
+- **Event system** – Subscribe to license events (validation, heartbeat, revocation, network status, etc.)
+- **Thread-safe** – All public methods safe to call from multiple threads
 - **Cross-platform** – Windows, macOS, and Linux support
 - **Exception-free** – Uses `Result<T, Error>` pattern for error handling
 
@@ -106,23 +108,23 @@ license.validateAsync("LICENSE-KEY", [](auto& result)
 
 ---
 
-### Demo App (ImageTool Pro)
+### Demo App (SynthDemo)
 
-A complete GUI demo application showing how to integrate LicenseSeat into a desktop app. Built with raylib + raygui.
+A compact audio synthesizer demo showing LicenseSeat integration. Built with raylib + raygui.
 
 ```bash
 cd demo
 cmake -B build
 cmake --build build
-open build/imagetool_demo.app  # macOS
+open build/synthdemo.app  # macOS
 ```
 
 **Features demonstrated:**
-- License validation and activation flow
-- Feature gating with entitlements (free vs Pro features)
-- Upgrade prompts for locked features
-- Toast notifications for user feedback
-- Dark theme UI with PRO badges
+- License activation with auto-closing modal
+- Feature gating (free: sine wave, Pro: sawtooth/square/noise)
+- Session restore on app restart
+- Network status indicators
+- Toast notifications
 
 **Location:** [`demo/`](demo/)
 
@@ -233,35 +235,77 @@ That's it. No other dependencies to install.
 int main()
 {
     licenseseat::Config config;
-    config.api_key = "your-api-key";
+    config.api_key = "pk_live_xxx";
     config.product_slug = "your-product";
+    config.storage_path = "~/.myapp/license";  // Enable caching
 
     licenseseat::Client client(config);
 
-    // Validate a license
-    auto result = client.validate("XXXX-XXXX-XXXX-XXXX");
+    // Restore session (handles online/offline automatically)
+    auto restore = client.restore_license();
 
-    if (result.is_ok()) {
-        const auto& validation = result.value();
-        if (validation.valid) {
-            std::cout << "License is valid!\n";
-            std::cout << "Plan: " << validation.license.plan_key() << "\n";
-        } else {
-            // License exists but validation failed (e.g., expired, seat limit)
-            std::cout << "Invalid: " << validation.code << " - " << validation.message << "\n";
+    if (restore.status == ClientStatus::Active ||
+        restore.status == ClientStatus::OfflineValid) {
+        std::cout << "Licensed!\n";
+
+        // Check entitlements
+        if (client.has_entitlement("pro")) {
+            enable_pro_features();
         }
     } else {
-        // Network error, license not found, etc.
-        std::cerr << "Error: " << result.error_message() << "\n";
-    }
+        // Show activation UI
+        std::string key = get_license_key_from_user();
 
-    // Check entitlements
-    if (client.has_entitlement("pro")) {
-        // Enable pro features
+        auto result = client.activate(key);
+        if (result.is_ok()) {
+            std::cout << "Activated!\n";
+        }
     }
 
     return 0;
 }
+```
+
+---
+
+## Session Restore
+
+The SDK handles the complex startup logic for you with `restore_license()`:
+
+```cpp
+licenseseat::Config config;
+config.api_key = "pk_live_xxx";
+config.product_slug = "your-product";
+config.storage_path = "/path/to/cache";
+
+licenseseat::Client client(config);
+
+// One call handles: load cache → check network → validate or verify offline
+auto result = client.restore_license();
+
+switch (result.status) {
+    case ClientStatus::Active:
+        // Online, license valid
+        enable_full_features();
+        break;
+    case ClientStatus::OfflineValid:
+        // Offline but cached token valid
+        enable_full_features();
+        show_offline_indicator();
+        break;
+    case ClientStatus::Inactive:
+        // No cached license, show activation UI
+        show_license_prompt();
+        break;
+    case ClientStatus::Invalid:
+        // License revoked or expired
+        show_reactivation_prompt();
+        break;
+}
+
+// Subscribe to changes
+client.on(events::LICENSE_REVOKED, [](auto) { show_license_revoked_dialog(); });
+client.on(events::NETWORK_ONLINE, [](auto) { hide_offline_indicator(); });
 ```
 
 ---
@@ -421,7 +465,7 @@ The SDK collects anonymous platform telemetry to help developers understand thei
 | Field               | Type   | Example                  | Description                                            |
 | ------------------- | ------ | ------------------------ | ------------------------------------------------------ |
 | `sdk_name`          | string | `"cpp"`                  | Always `"cpp"` for this SDK                            |
-| `sdk_version`       | string | `"0.4.0"`               | SDK version                                            |
+| `sdk_version`       | string | `"0.4.1"`               | SDK version                                            |
 | `os_name`           | string | `"macOS"`                | Operating system (`"macOS"`, `"Windows"`, `"Linux"`)   |
 | `os_version`        | string | `"15.3"`                 | OS version string                                      |
 | `platform`          | string | `"native"`               | Always `"native"` for this SDK                         |
@@ -1001,8 +1045,8 @@ cmake --build build
 ```
 
 ```
-[==========] 236 tests from 67 test suites ran. (210 ms total)
-[  PASSED  ] 236 tests.
+[==========] 298 tests from 69 test suites ran. (636 ms total)
+[  PASSED  ] 298 tests.
 ```
 
 ### Test Suites
@@ -1011,7 +1055,7 @@ The SDK includes comprehensive tests:
 
 | Test Suite           | Tests | Network | Description                                 |
 | -------------------- | ----- | ------- | ------------------------------------------- |
-| Unit tests           | 236   | No      | Core functionality, parsing, crypto         |
+| Unit tests           | 298   | No      | Core functionality, parsing, crypto         |
 | Crypto stress tests  | 44    | Yes     | Ed25519, Base64, offline token verification |
 | Integration tests    | 48    | Yes     | Full API testing                            |
 | Scenario tests       | 38    | Yes     | Real-world workflows (10 scenarios)         |
