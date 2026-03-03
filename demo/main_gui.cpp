@@ -19,8 +19,14 @@
 #define GUI_DARK_STYLE_IMPLEMENTATION
 #include "style_dark.h"
 
+// LicenseSeat SDK
+#include <licenseseat/licenseseat.hpp>
+#include <licenseseat/events.hpp>
+
 #include <string>
 #include <cstring>
+#include <memory>
+#include <mutex>
 
 // Toast notification
 struct Toast {
@@ -64,7 +70,10 @@ struct Toast {
 
 // App state
 struct AppState {
-    // License state (will be controlled by LicenseSeat SDK later)
+    // LicenseSeat SDK client
+    std::unique_ptr<licenseseat::Client> sdk;
+
+    // License state (driven by SDK events)
     bool licensed = false;
     std::string license_key;
     std::string plan_name = "Free";
@@ -75,6 +84,7 @@ struct AppState {
     bool has_batch_export = false;
     bool has_cloud_sync = false;
     bool has_raw_support = false;
+    bool has_updates = false;
 
     // UI state
     bool show_license_modal = false;
@@ -87,12 +97,286 @@ struct AppState {
     bool image_loaded = false;
     std::string image_name = "sample.jpg";
 
-    // Toast notifications
+    // Toast notifications (thread-safe queue)
     Toast toast;
+    std::mutex toast_mutex;
+    std::string pending_toast_msg;
+    Color pending_toast_color = WHITE;
+    bool has_pending_toast = false;
+
+    // Queue a toast from any thread (processed in main loop)
+    void queue_toast(const std::string& msg, Color col = WHITE) {
+        std::lock_guard<std::mutex> lock(toast_mutex);
+        pending_toast_msg = msg;
+        pending_toast_color = col;
+        has_pending_toast = true;
+    }
+
+    // Process queued toast on main thread
+    void process_pending_toast() {
+        std::lock_guard<std::mutex> lock(toast_mutex);
+        if (has_pending_toast) {
+            toast.show(pending_toast_msg.c_str(), pending_toast_color);
+            has_pending_toast = false;
+        }
+    }
+
+    // Initialize SDK with event handlers
+    void init_sdk() {
+        licenseseat::Config config;
+        config.api_key = "pk_test_9cXtKvf6rt2swMYJcg4ykiVyKFxFjWHri";
+        config.product_slug = "imagetool-demo";
+        config.api_url = "http://localhost:3000/api/v1";
+        config.timeout_seconds = 3;
+        config.verify_ssl = false;
+        config.debug = true;
+
+        // Storage for offline cache + license key persistence
+        config.storage_path = "/tmp/imagetool_demo";
+
+        // App info for telemetry
+        config.app_version = "1.0.0";
+        config.app_build = "100";
+
+        // Fast intervals for development
+        config.auto_validate_interval = 30.0;
+        config.heartbeat_interval = 30;
+        config.network_recheck_interval = 10.0;
+
+        sdk = std::make_unique<licenseseat::Client>(config);
+
+        // Subscribe to SDK events
+        setup_event_handlers();
+    }
+
+    void setup_event_handlers() {
+        // === License Lifecycle Events ===
+        sdk->on(licenseseat::events::LICENSE_LOADED, [this](const std::any&) {
+            queue_toast("License loaded from cache", SKYBLUE);
+        });
+
+        sdk->on(licenseseat::events::LICENSE_REVOKED, [this](const std::any&) {
+            licensed = false;
+            reset_entitlements();
+            license_status = "License revoked";
+            queue_toast("License has been revoked!", MAROON);
+        });
+
+        // === Activation Events ===
+        sdk->on(licenseseat::events::ACTIVATION_START, [this](const std::any&) {
+            license_status = "Activating...";
+        });
+
+        sdk->on(licenseseat::events::ACTIVATION_SUCCESS, [this](const std::any&) {
+            license_status = "Activated!";
+        });
+
+        sdk->on(licenseseat::events::ACTIVATION_ERROR, [this](const std::any&) {
+            queue_toast("Activation failed", MAROON);
+        });
+
+        // === Validation Events ===
+        sdk->on(licenseseat::events::VALIDATION_START, [this](const std::any&) {
+            // Validation starting (could show spinner)
+        });
+
+        sdk->on(licenseseat::events::VALIDATION_SUCCESS, [this](const std::any&) {
+            // Online validation succeeded
+        });
+
+        sdk->on(licenseseat::events::VALIDATION_FAILED, [this](const std::any&) {
+            licensed = false;
+            reset_entitlements();
+            license_status = "License invalid";
+            queue_toast("License validation failed", MAROON);
+        });
+
+        sdk->on(licenseseat::events::VALIDATION_ERROR, [this](const std::any&) {
+            queue_toast("Validation error", ORANGE);
+        });
+
+        sdk->on(licenseseat::events::VALIDATION_AUTH_FAILED, [this](const std::any&) {
+            queue_toast("Authentication failed", MAROON);
+        });
+
+        sdk->on(licenseseat::events::VALIDATION_OFFLINE_SUCCESS, [this](const std::any&) {
+            queue_toast("Offline validation OK", ORANGE);
+        });
+
+        sdk->on(licenseseat::events::VALIDATION_OFFLINE_FAILED, [this](const std::any&) {
+            licensed = false;
+            reset_entitlements();
+            license_status = "Offline validation failed";
+            queue_toast("Offline validation failed", MAROON);
+        });
+
+        sdk->on(licenseseat::events::VALIDATION_AUTO_FAILED, [this](const std::any&) {
+            queue_toast("Auto-validation failed", ORANGE);
+        });
+
+        // === Deactivation Events ===
+        sdk->on(licenseseat::events::DEACTIVATION_START, [this](const std::any&) {
+            license_status = "Deactivating...";
+        });
+
+        sdk->on(licenseseat::events::DEACTIVATION_SUCCESS, [this](const std::any&) {
+            license_status = "Deactivated";
+        });
+
+        sdk->on(licenseseat::events::DEACTIVATION_ERROR, [this](const std::any&) {
+            queue_toast("Deactivation error", ORANGE);
+        });
+
+        // === Network Events ===
+        sdk->on(licenseseat::events::NETWORK_ONLINE, [this](const std::any&) {
+            queue_toast("Back online", GREEN);
+        });
+
+        sdk->on(licenseseat::events::NETWORK_OFFLINE, [this](const std::any&) {
+            queue_toast("Switched to offline mode", ORANGE);
+        });
+
+        // === Auto-Validation Events ===
+        sdk->on(licenseseat::events::AUTOVALIDATION_CYCLE, [this](const std::any&) {
+            // Auto-validation cycle completed (silent)
+        });
+
+        sdk->on(licenseseat::events::AUTOVALIDATION_STOPPED, [this](const std::any&) {
+            // Auto-validation stopped (silent)
+        });
+
+        // === Offline Token Events ===
+        sdk->on(licenseseat::events::OFFLINE_TOKEN_FETCHING, [this](const std::any&) {
+            // Fetching offline token (silent)
+        });
+
+        sdk->on(licenseseat::events::OFFLINE_TOKEN_FETCHED, [this](const std::any&) {
+            queue_toast("Offline token synced", GREEN);
+        });
+
+        sdk->on(licenseseat::events::OFFLINE_TOKEN_FETCH_ERROR, [this](const std::any&) {
+            queue_toast("Failed to sync offline token", ORANGE);
+        });
+
+        sdk->on(licenseseat::events::OFFLINE_TOKEN_READY, [this](const std::any&) {
+            // Offline token ready (silent)
+        });
+
+        sdk->on(licenseseat::events::OFFLINE_TOKEN_VERIFIED, [this](const std::any&) {
+            // Offline token verified (silent)
+        });
+
+        sdk->on(licenseseat::events::OFFLINE_TOKEN_VERIFICATION_FAILED, [this](const std::any&) {
+            queue_toast("Offline token invalid", MAROON);
+        });
+
+        // === Heartbeat Events ===
+        sdk->on(licenseseat::events::HEARTBEAT_SUCCESS, [this](const std::any&) {
+            // Heartbeat success (silent)
+        });
+
+        sdk->on(licenseseat::events::HEARTBEAT_ERROR, [this](const std::any&) {
+            // Heartbeat failed (silent - network issues are reported separately)
+        });
+
+        // === SDK Events ===
+        sdk->on(licenseseat::events::SDK_RESET, [this](const std::any&) {
+            licensed = false;
+            reset_entitlements();
+            license_key.clear();
+            plan_name = "Free";
+        });
+
+        sdk->on(licenseseat::events::SDK_ERROR, [this](const std::any&) {
+            queue_toast("SDK error", MAROON);
+        });
+    }
+
+    void enable_all_entitlements() {
+        has_pro_filters = true;
+        has_batch_export = true;
+        has_cloud_sync = true;
+        has_raw_support = true;
+        has_updates = true;
+    }
+
+    void reset_entitlements() {
+        has_pro_filters = false;
+        has_batch_export = false;
+        has_cloud_sync = false;
+        has_raw_support = false;
+        has_updates = false;
+    }
+
+    // Update entitlements from license (if specific entitlements are defined)
+    void update_entitlements_from_license(const licenseseat::License& license) {
+        reset_entitlements();
+
+        for (const auto& ent : license.active_entitlements()) {
+            if (ent.key == "pro_filters") has_pro_filters = true;
+            else if (ent.key == "batch_export") has_batch_export = true;
+            else if (ent.key == "cloud_sync") has_cloud_sync = true;
+            else if (ent.key == "raw_support") has_raw_support = true;
+            else if (ent.key == "updates") has_updates = true;
+        }
+
+        // If no specific entitlements but license valid, enable all (full Pro)
+        if (license.is_valid() && license.active_entitlements().empty()) {
+            enable_all_entitlements();
+        }
+    }
+
+    // Restore license on startup using SDK
+    void restore_on_startup() {
+        auto result = sdk->restore_license();
+
+        switch (result.status) {
+            case licenseseat::ClientStatus::Active:
+                // Online validated
+                licensed = true;
+                if (result.license) {
+                    license_key = result.license->key();
+                    plan_name = result.license->plan_key().empty() ? "Pro" : result.license->plan_key();
+                    update_entitlements_from_license(*result.license);
+                    strncpy(key_input, license_key.c_str(), 63);
+                }
+                toast.show("License verified", GREEN);
+                break;
+
+            case licenseseat::ClientStatus::OfflineValid:
+                // Offline validated
+                licensed = true;
+                if (result.license) {
+                    license_key = result.license->key();
+                    plan_name = result.license->plan_key().empty() ? "Pro" : result.license->plan_key();
+                    update_entitlements_from_license(*result.license);
+                    strncpy(key_input, license_key.c_str(), 63);
+                }
+                toast.show("Loaded from offline cache", ORANGE);
+                break;
+
+            case licenseseat::ClientStatus::OfflineInvalid:
+                // Offline validation failed
+                toast.show("Offline validation failed", MAROON, 4.0f);
+                break;
+
+            case licenseseat::ClientStatus::Invalid:
+                // License invalid/revoked
+                toast.show("License is no longer valid", MAROON, 4.0f);
+                break;
+
+            case licenseseat::ClientStatus::Inactive:
+                // No cached license
+                break;
+
+            case licenseseat::ClientStatus::Pending:
+                // Should not happen for sync call
+                break;
+        }
+    }
 };
 
 void DrawLicenseStatus(AppState& state, int x, int y) {
-    // Compact badge
     int badgeW = 140;
     int badgeH = 44;
     Rectangle badge = { (float)x, (float)y, (float)badgeW, (float)badgeH };
@@ -110,30 +394,64 @@ void DrawLicenseStatus(AppState& state, int x, int y) {
     }
 }
 
+void DrawConnectionStatus(AppState& state, int x, int y) {
+    if (!state.sdk) return;
+
+    auto status = state.sdk->get_client_status();
+    bool is_online = state.sdk->is_online();
+
+    Color statusColor;
+    const char* statusText;
+    const char* modeText = "";
+
+    switch (status) {
+        case licenseseat::ClientStatus::Active:
+            statusColor = GREEN;
+            statusText = "Online";
+            modeText = "(live)";
+            break;
+        case licenseseat::ClientStatus::OfflineValid:
+            statusColor = ORANGE;
+            statusText = "Offline";
+            modeText = "(cached)";
+            break;
+        case licenseseat::ClientStatus::OfflineInvalid:
+            statusColor = MAROON;
+            statusText = "Offline";
+            modeText = "(invalid)";
+            break;
+        default:
+            statusColor = is_online ? GRAY : ORANGE;
+            statusText = is_online ? "Online" : "Offline";
+            break;
+    }
+
+    DrawCircle(x + 6, y + 8, 5, statusColor);
+    DrawText(statusText, x + 16, y, 12, statusColor);
+
+    if (state.licensed && modeText[0] != '\0') {
+        DrawText(modeText, x + 16, y + 14, 10, GRAY);
+    }
+}
+
 bool DrawFeatureButton(const char* label, bool enabled, bool is_pro, int x, int y, int w, int h, AppState& state) {
     Rectangle btn = { (float)x, (float)y, (float)w, (float)h };
     bool clicked = false;
 
     if (is_pro && !enabled) {
-        // Locked pro feature - custom draw + simple click detection
         bool hover = CheckCollisionPointRec(GetMousePosition(), btn);
 
-        // Background
         Color bg = hover ? GetColor(0x3a3a3aff) : GetColor(0x2a2a2aff);
         DrawRectangleRec(btn, bg);
         DrawRectangleLinesEx(btn, 1, GetColor(0x4a4a4aff));
-
-        // Label
         DrawText(label, x + 10, y + (h - 14) / 2, 14, GetColor(0x909090ff));
 
-        // PRO badge
         int badgeX = x + w - 42;
         int badgeY = y + (h - 16) / 2;
         DrawRectangle(badgeX, badgeY, 36, 16, ColorAlpha(GOLD, 0.3f));
         DrawRectangleLinesEx({(float)badgeX, (float)badgeY, 36, 16}, 1, GOLD);
         DrawText("PRO", badgeX + 6, badgeY + 2, 10, GOLD);
 
-        // Click on RELEASE (like GuiButton)
         if (hover && IsMouseButtonReleased(MOUSE_LEFT_BUTTON)) {
             state.show_upgrade_modal = true;
             state.upgrade_feature = label;
@@ -158,14 +476,13 @@ void DrawUpgradeModal(AppState& state) {
     DrawRectangleLinesEx({(float)x, (float)y, (float)w, (float)h}, 2, GOLD);
 
     DrawText("Pro Feature Required", x + 20, y + 20, 20, GOLD);
-
     DrawText(TextFormat("\"%s\" needs a Pro license.", state.upgrade_feature.c_str()),
              x + 20, y + 55, 14, LIGHTGRAY);
 
     DrawText("Upgrade to unlock all features:", x + 20, y + 85, 14, GRAY);
-    DrawText("• Professional filters", x + 30, y + 108, 13, GRAY);
-    DrawText("• Batch processing", x + 30, y + 125, 13, GRAY);
-    DrawText("• Cloud sync", x + 30, y + 142, 13, GRAY);
+    DrawText("* Professional filters", x + 30, y + 108, 13, GRAY);
+    DrawText("* Batch processing", x + 30, y + 125, 13, GRAY);
+    DrawText("* Cloud sync", x + 30, y + 142, 13, GRAY);
 
     if (GuiButton({(float)(x + 20), (float)(y + h - 50), 130, 34}, "Activate")) {
         state.show_upgrade_modal = false;
@@ -182,7 +499,7 @@ void DrawLicenseModal(AppState& state) {
 
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), ColorAlpha(BLACK, 0.7f));
 
-    int w = 460, h = 280;
+    int w = 520, h = 280;
     int x = (GetScreenWidth() - w) / 2;
     int y = (GetScreenHeight() - h) / 2;
 
@@ -192,10 +509,35 @@ void DrawLicenseModal(AppState& state) {
     DrawText("Activate License", x + 20, y + 20, 20, WHITE);
     DrawText("Enter your license key:", x + 20, y + 55, 14, LIGHTGRAY);
 
-    Rectangle inputBox = { (float)(x + 20), (float)(y + 80), (float)(w - 40), 34 };
+    // Clear button
+    if (GuiButton({(float)(x + w - 160), (float)(y + 80), 55, 34}, "Clear")) {
+        memset(state.key_input, 0, sizeof(state.key_input));
+    }
+
+    // Paste button
+    if (GuiButton({(float)(x + w - 95), (float)(y + 80), 75, 34}, "Paste")) {
+        const char* clipboard = GetClipboardText();
+        if (clipboard) {
+            strncpy(state.key_input, clipboard, 63);
+            state.key_input[63] = '\0';
+        }
+    }
+
+    // Cmd+V / Ctrl+V paste shortcut
+    bool cmdOrCtrl = IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER) ||
+                     IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    if (cmdOrCtrl && IsKeyPressed(KEY_V)) {
+        const char* clipboard = GetClipboardText();
+        if (clipboard) {
+            strncpy(state.key_input, clipboard, 63);
+            state.key_input[63] = '\0';
+        }
+    }
+
+    Rectangle inputBox = { (float)(x + 20), (float)(y + 80), (float)(w - 190), 34 };
     GuiTextBox(inputBox, state.key_input, 64, true);
 
-    DrawText("Tip: Use 'DEMO-PRO-1234' to test Pro features", x + 20, y + 122, 12, GRAY);
+    DrawText("Enter a valid LicenseSeat license key", x + 20, y + 122, 12, GRAY);
 
     if (!state.license_status.empty()) {
         Color statusColor = state.licensed ? GREEN : MAROON;
@@ -205,37 +547,95 @@ void DrawLicenseModal(AppState& state) {
     if (GuiButton({(float)(x + 20), (float)(y + h - 55), 120, 36}, "Activate")) {
         std::string key(state.key_input);
 
-        // TODO: Replace with LicenseSeat SDK call
-        if (key == "DEMO-PRO-1234" || key == "demo") {
-            state.licensed = true;
-            state.license_key = key;
-            state.plan_name = "Pro Annual";
-            state.license_status = "License activated!";
-            state.has_pro_filters = true;
-            state.has_batch_export = true;
-            state.has_cloud_sync = true;
-            state.has_raw_support = true;
-            state.toast.show("Pro license activated!", GREEN);
-        } else if (!key.empty()) {
-            state.license_status = "Invalid license key";
-            state.toast.show("Invalid license key", MAROON);
+        if (!key.empty() && state.sdk) {
+            auto result = state.sdk->activate(key);
+
+            // Treat DeviceAlreadyActivated as success - device is already good
+            bool activation_ok = result.is_ok() ||
+                result.error_code() == licenseseat::ErrorCode::DeviceAlreadyActivated;
+
+            if (activation_ok) {
+                // Validate to get full license details
+                auto validate_result = state.sdk->validate(key);
+
+                if (validate_result.is_ok()) {
+                    const auto& validation = validate_result.value();
+                    const auto& license = validation.license;
+
+                    state.plan_name = license.plan_key().empty() ? "Pro" : license.plan_key();
+
+                    // Valid license = full Pro access (demo app enables all features)
+                    // In production, you'd check specific entitlements from license.active_entitlements()
+                    state.enable_all_entitlements();
+
+                    state.licensed = true;
+                    state.license_key = key;
+                    state.license_status = validation.valid ? "License activated!" : validation.message;
+                    state.toast.show("Pro license activated!", GREEN);
+
+                    // SDK handles: heartbeat, auto-validation, offline sync
+                    state.sdk->start_heartbeat(key);
+                    state.sdk->start_auto_validation(key);
+                    state.sdk->sync_offline_assets();
+                } else {
+                    // Validation failed but activation worked - enable features anyway
+                    state.enable_all_entitlements();
+                    state.licensed = true;
+                    state.license_key = key;
+                    state.license_status = "Activated (offline)";
+                    state.toast.show("License activated!", GREEN);
+
+                    state.sdk->start_heartbeat(key);
+                    state.sdk->start_auto_validation(key);
+                    state.sdk->sync_offline_assets();
+                }
+            } else {
+                std::string error_msg = result.error_message();
+                if (error_msg.empty()) error_msg = "Activation failed";
+                state.license_status = error_msg;
+                state.toast.show(error_msg.c_str(), MAROON);
+            }
+        } else if (key.empty()) {
+            state.license_status = "Please enter a license key";
         }
     }
 
-    if (GuiButton({(float)(x + 150), (float)(y + h - 55), 120, 36}, "Deactivate")) {
+    if (GuiButton({(float)(x + 150), (float)(y + h - 55), 110, 36}, "Deactivate")) {
+        if (state.sdk && !state.license_key.empty()) {
+            (void)state.sdk->deactivate(state.license_key, state.sdk->device_id());
+        }
+
+        // SDK reset clears all state and stops timers
+        if (state.sdk) {
+            state.sdk->reset();
+        }
+
         state.licensed = false;
         state.license_key.clear();
         state.plan_name = "Free";
         state.license_status = "Deactivated";
-        state.has_pro_filters = false;
-        state.has_batch_export = false;
-        state.has_cloud_sync = false;
-        state.has_raw_support = false;
+        state.reset_entitlements();
         memset(state.key_input, 0, sizeof(state.key_input));
         state.toast.show("License deactivated", GRAY);
     }
 
-    if (GuiButton({(float)(x + w - 90), (float)(y + h - 55), 70, 36}, "Close")) {
+    // Clear All Data button - resets SDK and clears all cached license data
+    if (GuiButton({(float)(x + 270), (float)(y + h - 55), 110, 36}, "Clear Data")) {
+        if (state.sdk) {
+            // SDK reset clears all cached data, stops timers, emits SDK_RESET event
+            state.sdk->reset();
+        }
+
+        state.licensed = false;
+        state.license_key.clear();
+        state.plan_name = "Free";
+        state.license_status = "All data cleared";
+        state.reset_entitlements();
+        memset(state.key_input, 0, sizeof(state.key_input));
+        state.toast.show("All license data cleared", ORANGE);
+    }
+
+    if (GuiButton({(float)(x + w - 80), (float)(y + h - 55), 60, 36}, "Close")) {
         state.show_license_modal = false;
     }
 }
@@ -254,9 +654,9 @@ void DrawAboutModal(AppState& state) {
 
     DrawText("About ImageTool Pro", x + 20, y + 20, 18, WHITE);
     DrawText("Version 1.0.0", x + 20, y + 50, 14, GRAY);
-    DrawText("A demo app showcasing LicenseSeat SDK", x + 20, y + 75, 13, LIGHTGRAY);
-    DrawText("integration for C++ applications.", x + 20, y + 92, 13, LIGHTGRAY);
-    DrawText("Built with raylib + raygui", x + 20, y + 120, 12, GRAY);
+    DrawText("Demo app with LicenseSeat SDK integration", x + 20, y + 75, 13, LIGHTGRAY);
+    DrawText("for license validation & entitlements.", x + 20, y + 92, 13, LIGHTGRAY);
+    DrawText("Built with raylib + raygui + LicenseSeat", x + 20, y + 120, 12, GRAY);
 
     if (GuiButton({(float)(x + w - 90), (float)(y + h - 50), 70, 34}, "Close")) {
         state.show_about_modal = false;
@@ -272,27 +672,27 @@ int main() {
     SetWindowMinSize(800, 600);
     SetTargetFPS(60);
 
-    // Just use the dark style with its pixel font
     GuiLoadStyleDark();
     GuiSetStyle(DEFAULT, TEXT_SIZE, 16);
     GuiSetStyle(DEFAULT, TEXT_SPACING, 1);
 
-    Font customFont = { 0 };  // Not used, kept for cleanup code
-
     AppState state;
+    state.init_sdk();
+
+    // Restore license on startup - SDK handles online/offline automatically
+    state.restore_on_startup();
 
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
         state.toast.update(dt);
+        state.process_pending_toast();
 
         int w = GetScreenWidth();
         int h = GetScreenHeight();
 
-        // Reset raygui state each frame
         GuiUnlock();
         GuiSetState(STATE_NORMAL);
 
-        // Check if any modal is open (to skip main UI interaction)
         bool modalOpen = state.show_license_modal || state.show_upgrade_modal || state.show_about_modal;
 
         BeginDrawing();
@@ -306,7 +706,7 @@ int main() {
         DrawText("ImageTool Pro", 20, 17, 20, WHITE);
         DrawText("v1.0.0", 165, 22, 12, GRAY);
 
-        // License badge (top right, compact)
+        DrawConnectionStatus(state, w - 280, 15);
         DrawLicenseStatus(state, w - 160, 5);
 
         // === Sidebar ===
@@ -323,7 +723,6 @@ int main() {
         DrawText("BASIC TOOLS", btnX, btnY, 11, GRAY);
         btnY += 22;
 
-        // Lock GUI if modal is open (so sidebar buttons don't respond)
         if (modalOpen) GuiLock();
 
         if (DrawFeatureButton("Open Image", true, false, btnX, btnY, btnW, btnH, state)) {
@@ -374,11 +773,23 @@ int main() {
         if (DrawFeatureButton("RAW Support", state.has_raw_support, true, btnX, btnY, btnW, btnH, state)) {
             state.toast.show("RAW file loaded", GOLD);
         }
+        btnY += btnGap + 14;
+
+        DrawText("UPDATES", btnX, btnY, 11, SKYBLUE);
+        btnY += 22;
+
+        if (DrawFeatureButton("Check Updates", state.has_updates, true, btnX, btnY, btnW, btnH, state)) {
+            state.toast.show("You're on the latest version!", SKYBLUE);
+        }
 
         // Bottom buttons
         int bottomY = h - 28 - 90;
         if (GuiButton({(float)btnX, (float)bottomY, (float)btnW, 32},
                       state.licensed ? "Manage License" : "Activate License")) {
+            if (!state.license_key.empty()) {
+                strncpy(state.key_input, state.license_key.c_str(), 63);
+                state.key_input[63] = '\0';
+            }
             state.show_license_modal = true;
         }
 
@@ -429,7 +840,44 @@ int main() {
         const char* statusTxt = state.licensed ? "Pro License Active" : "Free Edition";
         DrawText(statusTxt, 12, statusY + 7, 12, GRAY);
 
-        // === Modals (unlock first so modal buttons work) ===
+        // SDK Status in bottom right
+        if (state.sdk) {
+            auto clientStatus = state.sdk->get_client_status();
+            const char* sdkStatusText = "";
+            Color sdkStatusColor = GRAY;
+
+            switch (clientStatus) {
+                case licenseseat::ClientStatus::Active:
+                    sdkStatusText = "SDK: Active";
+                    sdkStatusColor = GREEN;
+                    break;
+                case licenseseat::ClientStatus::OfflineValid:
+                    sdkStatusText = "SDK: Offline (Valid)";
+                    sdkStatusColor = ORANGE;
+                    break;
+                case licenseseat::ClientStatus::OfflineInvalid:
+                    sdkStatusText = "SDK: Offline (Invalid)";
+                    sdkStatusColor = MAROON;
+                    break;
+                case licenseseat::ClientStatus::Inactive:
+                    sdkStatusText = "SDK: Inactive";
+                    sdkStatusColor = GRAY;
+                    break;
+                case licenseseat::ClientStatus::Invalid:
+                    sdkStatusText = "SDK: Invalid";
+                    sdkStatusColor = MAROON;
+                    break;
+                case licenseseat::ClientStatus::Pending:
+                    sdkStatusText = "SDK: Pending...";
+                    sdkStatusColor = SKYBLUE;
+                    break;
+            }
+
+            int sdkTextWidth = MeasureText(sdkStatusText, 12);
+            DrawText(sdkStatusText, w - sdkTextWidth - 12, statusY + 7, 12, sdkStatusColor);
+        }
+
+        // === Modals ===
         GuiUnlock();
         DrawUpgradeModal(state);
         DrawLicenseModal(state);
@@ -441,7 +889,6 @@ int main() {
         EndDrawing();
     }
 
-    if (customFont.glyphCount > 0) UnloadFont(customFont);
     CloseWindow();
     return 0;
 }

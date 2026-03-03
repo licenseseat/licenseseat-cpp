@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
+# Add parent LicenseSeat SDK
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_CURRENT_BINARY_DIR}/licenseseat)
+
 # Fetch raylib
 FetchContent_Declare(
     raylib
@@ -49,12 +52,13 @@ add_executable(imagetool_demo MACOSX_BUNDLE
     ${APP_FONT}
 )
 
-target_link_libraries(imagetool_demo PRIVATE raylib)
+target_link_libraries(imagetool_demo PRIVATE raylib licenseseat::licenseseat)
 
-# Include raygui header
+# Include raygui header and SDK
 target_include_directories(imagetool_demo PRIVATE
     ${raygui_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}  # For style_dark.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include  # LicenseSeat SDK headers
 )
 
 # Platform-specific
