@@ -153,6 +153,35 @@ enum class LicenseStatus {
     Unknown
 };
 
+/// Client status (overall SDK state)
+enum class ClientStatus {
+    Active,         // Online validated license
+    OfflineValid,   // Offline verified license
+    OfflineInvalid, // Offline validation failed
+    Inactive,       // No license / not activated
+    Invalid,        // Validation failed (online)
+    Pending         // Validation in progress
+};
+
+/// Convert client status to string
+[[nodiscard]] constexpr const char* client_status_to_string(ClientStatus status) noexcept {
+    switch (status) {
+        case ClientStatus::Active:
+            return "active";
+        case ClientStatus::OfflineValid:
+            return "offline_valid";
+        case ClientStatus::OfflineInvalid:
+            return "offline_invalid";
+        case ClientStatus::Inactive:
+            return "inactive";
+        case ClientStatus::Invalid:
+            return "invalid";
+        case ClientStatus::Pending:
+            return "pending";
+    }
+    return "unknown";
+}
+
 /// Convert license status to string
 [[nodiscard]] constexpr const char* license_status_to_string(LicenseStatus status) noexcept {
     switch (status) {
@@ -672,7 +701,7 @@ struct Config {
     // ========== Auto-Validation Settings ==========
 
     /// Interval for automatic re-validation in seconds (0 to disable)
-    double auto_validate_interval = 300.0;  // 5 minutes
+    double auto_validate_interval = 3600.0;  // 1 hour (matches Swift SDK)
 
     /// Interval for network status checks when offline (seconds)
     double network_recheck_interval = 30.0;
@@ -682,14 +711,14 @@ struct Config {
     /// Offline fallback mode
     OfflineFallbackMode offline_fallback_mode = OfflineFallbackMode::NetworkOnly;
 
-    /// Maximum days to allow offline operation (0 = unlimited)
-    int max_offline_days = 30;
+    /// Maximum days to allow offline operation (0 = disabled/unlimited)
+    int max_offline_days = 0;  // Disabled by default (matches Swift SDK)
 
     /// Maximum clock skew allowed in milliseconds (for tamper detection)
-    double max_clock_skew_ms = 86400000.0;  // 24 hours
+    double max_clock_skew_ms = 300000.0;  // 5 minutes (matches Swift SDK)
 
     /// Interval for refreshing offline license (seconds)
-    double offline_license_refresh_interval = 86400.0;  // 24 hours
+    double offline_license_refresh_interval = 259200.0;  // 3 days (matches Swift SDK)
 
     // ========== Heartbeat Settings ==========
 
@@ -726,6 +755,20 @@ struct ValidationResult {
     std::optional<Activation> activation;  // Present when device was validated
 };
 
+/**
+ * @brief Result of restore_license() operation
+ *
+ * Provides comprehensive information about the session restore attempt,
+ * including whether the restore was successful, the current client status,
+ * the restored license (if any), and a descriptive message.
+ */
+struct RestoreResult {
+    bool success = false;          // Whether license was successfully restored
+    ClientStatus status = ClientStatus::Inactive;  // Current client status
+    std::optional<License> license;  // The restored license (if successful)
+    std::string message;           // Human-readable status message
+};
+
 // Forward declarations for callback types
 class Subscription;
 using EventHandler = std::function<void(const std::any&)>;
@@ -734,6 +777,7 @@ using ActivationCallback = std::function<void(Result<Activation>)>;
 using DeactivationCallback = std::function<void(Result<Deactivation>)>;
 using OfflineTokenCallback = std::function<void(Result<OfflineToken>)>;
 using HeartbeatCallback = std::function<void(Result<HeartbeatResponse>)>;
+using RestoreCallback = std::function<void(RestoreResult)>;
 
 /**
  * @brief Entitlement check result
@@ -918,6 +962,26 @@ class Client {
     /// Check if the heartbeat timer is running
     [[nodiscard]] bool is_heartbeat_running() const;
 
+    // ========== Session Restore ==========
+
+    /// Restore license from cached data
+    ///
+    /// This method handles the complete session restore flow:
+    /// 1. Load cached license key from storage
+    /// 2. Check connectivity via health()
+    /// 3. If online: validate with server
+    /// 4. If offline: verify cached offline token
+    /// 5. Start appropriate timers (auto-validation, heartbeat, offline refresh)
+    ///
+    /// Call this on application startup to restore the previous session.
+    ///
+    /// @return RestoreResult with success status, client status, and restored license
+    [[nodiscard]] RestoreResult restore_license();
+
+    /// Restore license asynchronously
+    /// @param callback Called when restore completes
+    void restore_license_async(RestoreCallback callback);
+
     // ========== Status & State ==========
 
     /// Get the current license status based on cached data
@@ -932,6 +996,9 @@ class Client {
 
     /// Check if the client is online (network available)
     [[nodiscard]] bool is_online() const;
+
+    /// Get the current client status
+    [[nodiscard]] ClientStatus get_client_status() const;
 
     // ========== Event Handling ==========
 

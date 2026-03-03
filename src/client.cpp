@@ -7,9 +7,11 @@
 #include "licenseseat/storage.hpp"
 #include "licenseseat/telemetry.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -61,6 +63,11 @@ class Client::Impl {
     ~Impl() {
         stop_heartbeat();
         stop_auto_validation();
+        stop_network_recheck();
+        stop_offline_refresh();
+
+        // Wait for all pending async operations to complete
+        wait_for_pending_futures();
     }
 
     // ========== Synchronous API ==========
@@ -90,12 +97,45 @@ class Client::Impl {
             "/products/" + config_.product_slug + "/licenses/" + license_key + "/validate", body);
 
         if (!response.success) {
+            // Check for authentication failure (401) - emit auth-failed event (matches Swift SDK)
+            if (response.status_code == 401 || response.status_code == 501) {
+                auto err = handle_error_response<ValidationResult>(response);
+                event_bus_.emit(events::VALIDATION_AUTH_FAILED,
+                                std::map<std::string, std::string>{
+                                    {"licenseKey", license_key},
+                                    {"error", err.error_message()},
+                                    {"cached", cached_license_.has_value() ? "true" : "false"}});
+                event_bus_.emit(events::VALIDATION_ERROR,
+                                std::map<std::string, std::string>{{"error", err.error_message()}});
+                return err;
+            }
+
+            // Check if this is a revocation (4xx error except 401/429)
+            if (is_revocation_error(response)) {
+                purge_cache_on_revocation();
+                auto err = handle_error_response<ValidationResult>(response);
+                event_bus_.emit(events::LICENSE_REVOKED,
+                                std::map<std::string, std::string>{{"reason", err.error_message()}});
+                return err;
+            }
+
             // Check if we should fallback to offline
             if (should_fallback_to_offline(response)) {
                 auto offline_result = verify_cached_offline();
                 if (offline_result.is_ok() && offline_result.value().valid) {
+                    // Update cached state so get_client_status() returns OfflineValid
+                    cached_validation_ = offline_result.value();
+                    is_online_ = false;
+                    event_bus_.emit(events::NETWORK_OFFLINE, std::map<std::string, std::string>{});
                     event_bus_.emit(events::VALIDATION_OFFLINE_SUCCESS, offline_result.value());
+
+                    // Start network recheck to auto-reconnect when server is back
+                    start_network_recheck();
+
                     return offline_result;
+                } else if (offline_result.is_ok()) {
+                    // Emit offline-failed event (matches Swift SDK)
+                    event_bus_.emit(events::VALIDATION_OFFLINE_FAILED, offline_result.value());
                 }
             }
 
@@ -117,6 +157,14 @@ class Client::Impl {
         try {
             auto j = nlohmann::json::parse(response.body);
             auto result = json::parse_validation_result(j);
+
+            // Check for revocation (valid: false with code: "revoked" or "suspended")
+            if (!result.valid && is_revocation_code(result.code)) {
+                purge_cache_on_revocation();
+                event_bus_.emit(events::LICENSE_REVOKED,
+                                std::map<std::string, std::string>{{"code", result.code},
+                                                                    {"message", result.message}});
+            }
 
             // Cache the result
             if (result.valid) {
@@ -265,33 +313,36 @@ class Client::Impl {
 
     void validate_async(const std::string& license_key, AsyncCallback callback,
                         const std::string& device_id) {
-        std::thread([this, license_key, callback, device_id]() {
+        auto future = std::async(std::launch::async, [this, license_key, callback, device_id]() {
             auto result = this->validate(license_key, device_id);
             if (callback) {
                 callback(std::move(result));
             }
-        }).detach();
+        });
+        store_future(std::move(future));
     }
 
     void activate_async(const std::string& license_key, ActivationCallback callback,
                         const std::string& device_id, const std::string& device_name,
                         const Metadata& metadata) {
-        std::thread([this, license_key, callback, device_id, device_name, metadata]() {
+        auto future = std::async(std::launch::async, [this, license_key, callback, device_id, device_name, metadata]() {
             auto result = this->activate(license_key, device_id, device_name, metadata);
             if (callback) {
                 callback(std::move(result));
             }
-        }).detach();
+        });
+        store_future(std::move(future));
     }
 
     void deactivate_async(const std::string& license_key, DeactivationCallback callback,
                           const std::string& device_id) {
-        std::thread([this, license_key, callback, device_id]() {
+        auto future = std::async(std::launch::async, [this, license_key, callback, device_id]() {
             auto result = this->deactivate(license_key, device_id);
             if (callback) {
                 callback(std::move(result));
             }
-        }).detach();
+        });
+        store_future(std::move(future));
     }
 
     // ========== Heartbeat ==========
@@ -343,12 +394,13 @@ class Client::Impl {
 
     void heartbeat_async(const std::string& license_key, HeartbeatCallback callback,
                          const std::string& device_id) {
-        std::thread([this, license_key, callback, device_id]() {
+        auto future = std::async(std::launch::async, [this, license_key, callback, device_id]() {
             auto result = this->heartbeat(license_key, device_id);
             if (callback) {
                 callback(std::move(result));
             }
-        }).detach();
+        });
+        store_future(std::move(future));
     }
 
     // ========== Offline Tokens ==========
@@ -481,7 +533,98 @@ class Client::Impl {
             return;
         }
         auto license_key = cached_license_->key();
-        std::thread([this, license_key]() { this->sync_offline_assets_impl(license_key, device_id_); }).detach();
+        auto future = std::async(std::launch::async, [this, license_key]() {
+            this->sync_offline_assets_impl(license_key, device_id_);
+        });
+        store_future(std::move(future));
+    }
+
+    // ========== Session Restore ==========
+
+    RestoreResult restore_license() {
+        // Step 1: Load cached license from storage
+        auto cached = storage_->get_license();
+        if (!cached || cached->license_key.empty()) {
+            RestoreResult result;
+            result.success = false;
+            result.status = ClientStatus::Inactive;
+            result.message = "No cached license found";
+            return result;
+        }
+
+        std::string license_key = cached->license_key;
+        std::string device_id = cached->device_id.empty() ? device_id_ : cached->device_id;
+
+        // Step 2: Check connectivity
+        auto health_result = health();
+        bool is_network_available = health_result.is_ok() && health_result.value();
+
+        if (is_network_available) {
+            // Step 3a: Online - validate with server
+            auto validation_result = validate(license_key, device_id);
+
+            RestoreResult result;
+            if (validation_result.is_ok() && validation_result.value().valid) {
+                result.success = true;
+                result.status = ClientStatus::Active;
+                result.license = validation_result.value().license;
+                result.message = "License restored and validated online";
+
+                // Start timers for ongoing license management
+                start_auto_validation(license_key);
+                start_heartbeat(license_key);
+                start_offline_refresh(license_key);
+            } else {
+                result.success = false;
+                result.status = ClientStatus::Invalid;
+                result.message = validation_result.is_ok()
+                                     ? validation_result.value().message
+                                     : validation_result.error_message();
+            }
+            return result;
+        } else {
+            // Step 3b: Offline - verify cached offline token
+            auto offline_result = verify_cached_offline();
+
+            RestoreResult result;
+            if (offline_result.is_ok() && offline_result.value().valid) {
+                result.success = true;
+                result.status = ClientStatus::OfflineValid;
+                result.license = cached->license_data;
+                result.message = "License restored from offline cache";
+
+                // Update cached state
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    cached_license_ = cached->license_data;
+                    cached_validation_ = offline_result.value();
+                }
+
+                // Start network recheck to detect when we come back online
+                start_network_recheck();
+            } else {
+                result.success = false;
+                // Use OfflineInvalid (not Invalid) for offline failures (matches Swift SDK)
+                result.status = ClientStatus::OfflineInvalid;
+                result.message = offline_result.is_ok()
+                                     ? "Offline token verification failed: " + offline_result.value().code
+                                     : offline_result.error_message();
+
+                // Start network recheck to detect when we come back online
+                start_network_recheck();
+            }
+            return result;
+        }
+    }
+
+    void restore_license_async(RestoreCallback callback) {
+        auto future = std::async(std::launch::async, [this, callback]() {
+            auto result = this->restore_license();
+            if (callback) {
+                callback(std::move(result));
+            }
+        });
+        store_future(std::move(future));
     }
 
     // ========== Auto-Validation ==========
@@ -497,6 +640,17 @@ class Client::Impl {
         current_auto_license_key_ = license_key;
 
         auto_validate_thread_ = std::thread([this, license_key]() {
+            // Emit first cycle information immediately (matches Swift SDK)
+            auto next_run = std::chrono::system_clock::now() +
+                            std::chrono::duration<double>(config_.auto_validate_interval);
+            auto next_run_unix = std::chrono::duration_cast<std::chrono::seconds>(
+                                     next_run.time_since_epoch())
+                                     .count();
+            event_bus_.emit(events::AUTOVALIDATION_CYCLE,
+                            std::map<std::string, std::string>{
+                                {"license_key", license_key},
+                                {"nextRunAt", std::to_string(next_run_unix)}});
+
             while (auto_validate_running_) {
                 std::unique_lock<std::mutex> lock(auto_validate_mutex_);
                 auto_validate_cv_.wait_for(
@@ -510,11 +664,29 @@ class Client::Impl {
                 // Perform validation
                 auto result = this->validate(license_key, "");
 
+                // Emit validation:auto-failed on error (matches Swift SDK)
+                if (result.is_error() || (result.is_ok() && !result.value().valid)) {
+                    event_bus_.emit(events::VALIDATION_AUTO_FAILED,
+                                    std::map<std::string, std::string>{
+                                        {"licenseKey", license_key},
+                                        {"error", result.is_error() ? result.error_message() : result.value().code}});
+                }
+
                 // Piggyback heartbeat (fire-and-forget, ignore errors)
                 (void)this->heartbeat(license_key, "");
 
-                event_bus_.emit(events::AUTOVALIDATION_CYCLE,
-                                std::map<std::string, std::string>{{"license_key", license_key}});
+                // Announce next scheduled run (matches Swift SDK)
+                if (auto_validate_running_) {
+                    auto next = std::chrono::system_clock::now() +
+                                std::chrono::duration<double>(config_.auto_validate_interval);
+                    auto next_unix = std::chrono::duration_cast<std::chrono::seconds>(
+                                         next.time_since_epoch())
+                                         .count();
+                    event_bus_.emit(events::AUTOVALIDATION_CYCLE,
+                                    std::map<std::string, std::string>{
+                                        {"license_key", license_key},
+                                        {"nextRunAt", std::to_string(next_unix)}});
+                }
             }
         });
     }
@@ -630,6 +802,25 @@ class Client::Impl {
     }
 
     bool is_online() const { return is_online_; }
+
+    ClientStatus get_client_status() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (!cached_validation_) {
+            return ClientStatus::Inactive;
+        }
+
+        if (cached_validation_->offline) {
+            // Differentiate between offline valid and offline invalid (matches Swift SDK)
+            return cached_validation_->valid ? ClientStatus::OfflineValid : ClientStatus::OfflineInvalid;
+        }
+
+        if (cached_validation_->valid) {
+            return ClientStatus::Active;
+        }
+
+        return ClientStatus::Invalid;
+    }
 
     // ========== Event Handling ==========
 
@@ -779,26 +970,46 @@ class Client::Impl {
     }
 
     Result<bool> health() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        Result<bool> result = Result<bool>::error(ErrorCode::Unknown, "");
+        bool was_online = is_online_;
+        bool should_start_recheck = false;
 
-        // New URL: /health
-        http::Request request;
-        request.method = http::Method::GET;
-        request.path = "/health";
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
 
-        auto response = http_client_->send(request);
+            // New URL: /health
+            http::Request request;
+            request.method = http::Method::GET;
+            request.path = "/health";
 
-        if (!response.success) {
-            is_online_ = false;
-            if (response.error_message.empty()) {
-                return handle_error_response<bool>(response);
+            auto response = http_client_->send(request);
+
+            if (!response.success) {
+                is_online_ = false;
+                if (was_online) {
+                    event_bus_.emit(events::NETWORK_OFFLINE, std::map<std::string, std::string>{});
+                    should_start_recheck = true;
+                }
+                if (response.error_message.empty()) {
+                    result = handle_error_response<bool>(response);
+                } else {
+                    result = Result<bool>::error(ErrorCode::NetworkError, response.error_message);
+                }
+            } else {
+                is_online_ = true;
+                if (!was_online) {
+                    event_bus_.emit(events::NETWORK_ONLINE, std::map<std::string, std::string>{});
+                }
+                result = Result<bool>::ok(true);
             }
-            return Result<bool>::error(ErrorCode::NetworkError, response.error_message);
         }
 
-        is_online_ = true;
-        event_bus_.emit(events::NETWORK_ONLINE, std::map<std::string, std::string>{});
-        return Result<bool>::ok(true);
+        // Start network recheck timer outside the lock to avoid deadlock
+        if (should_start_recheck) {
+            start_network_recheck();
+        }
+
+        return result;
     }
 
     void reset() {
@@ -855,7 +1066,7 @@ class Client::Impl {
         }
     }
 
-    bool should_fallback_to_offline(const http::Response& response) {
+    bool should_fallback_to_offline(const http::Response& response) const {
         if (config_.offline_fallback_mode == OfflineFallbackMode::Always) {
             return true;
         }
@@ -872,6 +1083,90 @@ class Client::Impl {
         }
 
         return false;
+    }
+
+    // Check if the validation result code indicates license revocation
+    bool is_revocation_code(const std::string& code) const {
+        // Match the API's revocation-related codes
+        return code == "revoked" || code == "suspended";
+    }
+
+    // Check if the HTTP error indicates license revocation (for non-validate endpoints)
+    // 422 = unprocessable_entity (license errors like revoked, expired, suspended)
+    // But NOT 401 (unauthorized), 404 (not found), 429 (rate limit)
+    bool is_revocation_error(const http::Response& response) const {
+        // 422 with revocation codes in the body indicates revocation
+        if (response.status_code == 422) {
+            try {
+                auto j = nlohmann::json::parse(response.body);
+                if (j.contains("error") && j["error"].contains("code")) {
+                    std::string code = j["error"]["code"].get<std::string>();
+                    return is_revocation_code(code);
+                }
+            } catch (...) {
+                // If we can't parse, assume not revocation
+            }
+        }
+        return false;
+    }
+
+    // Purge all cached data when license is revoked
+    void purge_cache_on_revocation() {
+        cached_license_.reset();
+        cached_validation_.reset();
+        current_activation_.reset();
+        storage_->clear_license();
+        storage_->clear_offline_token();
+
+        // Stop all timers - no point continuing without a valid license
+        // Note: These are called without lock, so they must be thread-safe
+        // The atomic booleans and condition variables handle this
+        stop_auto_validation_unlocked();
+        stop_heartbeat_unlocked();
+        stop_network_recheck_unlocked();
+        stop_offline_refresh_unlocked();
+    }
+
+    // Unlocked versions of stop methods for use during revocation
+    void stop_auto_validation_unlocked() {
+        if (auto_validate_running_) {
+            auto_validate_running_ = false;
+            auto_validate_cv_.notify_all();
+            // Don't join here - we're in the middle of validation which may be on the timer thread
+        }
+    }
+
+    void stop_heartbeat_unlocked() {
+        if (heartbeat_running_) {
+            heartbeat_running_ = false;
+            heartbeat_cv_.notify_all();
+        }
+    }
+
+    void stop_network_recheck_unlocked() {
+        if (network_recheck_running_) {
+            network_recheck_running_ = false;
+            network_recheck_cv_.notify_all();
+        }
+    }
+
+    void stop_offline_refresh_unlocked() {
+        if (offline_refresh_running_) {
+            offline_refresh_running_ = false;
+            offline_refresh_cv_.notify_all();
+        }
+    }
+
+    // Constant-time string comparison (matches Swift SDK)
+    bool constant_time_equal(const std::string& a, const std::string& b) const {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        int result = 0;
+        for (size_t i = 0; i < a.size(); ++i) {
+            result |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+        }
+        return result == 0;
     }
 
     Result<ValidationResult> verify_cached_offline() {
@@ -898,7 +1193,7 @@ class Client::Impl {
             ValidationResult result;
             result.valid = false;
             result.offline = true;
-            result.code = "no_signing_key";
+            result.code = "no_public_key";
             return Result<ValidationResult>::ok(result);
         }
 
@@ -906,27 +1201,111 @@ class Client::Impl {
         ValidationResult result;
         result.offline = true;
 
-        if (verify_result.is_ok() && verify_result.value()) {
-            result.valid = true;
-
-            // Check grace period
-            auto last_seen = storage_->get_last_seen_timestamp();
-            if (last_seen && config_.max_offline_days > 0) {
-                auto now = std::chrono::system_clock::now();
-                auto last_seen_time = std::chrono::system_clock::from_time_t(
-                    static_cast<std::time_t>(*last_seen));
-                auto days = std::chrono::duration_cast<std::chrono::hours>(now - last_seen_time)
-                                .count() /
-                            24;
-                if (days > config_.max_offline_days) {
-                    result.valid = false;
-                    result.code = "grace_period_expired";
-                }
-            }
-        } else {
+        if (!verify_result.is_ok() || !verify_result.value()) {
             result.valid = false;
             result.code = "signature_invalid";
+            event_bus_.emit(events::OFFLINE_TOKEN_VERIFICATION_FAILED,
+                            std::map<std::string, std::string>{{"kid", cached_offline->signature.key_id}});
+            return Result<ValidationResult>::ok(result);
         }
+
+        // 1. License key match (constant-time comparison) - matches Swift SDK
+        auto cached_license = storage_->get_license();
+        if (!cached_license) {
+            result.valid = false;
+            result.code = "license_mismatch";
+            return Result<ValidationResult>::ok(result);
+        }
+
+        if (!constant_time_equal(cached_offline->token.license_key, cached_license->license_key)) {
+            result.valid = false;
+            result.code = "license_mismatch";
+            return Result<ValidationResult>::ok(result);
+        }
+
+        // 2. Check token expiry (exp is Unix timestamp)
+        auto now = std::chrono::system_clock::now();
+        auto now_unix = std::chrono::duration_cast<std::chrono::seconds>(
+                            now.time_since_epoch())
+                            .count();
+
+        if (now_unix > cached_offline->token.exp) {
+            result.valid = false;
+            result.code = "token_expired";
+            return Result<ValidationResult>::ok(result);
+        }
+
+        // 3. Check not-before (nbf is Unix timestamp)
+        if (now_unix < cached_offline->token.nbf) {
+            result.valid = false;
+            result.code = "token_not_yet_valid";
+            return Result<ValidationResult>::ok(result);
+        }
+
+        // 4. Check license expiry if present
+        if (cached_offline->token.license_expires_at.has_value()) {
+            if (now_unix > *cached_offline->token.license_expires_at) {
+                result.valid = false;
+                result.code = "license_expired";
+                return Result<ValidationResult>::ok(result);
+            }
+        }
+
+        // 5. Grace period check (matches Swift SDK)
+        if (config_.max_offline_days > 0) {
+            auto last_validated = cached_license->last_validated;
+            auto last_validated_unix = std::chrono::duration_cast<std::chrono::seconds>(
+                                           last_validated.time_since_epoch())
+                                           .count();
+            auto days_since_validation = (now_unix - last_validated_unix) / 86400;
+            if (days_since_validation > config_.max_offline_days) {
+                result.valid = false;
+                result.code = "grace_period_expired";
+                return Result<ValidationResult>::ok(result);
+            }
+        }
+
+        // 6. Clock tamper detection (matches Swift SDK)
+        auto last_seen = storage_->get_last_seen_timestamp();
+        if (last_seen) {
+            auto now_ms = static_cast<double>(now_unix);
+            auto max_skew_sec = config_.max_clock_skew_ms / 1000.0;
+            if (now_ms + max_skew_sec < *last_seen) {
+                result.valid = false;
+                result.code = "clock_tamper";
+                return Result<ValidationResult>::ok(result);
+            }
+        }
+
+        // Update last seen timestamp
+        storage_->set_last_seen_timestamp(static_cast<double>(now_unix));
+
+        // Build successful response with entitlements from token
+        result.valid = true;
+        result.code = "";
+
+        // Build license from token data for consistent offline response
+        // token.entitlements already contains Entitlement objects with proper Timestamp types
+        std::vector<Entitlement> entitlements = cached_offline->token.entitlements;
+
+        std::optional<Timestamp> license_expires;
+        if (cached_offline->token.license_expires_at.has_value()) {
+            license_expires = std::chrono::system_clock::from_time_t(
+                static_cast<std::time_t>(*cached_offline->token.license_expires_at));
+        }
+
+        result.license = License(
+            cached_offline->token.license_key,
+            result.valid ? LicenseStatus::Active : LicenseStatus::Unknown,
+            license_mode_from_string(cached_offline->token.mode),
+            cached_offline->token.plan_key,
+            cached_offline->token.seat_limit,
+            0,  // active_seats not available in offline token
+            std::nullopt,  // starts_at
+            license_expires,
+            entitlements,
+            cached_offline->token.metadata,
+            Product{cached_offline->token.product_slug, cached_offline->token.product_slug});
 
         return Result<ValidationResult>::ok(result);
     }
@@ -936,10 +1315,16 @@ class Client::Impl {
             return;
         }
 
+        event_bus_.emit(events::OFFLINE_TOKEN_FETCHING,
+                        std::map<std::string, std::string>{{"licenseKey", license_key}});
+
         // Fetch offline token
         auto offline_result = generate_offline_token(license_key, device_id, 30);
         if (offline_result.is_ok()) {
             auto& offline = offline_result.value();
+
+            event_bus_.emit(events::OFFLINE_TOKEN_FETCHED,
+                            std::map<std::string, std::string>{{"licenseKey", license_key}});
 
             // Fetch signing key if needed
             if (!offline.signature.key_id.empty()) {
@@ -948,6 +1333,22 @@ class Client::Impl {
                     (void)fetch_signing_key(offline.signature.key_id);
                 }
             }
+
+            // Immediately verify offline token locally (matches Swift SDK behavior)
+            auto verify_result = verify_cached_offline();
+            if (verify_result.is_ok()) {
+                auto& result = verify_result.value();
+                if (result.valid) {
+                    event_bus_.emit(events::VALIDATION_OFFLINE_SUCCESS, result);
+                } else {
+                    event_bus_.emit(events::VALIDATION_OFFLINE_FAILED, result);
+                }
+            }
+        } else {
+            event_bus_.emit(events::OFFLINE_TOKEN_FETCH_ERROR,
+                            std::map<std::string, std::string>{
+                                {"licenseKey", license_key},
+                                {"error", offline_result.error_message()}});
         }
     }
 
@@ -967,6 +1368,143 @@ class Client::Impl {
             static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(
                                     std::chrono::system_clock::now().time_since_epoch())
                                     .count()));
+    }
+
+    // Store a future and clean up completed ones
+    void store_future(std::future<void> future) {
+        std::lock_guard<std::mutex> lock(futures_mutex_);
+        cleanup_futures_unlocked();
+        pending_futures_.push_back(std::move(future));
+    }
+
+    // Remove completed futures from the list (must hold futures_mutex_)
+    void cleanup_futures_unlocked() {
+        pending_futures_.erase(
+            std::remove_if(pending_futures_.begin(), pending_futures_.end(),
+                           [](std::future<void>& f) {
+                               return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+                           }),
+            pending_futures_.end());
+    }
+
+    // Wait for all pending futures to complete
+    void wait_for_pending_futures() {
+        std::vector<std::future<void>> futures_to_wait;
+        {
+            std::lock_guard<std::mutex> lock(futures_mutex_);
+            futures_to_wait = std::move(pending_futures_);
+        }
+        for (auto& f : futures_to_wait) {
+            if (f.valid()) {
+                f.wait();
+            }
+        }
+    }
+
+    // Network recheck timer management
+    void start_network_recheck() {
+        stop_network_recheck();
+
+        if (config_.network_recheck_interval <= 0) {
+            return;
+        }
+
+        network_recheck_running_ = true;
+
+        network_recheck_thread_ = std::thread([this]() {
+            while (network_recheck_running_) {
+                std::unique_lock<std::mutex> lock(network_recheck_mutex_);
+                network_recheck_cv_.wait_for(
+                    lock, std::chrono::duration<double>(config_.network_recheck_interval),
+                    [this]() { return !network_recheck_running_; });
+
+                if (!network_recheck_running_) {
+                    break;
+                }
+
+                // Check network status by calling health endpoint
+                auto result = health_check_unlocked();
+                if (result) {
+                    // We're back online!
+                    is_online_ = true;
+                    event_bus_.emit(events::NETWORK_ONLINE, std::map<std::string, std::string>{});
+
+                    // Stop the recheck timer since we're online now
+                    network_recheck_running_ = false;
+
+                    // Restart auto-validation if we have a license key
+                    if (!current_auto_license_key_.empty()) {
+                        // Use async to avoid blocking
+                        auto future = std::async(std::launch::async, [this]() {
+                            this->start_auto_validation(current_auto_license_key_);
+                        });
+                        store_future(std::move(future));
+                    }
+                }
+            }
+        });
+    }
+
+    void stop_network_recheck() {
+        if (network_recheck_running_) {
+            network_recheck_running_ = false;
+            network_recheck_cv_.notify_all();
+
+            if (network_recheck_thread_.joinable()) {
+                network_recheck_thread_.join();
+            }
+        }
+    }
+
+    // Offline license refresh timer management
+    void start_offline_refresh(const std::string& license_key) {
+        stop_offline_refresh();
+
+        if (config_.offline_license_refresh_interval <= 0) {
+            return;
+        }
+
+        offline_refresh_running_ = true;
+        offline_refresh_license_key_ = license_key;
+
+        offline_refresh_thread_ = std::thread([this]() {
+            while (offline_refresh_running_) {
+                std::unique_lock<std::mutex> lock(offline_refresh_mutex_);
+                offline_refresh_cv_.wait_for(
+                    lock, std::chrono::duration<double>(config_.offline_license_refresh_interval),
+                    [this]() { return !offline_refresh_running_; });
+
+                if (!offline_refresh_running_) {
+                    break;
+                }
+
+                // Refresh offline assets
+                if (!offline_refresh_license_key_.empty()) {
+                    sync_offline_assets_impl(offline_refresh_license_key_, device_id_);
+                }
+            }
+        });
+    }
+
+    void stop_offline_refresh() {
+        if (offline_refresh_running_) {
+            offline_refresh_running_ = false;
+            offline_refresh_cv_.notify_all();
+
+            if (offline_refresh_thread_.joinable()) {
+                offline_refresh_thread_.join();
+            }
+        }
+    }
+
+    // Health check without locking (for internal use)
+    bool health_check_unlocked() {
+        http::Request request;
+        request.method = http::Method::GET;
+        request.path = "/health";
+
+        auto response = http_client_->send(request);
+        return response.success;
     }
 
     Config config_;
@@ -996,6 +1534,23 @@ class Client::Impl {
 
     // Network status
     std::atomic<bool> is_online_{true};
+
+    // Network recheck timer
+    std::atomic<bool> network_recheck_running_{false};
+    std::thread network_recheck_thread_;
+    std::mutex network_recheck_mutex_;
+    std::condition_variable network_recheck_cv_;
+
+    // Offline license refresh timer
+    std::atomic<bool> offline_refresh_running_{false};
+    std::thread offline_refresh_thread_;
+    std::mutex offline_refresh_mutex_;
+    std::condition_variable offline_refresh_cv_;
+    std::string offline_refresh_license_key_;
+
+    // Pending async futures
+    std::vector<std::future<void>> pending_futures_;
+    std::mutex futures_mutex_;
 };
 
 // Client implementation
@@ -1082,6 +1637,12 @@ void Client::stop_heartbeat() { impl_->stop_heartbeat(); }
 
 bool Client::is_heartbeat_running() const { return impl_->is_heartbeat_running(); }
 
+RestoreResult Client::restore_license() { return impl_->restore_license(); }
+
+void Client::restore_license_async(RestoreCallback callback) {
+    impl_->restore_license_async(std::move(callback));
+}
+
 ValidationResult Client::get_status() const { return impl_->get_status(); }
 
 std::optional<License> Client::current_license() const { return impl_->current_license(); }
@@ -1091,6 +1652,8 @@ EntitlementStatus Client::check_entitlement(const std::string& entitlement_key) 
 }
 
 bool Client::is_online() const { return impl_->is_online(); }
+
+ClientStatus Client::get_client_status() const { return impl_->get_client_status(); }
 
 Subscription Client::on(const std::string& event, EventHandler handler) {
     return impl_->on(event, std::move(handler));

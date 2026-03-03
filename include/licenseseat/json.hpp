@@ -215,6 +215,64 @@ using nlohmann::json;
                    std::move(metadata), std::move(product));
 }
 
+/// Serialize License to JSON
+[[nodiscard]] inline json license_to_json(const License& license) {
+    json j;
+    j["key"] = license.key();
+    j["status"] = license_status_to_string(license.status());
+    j["mode"] = license_mode_to_string(license.mode());
+    j["plan_key"] = license.plan_key();
+
+    if (license.seat_limit().has_value()) {
+        j["seat_limit"] = *license.seat_limit();
+    } else {
+        j["seat_limit"] = nullptr;
+    }
+
+    j["active_seats"] = license.active_seats();
+
+    if (license.starts_at().has_value()) {
+        j["starts_at"] = format_timestamp(*license.starts_at());
+    } else {
+        j["starts_at"] = nullptr;
+    }
+
+    if (license.expires_at().has_value()) {
+        j["expires_at"] = format_timestamp(*license.expires_at());
+    } else {
+        j["expires_at"] = nullptr;
+    }
+
+    // Serialize entitlements
+    json ents = json::array();
+    for (const auto& ent : license.active_entitlements()) {
+        json e;
+        e["key"] = ent.key;
+        if (ent.expires_at.has_value()) {
+            e["expires_at"] = format_timestamp(*ent.expires_at);
+        } else {
+            e["expires_at"] = nullptr;
+        }
+        if (!ent.metadata.empty()) {
+            e["metadata"] = metadata_to_json(ent.metadata);
+        }
+        ents.push_back(e);
+    }
+    j["active_entitlements"] = ents;
+
+    if (!license.metadata().empty()) {
+        j["metadata"] = metadata_to_json(license.metadata());
+    }
+
+    // Serialize product
+    json prod;
+    prod["slug"] = license.product().slug;
+    prod["name"] = license.product().name;
+    j["product"] = prod;
+
+    return j;
+}
+
 // ==================== Activation Parsing ====================
 
 /// Parse Activation from JSON response (new API format)

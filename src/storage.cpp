@@ -97,6 +97,12 @@ bool FileStorage::set_license(const CachedLicense& license) {
             j["validation"]["valid"] = license.validation->valid;
             j["validation"]["code"] = license.validation->code;
             j["validation"]["message"] = license.validation->message;
+            j["validation"]["offline"] = license.validation->offline;
+        }
+
+        // Serialize the full license data for session restore
+        if (license.license_data) {
+            j["license_data"] = json::license_to_json(*license.license_data);
         }
 
         return write_file(get_license_path(), j.dump(2));
@@ -133,7 +139,13 @@ std::optional<CachedLicense> FileStorage::get_license() {
             validation.valid = j["validation"].value("valid", false);
             validation.code = j["validation"].value("code", "");
             validation.message = j["validation"].value("message", "");
+            validation.offline = j["validation"].value("offline", false);
             license.validation = validation;
+        }
+
+        // Deserialize the full license data for session restore
+        if (j.contains("license_data") && j["license_data"].is_object()) {
+            license.license_data = json::parse_license(j["license_data"]);
         }
 
         return license;
