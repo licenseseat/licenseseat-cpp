@@ -487,7 +487,7 @@ TEST_F(FileStorageTest, HandlesLicenseWithEntitlements) {
     ASSERT_TRUE(result->license_data.has_value());
 
     auto& ents = result->license_data->active_entitlements();
-    EXPECT_EQ(ents.size(), 2);
+    EXPECT_EQ(ents.size(), static_cast<size_t>(2));
     EXPECT_EQ(ents[0].key, "updates");
     EXPECT_EQ(ents[1].key, "premium");
     ASSERT_TRUE(ents[1].metadata.count("tier") > 0);

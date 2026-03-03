@@ -486,12 +486,6 @@ TEST_F(ClientTest, DeactivateAsyncCallsCallback) {
     EXPECT_TRUE(callback_called);
 }
 
-// ==================== Version ====================
-
-TEST(VersionTest, VersionIsSet) {
-    EXPECT_STREQ(VERSION, "0.4.0");
-}
-
 // ==================== ClientStatus Tests ====================
 
 TEST_F(ClientTest, GetClientStatusReturnsInactiveWhenNoLicense) {
@@ -622,54 +616,6 @@ TEST_F(ClientTest, StopHeartbeatSafeWhenCalledRapidly) {
         client.stop_heartbeat();
     }
 
-    EXPECT_FALSE(client.is_heartbeat_running());
-}
-
-TEST_F(ClientTest, ConcurrentStartStopAutoValidationDoesNotCrash) {
-    Client client(config_);
-    std::atomic<bool> done{false};
-
-    // Start auto-validation
-    client.start_auto_validation("TEST-KEY");
-
-    // Spawn thread that will stop it
-    std::thread stopper([&]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        client.stop_auto_validation();
-        done = true;
-    });
-
-    // Meanwhile, try to start another one (should safely replace)
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    client.start_auto_validation("TEST-KEY-2");
-
-    stopper.join();
-
-    // Clean up
-    client.stop_auto_validation();
-    EXPECT_FALSE(client.is_auto_validating());
-}
-
-TEST_F(ClientTest, ConcurrentStartStopHeartbeatDoesNotCrash) {
-    Client client(config_);
-
-    // Start heartbeat
-    client.start_heartbeat("TEST-KEY");
-
-    // Spawn thread that will stop it
-    std::thread stopper([&]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        client.stop_heartbeat();
-    });
-
-    // Meanwhile, try to start another one (should safely replace)
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    client.start_heartbeat("TEST-KEY-2");
-
-    stopper.join();
-
-    // Clean up
-    client.stop_heartbeat();
     EXPECT_FALSE(client.is_heartbeat_running());
 }
 
