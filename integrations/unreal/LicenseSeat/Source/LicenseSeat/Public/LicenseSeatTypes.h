@@ -76,7 +76,7 @@ struct LICENSESEAT_API FLicenseActivationResult
     UPROPERTY(BlueprintReadOnly, Category = "LicenseSeat")
     FString ActivationId;
 
-    /** Device identifier */
+    /** Device fingerprint (legacy field name) */
     UPROPERTY(BlueprintReadOnly, Category = "LicenseSeat")
     FString DeviceId;
 };
@@ -99,7 +99,7 @@ struct LICENSESEAT_API FLicenseSeatConfig
 
     /** API base URL (defaults to LicenseSeat cloud) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LicenseSeat")
-    FString ApiUrl = TEXT("https://licenseseat.com/api");
+    FString ApiUrl = TEXT("https://licenseseat.com/api/v1");
 
     /** Ed25519 public key for offline verification (base64) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LicenseSeat")

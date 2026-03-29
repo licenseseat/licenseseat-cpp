@@ -93,7 +93,7 @@ void AMyGameMode::BeginPlay()
 | -------------------- | ------- | --------------------------------------------------- |
 | ApiKey               | FString | Your LicenseSeat API key                            |
 | ProductSlug          | FString | Product identifier                                  |
-| ApiUrl               | FString | API base URL (default: https://licenseseat.com/api) |
+| ApiUrl               | FString | API base URL (default: https://licenseseat.com/api/v1) |
 | OfflinePublicKey     | FString | Ed25519 public key for offline verification         |
 | MaxOfflineDays       | int32   | Maximum offline operation days                      |
 | AutoValidateInterval | float   | Auto-validation interval in seconds                 |
@@ -109,7 +109,7 @@ void AMyGameMode::BeginPlay()
 | `Deactivate(LicenseKey)`              | Deactivate current device        |
 | `GetStatus()`                         | Get current license status       |
 | `IsLicenseValid()`                    | Quick validity check             |
-| `GetDeviceId()`                       | Get device identifier            |
+| `GetDeviceId()`                       | Get device fingerprint (legacy API name) |
 | `StartAutoValidation(LicenseKey)`     | Start periodic validation        |
 | `StopAutoValidation()`                | Stop periodic validation         |
 

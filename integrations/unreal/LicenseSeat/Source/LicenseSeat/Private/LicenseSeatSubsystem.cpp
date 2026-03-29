@@ -20,6 +20,128 @@ extern "C" {
 #include "picosha2.h"
 THIRD_PARTY_INCLUDES_END
 
+namespace {
+
+FString BuildLicenseEndpoint(const FLicenseSeatConfig& Config, const FString& LicenseKey,
+                             const TCHAR* Action)
+{
+    return Config.ApiUrl + TEXT("/products/") + Config.ProductSlug + TEXT("/licenses/") +
+           LicenseKey + TEXT("/") + Action;
+}
+
+TSharedPtr<FJsonObject> BuildDevicePayload(const FString& Fingerprint, const FString& DeviceName)
+{
+    TSharedPtr<FJsonObject> RequestJson = MakeShareable(new FJsonObject);
+    RequestJson->SetStringField(TEXT("fingerprint"), Fingerprint);
+    RequestJson->SetStringField(TEXT("device_id"), Fingerprint);
+
+    TSharedPtr<FJsonObject> ComponentsJson = MakeShareable(new FJsonObject);
+    ComponentsJson->SetStringField(TEXT("schema_version"), TEXT("1"));
+    ComponentsJson->SetStringField(TEXT("sdk"), TEXT("unreal-plugin"));
+    ComponentsJson->SetStringField(TEXT("platform"), FPlatformProperties::PlatformName());
+    ComponentsJson->SetStringField(TEXT("hostname"), FPlatformProcess::ComputerName());
+    RequestJson->SetObjectField(TEXT("fingerprint_components"), ComponentsJson);
+
+    if (!DeviceName.IsEmpty())
+    {
+        RequestJson->SetStringField(TEXT("device_name"), DeviceName);
+    }
+
+    return RequestJson;
+}
+
+FString ToJsonString(const TSharedPtr<FJsonObject>& Json)
+{
+    FString RequestBody;
+    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBody);
+    FJsonSerializer::Serialize(Json.ToSharedRef(), Writer);
+    return RequestBody;
+}
+
+FString ExtractErrorMessage(const TSharedPtr<FJsonObject>& JsonResponse)
+{
+    if (!JsonResponse.IsValid())
+    {
+        return TEXT("Request failed");
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* Errors = nullptr;
+    if (JsonResponse->TryGetArrayField(TEXT("errors"), Errors) && Errors != nullptr &&
+        Errors->Num() > 0)
+    {
+        TSharedPtr<FJsonObject> ErrorObject;
+        if ((*Errors)[0]->TryGetObject(ErrorObject) && ErrorObject.IsValid())
+        {
+            FString Message;
+            if (ErrorObject->TryGetStringField(TEXT("detail"), Message))
+            {
+                return Message;
+            }
+            if (ErrorObject->TryGetStringField(TEXT("message"), Message))
+            {
+                return Message;
+            }
+            if (ErrorObject->TryGetStringField(TEXT("title"), Message))
+            {
+                return Message;
+            }
+        }
+    }
+
+    const TSharedPtr<FJsonObject>* ErrorObject = nullptr;
+    if (JsonResponse->TryGetObjectField(TEXT("error"), ErrorObject) && ErrorObject != nullptr &&
+        ErrorObject->IsValid())
+    {
+        FString Message;
+        if ((*ErrorObject)->TryGetStringField(TEXT("message"), Message))
+        {
+            return Message;
+        }
+    }
+
+    FString Message;
+    if (JsonResponse->TryGetStringField(TEXT("message"), Message))
+    {
+        return Message;
+    }
+
+    return TEXT("Request failed");
+}
+
+ELicenseStatus ParseLicenseStatus(const FString& StatusStr)
+{
+    if (StatusStr == TEXT("active"))
+        return ELicenseStatus::Active;
+    if (StatusStr == TEXT("expired"))
+        return ELicenseStatus::Expired;
+    if (StatusStr == TEXT("revoked"))
+        return ELicenseStatus::Revoked;
+    if (StatusStr == TEXT("suspended"))
+        return ELicenseStatus::Suspended;
+    if (StatusStr == TEXT("pending"))
+        return ELicenseStatus::Pending;
+    return ELicenseStatus::Unknown;
+}
+
+FString JsonFieldToString(const TSharedPtr<FJsonObject>& JsonObject, const FString& FieldName)
+{
+    FString StringValue;
+    if (JsonObject->TryGetStringField(FieldName, StringValue))
+    {
+        return StringValue;
+    }
+
+    double NumberValue = 0.0;
+    if (JsonObject->TryGetNumberField(FieldName, NumberValue))
+    {
+        return LexToString(static_cast<int64>(NumberValue));
+    }
+
+    return FString();
+}
+
+}  // namespace
+
 void ULicenseSeatSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
@@ -54,24 +176,13 @@ FLicenseValidationResult ULicenseSeatSubsystem::Validate(const FString& LicenseK
         return Result;
     }
 
-    // Build request body
-    TSharedPtr<FJsonObject> RequestJson = MakeShareable(new FJsonObject);
-    RequestJson->SetStringField(TEXT("license_key"), LicenseKey);
-    RequestJson->SetStringField(TEXT("device_identifier"), GetDeviceId());
-    if (!CurrentConfig.ProductSlug.IsEmpty())
-    {
-        RequestJson->SetStringField(TEXT("product_slug"), CurrentConfig.ProductSlug);
-    }
-
-    FString RequestBody;
-    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBody);
-    FJsonSerializer::Serialize(RequestJson.ToSharedRef(), Writer);
+    const FString RequestBody = ToJsonString(BuildDevicePayload(GetDeviceId(), TEXT("")));
 
     // Make synchronous request (blocking - use with caution)
     FHttpModule& HttpModule = FHttpModule::Get();
     TSharedRef<IHttpRequest> Request = HttpModule.CreateRequest();
 
-    Request->SetURL(CurrentConfig.ApiUrl + TEXT("/licenses/validate"));
+    Request->SetURL(BuildLicenseEndpoint(CurrentConfig, LicenseKey, TEXT("validate")));
     Request->SetVerb(TEXT("POST"));
     Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
     Request->SetHeader(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *CurrentConfig.ApiKey));
@@ -92,7 +203,7 @@ FLicenseValidationResult ULicenseSeatSubsystem::Validate(const FString& LicenseK
         }
     }
 
-    if (Request->GetStatus() == EHttpRequestStatus::Succeeded)
+    if (Request->GetStatus() == EHttpRequestStatus::Succeeded && Request->GetResponse().IsValid())
     {
         FString Response = Request->GetResponse()->GetContentAsString();
         Result = ParseValidationResponse(Response);
@@ -118,21 +229,14 @@ FLicenseActivationResult ULicenseSeatSubsystem::Activate(const FString& LicenseK
         return Result;
     }
 
-    // Build request body
-    TSharedPtr<FJsonObject> RequestJson = MakeShareable(new FJsonObject);
-    RequestJson->SetStringField(TEXT("license_key"), LicenseKey);
-    RequestJson->SetStringField(TEXT("device_identifier"), GetDeviceId());
-    RequestJson->SetStringField(TEXT("hostname"), FPlatformProcess::ComputerName());
-
-    FString RequestBody;
-    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBody);
-    FJsonSerializer::Serialize(RequestJson.ToSharedRef(), Writer);
+    const FString RequestBody =
+        ToJsonString(BuildDevicePayload(GetDeviceId(), FPlatformProcess::ComputerName()));
 
     // Make synchronous request
     FHttpModule& HttpModule = FHttpModule::Get();
     TSharedRef<IHttpRequest> Request = HttpModule.CreateRequest();
 
-    Request->SetURL(CurrentConfig.ApiUrl + TEXT("/licenses/activate"));
+    Request->SetURL(BuildLicenseEndpoint(CurrentConfig, LicenseKey, TEXT("activate")));
     Request->SetVerb(TEXT("POST"));
     Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
     Request->SetHeader(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *CurrentConfig.ApiKey));
@@ -151,7 +255,7 @@ FLicenseActivationResult ULicenseSeatSubsystem::Activate(const FString& LicenseK
         }
     }
 
-    if (Request->GetStatus() == EHttpRequestStatus::Succeeded)
+    if (Request->GetStatus() == EHttpRequestStatus::Succeeded && Request->GetResponse().IsValid())
     {
         FString Response = Request->GetResponse()->GetContentAsString();
 
@@ -162,11 +266,11 @@ FLicenseActivationResult ULicenseSeatSubsystem::Activate(const FString& LicenseK
             if (JsonResponse->HasField(TEXT("id")))
             {
                 Result.bSuccess = true;
-                Result.ActivationId = JsonResponse->GetStringField(TEXT("id"));
+                Result.ActivationId = JsonFieldToString(JsonResponse, TEXT("id"));
             }
-            else if (JsonResponse->HasField(TEXT("error")))
+            else
             {
-                Result.ErrorMessage = JsonResponse->GetStringField(TEXT("message"));
+                Result.ErrorMessage = ExtractErrorMessage(JsonResponse);
             }
         }
     }
@@ -185,20 +289,13 @@ bool ULicenseSeatSubsystem::Deactivate(const FString& LicenseKey)
         return false;
     }
 
-    // Build request body
-    TSharedPtr<FJsonObject> RequestJson = MakeShareable(new FJsonObject);
-    RequestJson->SetStringField(TEXT("license_key"), LicenseKey);
-    RequestJson->SetStringField(TEXT("device_identifier"), GetDeviceId());
-
-    FString RequestBody;
-    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBody);
-    FJsonSerializer::Serialize(RequestJson.ToSharedRef(), Writer);
+    const FString RequestBody = ToJsonString(BuildDevicePayload(GetDeviceId(), TEXT("")));
 
     // Make synchronous request
     FHttpModule& HttpModule = FHttpModule::Get();
     TSharedRef<IHttpRequest> Request = HttpModule.CreateRequest();
 
-    Request->SetURL(CurrentConfig.ApiUrl + TEXT("/licenses/deactivate"));
+    Request->SetURL(BuildLicenseEndpoint(CurrentConfig, LicenseKey, TEXT("deactivate")));
     Request->SetVerb(TEXT("POST"));
     Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
     Request->SetHeader(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *CurrentConfig.ApiKey));
@@ -217,7 +314,9 @@ bool ULicenseSeatSubsystem::Deactivate(const FString& LicenseKey)
     }
 
     return Request->GetStatus() == EHttpRequestStatus::Succeeded &&
-           Request->GetResponse()->GetResponseCode() == 200;
+           Request->GetResponse().IsValid() &&
+           Request->GetResponse()->GetResponseCode() >= 200 &&
+           Request->GetResponse()->GetResponseCode() < 300;
 }
 
 void ULicenseSeatSubsystem::ValidateAsync(const FString& LicenseKey, FOnValidationComplete Callback)
@@ -231,20 +330,9 @@ void ULicenseSeatSubsystem::ValidateAsync(const FString& LicenseKey, FOnValidati
         return;
     }
 
-    // Build request body
-    TSharedPtr<FJsonObject> RequestJson = MakeShareable(new FJsonObject);
-    RequestJson->SetStringField(TEXT("license_key"), LicenseKey);
-    RequestJson->SetStringField(TEXT("device_identifier"), GetDeviceId());
-    if (!CurrentConfig.ProductSlug.IsEmpty())
-    {
-        RequestJson->SetStringField(TEXT("product_slug"), CurrentConfig.ProductSlug);
-    }
+    const FString RequestBody = ToJsonString(BuildDevicePayload(GetDeviceId(), TEXT("")));
 
-    FString RequestBody;
-    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBody);
-    FJsonSerializer::Serialize(RequestJson.ToSharedRef(), Writer);
-
-    MakeApiRequest(CurrentConfig.ApiUrl + TEXT("/licenses/validate"), RequestBody,
+    MakeApiRequest(BuildLicenseEndpoint(CurrentConfig, LicenseKey, TEXT("validate")), RequestBody,
         [this, LicenseKey, Callback](bool bSuccess, const FString& Response)
         {
             FLicenseValidationResult Result;
@@ -277,17 +365,10 @@ void ULicenseSeatSubsystem::ActivateAsync(const FString& LicenseKey, FOnActivati
         return;
     }
 
-    // Build request body
-    TSharedPtr<FJsonObject> RequestJson = MakeShareable(new FJsonObject);
-    RequestJson->SetStringField(TEXT("license_key"), LicenseKey);
-    RequestJson->SetStringField(TEXT("device_identifier"), GetDeviceId());
-    RequestJson->SetStringField(TEXT("hostname"), FPlatformProcess::ComputerName());
+    const FString RequestBody =
+        ToJsonString(BuildDevicePayload(GetDeviceId(), FPlatformProcess::ComputerName()));
 
-    FString RequestBody;
-    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&RequestBody);
-    FJsonSerializer::Serialize(RequestJson.ToSharedRef(), Writer);
-
-    MakeApiRequest(CurrentConfig.ApiUrl + TEXT("/licenses/activate"), RequestBody,
+    MakeApiRequest(BuildLicenseEndpoint(CurrentConfig, LicenseKey, TEXT("activate")), RequestBody,
         [this, Callback](bool bSuccess, const FString& Response)
         {
             FLicenseActivationResult Result;
@@ -303,11 +384,11 @@ void ULicenseSeatSubsystem::ActivateAsync(const FString& LicenseKey, FOnActivati
                     if (JsonResponse->HasField(TEXT("id")))
                     {
                         Result.bSuccess = true;
-                        Result.ActivationId = JsonResponse->GetStringField(TEXT("id"));
+                        Result.ActivationId = JsonFieldToString(JsonResponse, TEXT("id"));
                     }
-                    else if (JsonResponse->HasField(TEXT("error")))
+                    else
                     {
-                        Result.ErrorMessage = JsonResponse->GetStringField(TEXT("message"));
+                        Result.ErrorMessage = ExtractErrorMessage(JsonResponse);
                     }
                 }
             }
@@ -410,7 +491,8 @@ void ULicenseSeatSubsystem::MakeApiRequest(const FString& Endpoint, const FStrin
         {
             if (bConnectedSuccessfully && Response.IsValid())
             {
-                Callback(true, Response->GetContentAsString());
+                const int32 StatusCode = Response->GetResponseCode();
+                Callback(StatusCode >= 200 && StatusCode < 300, Response->GetContentAsString());
             }
             else
             {
@@ -435,19 +517,18 @@ FLicenseValidationResult ULicenseSeatSubsystem::ParseValidationResponse(const FS
         return Result;
     }
 
-    // Check for error response
-    if (JsonResponse->HasField(TEXT("error")))
+    if (JsonResponse->HasField(TEXT("error")) || JsonResponse->HasField(TEXT("errors")))
     {
-        Result.Reason = JsonResponse->GetStringField(TEXT("message"));
+        Result.Reason = ExtractErrorMessage(JsonResponse);
         return Result;
     }
 
     // Parse validation result
     Result.bValid = JsonResponse->GetBoolField(TEXT("valid"));
 
-    if (!Result.bValid && JsonResponse->HasField(TEXT("reason")))
+    if (JsonResponse->HasField(TEXT("message")))
     {
-        Result.Reason = JsonResponse->GetStringField(TEXT("reason"));
+        Result.Reason = JsonResponse->GetStringField(TEXT("message"));
     }
 
     // Parse license info
@@ -458,17 +539,7 @@ FLicenseValidationResult ULicenseSeatSubsystem::ParseValidationResponse(const FS
         {
             Result.LicenseKey = LicenseJson->GetStringField(TEXT("key"));
 
-            FString StatusStr = LicenseJson->GetStringField(TEXT("status"));
-            if (StatusStr == TEXT("active"))
-                Result.Status = ELicenseStatus::Active;
-            else if (StatusStr == TEXT("expired"))
-                Result.Status = ELicenseStatus::Expired;
-            else if (StatusStr == TEXT("revoked"))
-                Result.Status = ELicenseStatus::Revoked;
-            else if (StatusStr == TEXT("suspended"))
-                Result.Status = ELicenseStatus::Suspended;
-            else if (StatusStr == TEXT("pending"))
-                Result.Status = ELicenseStatus::Pending;
+            Result.Status = ParseLicenseStatus(LicenseJson->GetStringField(TEXT("status")));
 
             // Parse expiration
             if (LicenseJson->HasField(TEXT("expires_at")) &&

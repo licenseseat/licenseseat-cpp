@@ -193,7 +193,7 @@ private:
 LicenseSeatJuceStandalone::Config config;
 config.apiKey = "your-api-key";
 config.productSlug = "your-product";
-config.apiUrl = "https://licenseseat.com/api";  // Optional
+config.apiUrl = "https://licenseseat.com/api/v1";  // Optional
 config.timeoutMs = 10000;                        // Optional (default: 10s)
 config.maxRetries = 1;                           // Optional
 
@@ -209,7 +209,7 @@ LicenseSeatJuceStandalone license(config);
 | Method                                              | Thread Safety | Description                                   |
 | --------------------------------------------------- | ------------- | --------------------------------------------- |
 | `isValid()`                                         | Audio-safe    | Check if license is valid (atomic read)       |
-| `getDeviceId()`                                     | Safe          | Get device identifier                         |
+| `getDeviceId()`                                     | Safe          | Get device fingerprint (legacy API name)      |
 | `getLicenseKey()`                                   | Safe          | Get current license key                       |
 | `getCachedResult()`                                 | Safe          | Get cached validation result                  |
 | `validateAsync(key, callback)`                      | Safe          | Async validation (callback on message thread) |
