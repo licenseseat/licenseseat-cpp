@@ -59,6 +59,15 @@ class StorageInterface {
     /// Clear offline token
     virtual void clear_offline_token() = 0;
 
+    /// Store machine file data
+    virtual bool set_machine_file(const MachineFile& machine_file) = 0;
+
+    /// Retrieve machine file
+    virtual std::optional<MachineFile> get_machine_file() = 0;
+
+    /// Clear machine file
+    virtual void clear_machine_file() = 0;
+
     /// Store signing key (for offline verification)
     virtual bool set_signing_key(const std::string& key_id, const std::string& public_key_b64) = 0;
 
@@ -98,6 +107,10 @@ class FileStorage : public StorageInterface {
     std::optional<OfflineToken> get_offline_token() override;
     void clear_offline_token() override;
 
+    bool set_machine_file(const MachineFile& machine_file) override;
+    std::optional<MachineFile> get_machine_file() override;
+    void clear_machine_file() override;
+
     bool set_signing_key(const std::string& key_id, const std::string& public_key_b64) override;
     std::optional<std::string> get_signing_key(const std::string& key_id) override;
 
@@ -109,6 +122,7 @@ class FileStorage : public StorageInterface {
   private:
     std::filesystem::path get_license_path() const;
     std::filesystem::path get_offline_token_path() const;
+    std::filesystem::path get_machine_file_path() const;
     std::filesystem::path get_signing_key_path(const std::string& key_id) const;
     std::filesystem::path get_timestamp_path() const;
 
@@ -134,6 +148,10 @@ class MemoryStorage : public StorageInterface {
     std::optional<OfflineToken> get_offline_token() override;
     void clear_offline_token() override;
 
+    bool set_machine_file(const MachineFile& machine_file) override;
+    std::optional<MachineFile> get_machine_file() override;
+    void clear_machine_file() override;
+
     bool set_signing_key(const std::string& key_id, const std::string& public_key_b64) override;
     std::optional<std::string> get_signing_key(const std::string& key_id) override;
 
@@ -145,6 +163,7 @@ class MemoryStorage : public StorageInterface {
   private:
     std::optional<CachedLicense> license_;
     std::optional<OfflineToken> offline_token_;
+    std::optional<MachineFile> machine_file_;
     std::unordered_map<std::string, std::string> signing_keys_;
     std::optional<double> last_seen_timestamp_;
     mutable std::mutex mutex_;

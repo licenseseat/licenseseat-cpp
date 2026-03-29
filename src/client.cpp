@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <future>
@@ -25,6 +26,7 @@ class Client::Impl {
     explicit Impl(Config config) : config_(std::move(config)) {
         // Auto-generate device ID if not provided
         if (config_.device_id.empty()) {
+            device_id_auto_generated_ = true;
             device_id_ = device::generate_device_id();
             if (device_id_.empty()) {
                 device_id_ = "unknown-device";
@@ -70,49 +72,99 @@ class Client::Impl {
         wait_for_pending_futures();
     }
 
+    struct LicenseRequestContext {
+        bool ok = false;
+        ErrorCode error_code = ErrorCode::Unknown;
+        std::string error_message;
+        std::string product_slug;
+        std::string fingerprint;
+        bool has_cached_license = false;
+        bool was_online = true;
+    };
+
+    std::string resolve_fingerprint_unlocked(const std::string& fingerprint_override) const {
+        return fingerprint_override.empty() ? device_id_ : fingerprint_override;
+    }
+
+    LicenseRequestContext prepare_license_request_context(
+        const std::string& license_key, const std::string& fingerprint_override,
+        bool require_fingerprint = false, bool capture_validation_state = false,
+        bool fallback_to_client_fingerprint = true,
+        const char* missing_fingerprint_message = "Fingerprint is required") {
+        LicenseRequestContext context;
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (license_key.empty()) {
+            context.error_code = ErrorCode::InvalidLicenseKey;
+            context.error_message = "License key cannot be empty";
+            return context;
+        }
+
+        if (config_.product_slug.empty()) {
+            context.error_code = ErrorCode::MissingParameter;
+            context.error_message = "Product slug is required in config";
+            return context;
+        }
+
+        context.product_slug = config_.product_slug;
+        context.fingerprint = fallback_to_client_fingerprint
+                                  ? resolve_fingerprint_unlocked(fingerprint_override)
+                                  : fingerprint_override;
+
+        if (require_fingerprint && context.fingerprint.empty()) {
+            context.error_code = ErrorCode::MissingParameter;
+            context.error_message = missing_fingerprint_message;
+            return context;
+        }
+
+        if (capture_validation_state) {
+            context.has_cached_license = cached_license_.has_value();
+            context.was_online = is_online_;
+        }
+
+        context.ok = true;
+        return context;
+    }
+
+    template <typename T>
+    Result<T> request_context_error(const LicenseRequestContext& context) const {
+        return Result<T>::error(context.error_code, context.error_message);
+    }
+
     // ========== Synchronous API ==========
 
     Result<ValidationResult> validate(const std::string& license_key,
                                       const std::string& device_id_param) {
-        // Prepare request data while holding mutex
-        std::string product_slug;
-        std::string device_id;
-        bool has_cached_license = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-
-            if (license_key.empty()) {
-                return Result<ValidationResult>::error(ErrorCode::InvalidLicenseKey,
-                                                       "License key cannot be empty");
-            }
-
-            if (config_.product_slug.empty()) {
-                return Result<ValidationResult>::error(ErrorCode::MissingParameter,
-                                                       "Product slug is required in config");
-            }
-
-            product_slug = config_.product_slug;
-            device_id = device_id_param.empty() ? device_id_ : device_id_param;
-            has_cached_license = cached_license_.has_value();
+        auto request = prepare_license_request_context(license_key, device_id_param, false, true);
+        if (!request.ok) {
+            return request_context_error<ValidationResult>(request);
         }
 
         event_bus_.emit(events::VALIDATION_START,
                         std::map<std::string, std::string>{{"license_key", license_key}});
 
         // Make HTTP call without holding mutex
-        auto body = json::build_validate_request(device_id);
+        auto body = json::build_validate_request(request.fingerprint);
         auto response = send_post(
-            "/products/" + product_slug + "/licenses/" + license_key + "/validate", body);
+            "/products/" + request.product_slug + "/licenses/" + license_key + "/validate", body);
 
         if (!response.success) {
             // Check for authentication failure (401) - emit auth-failed event (matches Swift SDK)
             if (response.status_code == 401 || response.status_code == 501) {
                 auto err = handle_error_response<ValidationResult>(response);
+                ValidationResult failed_validation;
+                failed_validation.valid = false;
+                failed_validation.offline = false;
+                failed_validation.message = err.error_message();
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    cached_validation_ = failed_validation;
+                }
                 event_bus_.emit(events::VALIDATION_AUTH_FAILED,
                                 std::map<std::string, std::string>{
                                     {"licenseKey", license_key},
                                     {"error", err.error_message()},
-                                    {"cached", has_cached_license ? "true" : "false"}});
+                                    {"cached", request.has_cached_license ? "true" : "false"}});
                 event_bus_.emit(events::VALIDATION_ERROR,
                                 std::map<std::string, std::string>{{"error", err.error_message()}});
                 return err;
@@ -132,16 +184,23 @@ class Client::Impl {
                 auto offline_result = verify_cached_offline();
                 if (offline_result.is_ok() && offline_result.value().valid) {
                     // Update cached state so get_client_status() returns OfflineValid
+                    bool should_emit_network_offline = false;
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
                         cached_validation_ = offline_result.value();
                         is_online_ = false;
+                        should_emit_network_offline = request.was_online;
                     }
-                    event_bus_.emit(events::NETWORK_OFFLINE, std::map<std::string, std::string>{});
+                    if (should_emit_network_offline) {
+                        event_bus_.emit(events::NETWORK_OFFLINE,
+                                        std::map<std::string, std::string>{});
+                    }
                     event_bus_.emit(events::VALIDATION_OFFLINE_SUCCESS, offline_result.value());
 
                     // Start network recheck to auto-reconnect when server is back
-                    start_network_recheck();
+                    if (should_emit_network_offline) {
+                        start_network_recheck();
+                    }
 
                     return offline_result;
                 } else if (offline_result.is_ok()) {
@@ -152,16 +211,31 @@ class Client::Impl {
 
             if (response.error_message.empty()) {
                 auto err = handle_error_response<ValidationResult>(response);
+                ValidationResult failed_validation;
+                failed_validation.valid = false;
+                failed_validation.offline = false;
+                failed_validation.message = err.error_message();
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    cached_validation_ = failed_validation;
+                }
                 event_bus_.emit(events::VALIDATION_ERROR,
                                 std::map<std::string, std::string>{{"error", err.error_message()}});
                 return err;
             }
 
+            ValidationResult failed_validation;
+            failed_validation.valid = false;
+            failed_validation.offline = true;
+            failed_validation.message = response.error_message;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                cached_validation_ = failed_validation;
                 is_online_ = false;
             }
-            event_bus_.emit(events::NETWORK_OFFLINE, std::map<std::string, std::string>{});
+            if (request.was_online) {
+                event_bus_.emit(events::NETWORK_OFFLINE, std::map<std::string, std::string>{});
+            }
             return Result<ValidationResult>::error(ErrorCode::NetworkError, response.error_message);
         }
 
@@ -185,13 +259,18 @@ class Client::Impl {
             }
 
             // Cache the result
-            if (result.valid) {
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    cached_license_ = result.license;
-                    cached_validation_ = result;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                cached_validation_ = result;
+                if (result.valid || !is_revocation_code(result.code)) {
+                    if (!result.license.key().empty()) {
+                        cached_license_ = result.license;
+                    }
                 }
-                update_storage_license(license_key, device_id, result);
+            }
+
+            if (result.valid) {
+                update_storage_license(license_key, request.fingerprint, result);
                 event_bus_.emit(events::VALIDATION_SUCCESS, result);
             } else {
                 event_bus_.emit(events::VALIDATION_FAILED, result);
@@ -208,39 +287,20 @@ class Client::Impl {
                                 const std::string& device_id_param,
                                 const std::string& device_name,
                                 const Metadata& metadata) {
-        // Prepare request data while holding mutex
-        std::string product_slug;
-        std::string resolved_device_id;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-
-            if (license_key.empty()) {
-                return Result<Activation>::error(ErrorCode::InvalidLicenseKey,
-                                                 "License key cannot be empty");
-            }
-
-            if (config_.product_slug.empty()) {
-                return Result<Activation>::error(ErrorCode::MissingParameter,
-                                                 "Product slug is required in config");
-            }
-
-            resolved_device_id = device_id_param.empty() ? device_id_ : device_id_param;
-            if (resolved_device_id.empty()) {
-                return Result<Activation>::error(ErrorCode::MissingParameter,
-                                                 "Device ID is required");
-            }
-
-            product_slug = config_.product_slug;
+        auto request = prepare_license_request_context(
+            license_key, device_id_param, true, false, true, "Device ID is required");
+        if (!request.ok) {
+            return request_context_error<Activation>(request);
         }
 
         event_bus_.emit(events::ACTIVATION_START,
                         std::map<std::string, std::string>{{"license_key", license_key},
-                                                           {"device_id", resolved_device_id}});
+                                                           {"device_id", request.fingerprint}});
 
         // Make HTTP call without holding mutex
-        auto body = json::build_activate_request(resolved_device_id, device_name, metadata);
+        auto body = json::build_activate_request(request.fingerprint, device_name, metadata);
         auto response = send_post(
-            "/products/" + product_slug + "/licenses/" + license_key + "/activate", body);
+            "/products/" + request.product_slug + "/licenses/" + license_key + "/activate", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -266,7 +326,7 @@ class Client::Impl {
             event_bus_.emit(events::ACTIVATION_SUCCESS, activation);
 
             // Sync offline assets AFTER releasing the lock to avoid deadlock
-            sync_offline_assets_impl(license_key, resolved_device_id);
+            sync_offline_assets_impl(license_key, request.fingerprint);
 
             return Result<Activation>::ok(std::move(activation));
         } catch (const nlohmann::json::exception& e) {
@@ -277,36 +337,19 @@ class Client::Impl {
 
     Result<Deactivation> deactivate(const std::string& license_key,
                                     const std::string& device_id) {
-        // Prepare request data while holding mutex
-        std::string product_slug;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-
-            if (license_key.empty()) {
-                return Result<Deactivation>::error(ErrorCode::InvalidLicenseKey,
-                                                   "License key cannot be empty");
-            }
-
-            if (device_id.empty()) {
-                return Result<Deactivation>::error(ErrorCode::MissingParameter,
-                                                   "Device ID is required");
-            }
-
-            if (config_.product_slug.empty()) {
-                return Result<Deactivation>::error(ErrorCode::MissingParameter,
-                                                   "Product slug is required in config");
-            }
-
-            product_slug = config_.product_slug;
+        auto request = prepare_license_request_context(
+            license_key, device_id, true, false, false, "Device ID is required");
+        if (!request.ok) {
+            return request_context_error<Deactivation>(request);
         }
 
         event_bus_.emit(events::DEACTIVATION_START,
                         std::map<std::string, std::string>{{"license_key", license_key}});
 
         // Make HTTP call without holding mutex
-        auto body = json::build_deactivate_request(device_id);
+        auto body = json::build_deactivate_request(request.fingerprint);
         auto response = send_post(
-            "/products/" + product_slug + "/licenses/" + license_key + "/deactivate", body);
+            "/products/" + request.product_slug + "/licenses/" + license_key + "/deactivate", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -332,6 +375,7 @@ class Client::Impl {
             }
             storage_->clear_license();
             storage_->clear_offline_token();
+            storage_->clear_machine_file();
 
             event_bus_.emit(events::DEACTIVATION_SUCCESS, deactivation);
 
@@ -382,30 +426,15 @@ class Client::Impl {
 
     Result<HeartbeatResponse> heartbeat(const std::string& license_key,
                                         const std::string& device_id_param) {
-        // Prepare request data while holding mutex
-        std::string product_slug;
-        std::string device_id;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-
-            if (license_key.empty()) {
-                return Result<HeartbeatResponse>::error(ErrorCode::InvalidLicenseKey,
-                                                        "License key cannot be empty");
-            }
-
-            if (config_.product_slug.empty()) {
-                return Result<HeartbeatResponse>::error(ErrorCode::MissingParameter,
-                                                        "Product slug is required in config");
-            }
-
-            product_slug = config_.product_slug;
-            device_id = device_id_param.empty() ? device_id_ : device_id_param;
+        auto request = prepare_license_request_context(license_key, device_id_param);
+        if (!request.ok) {
+            return request_context_error<HeartbeatResponse>(request);
         }
 
         // Make HTTP call without holding mutex
-        nlohmann::json body = {{"device_id", device_id}};
+        auto body = json::fingerprint_alias_payload(request.fingerprint, true);
         auto response = send_post(
-            "/products/" + product_slug + "/licenses/" + license_key + "/heartbeat", body);
+            "/products/" + request.product_slug + "/licenses/" + license_key + "/heartbeat", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -448,30 +477,15 @@ class Client::Impl {
     Result<OfflineToken> generate_offline_token(const std::string& license_key,
                                                 const std::string& device_id_param,
                                                 int ttl_days) {
-        // Prepare request data while holding mutex
-        std::string product_slug;
-        std::string device_id;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-
-            if (license_key.empty()) {
-                return Result<OfflineToken>::error(ErrorCode::InvalidLicenseKey,
-                                                   "License key cannot be empty");
-            }
-
-            if (config_.product_slug.empty()) {
-                return Result<OfflineToken>::error(ErrorCode::MissingParameter,
-                                                   "Product slug is required in config");
-            }
-
-            product_slug = config_.product_slug;
-            device_id = device_id_param.empty() ? device_id_ : device_id_param;
+        auto request = prepare_license_request_context(license_key, device_id_param);
+        if (!request.ok) {
+            return request_context_error<OfflineToken>(request);
         }
 
         // Make HTTP call without holding mutex
-        auto body = json::build_offline_token_request(device_id, ttl_days);
+        auto body = json::build_offline_token_request(request.fingerprint, ttl_days);
         auto response = send_post(
-            "/products/" + product_slug + "/licenses/" + license_key + "/offline_token", body);
+            "/products/" + request.product_slug + "/licenses/" + license_key + "/offline_token", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -497,6 +511,75 @@ class Client::Impl {
         }
     }
 
+    Result<MachineFile> checkout_machine_file(const std::string& license_key,
+                                              const std::string& device_id_param,
+                                              int ttl_days) {
+        auto request = prepare_license_request_context(
+            license_key, device_id_param, true, false, true, "Fingerprint is required");
+        if (!request.ok) {
+            return request_context_error<MachineFile>(request);
+        }
+
+        event_bus_.emit(events::MACHINE_FILE_FETCHING,
+                        std::map<std::string, std::string>{{"licenseKey", license_key},
+                                                           {"fingerprint", request.fingerprint}});
+
+        const auto fingerprint_components = local_fingerprint_components_for(request.fingerprint);
+        auto body = json::build_machine_file_request(request.fingerprint, ttl_days, fingerprint_components);
+        auto response = send_post(
+            "/products/" + request.product_slug + "/licenses/" + license_key + "/machine-file", body);
+
+        if (!response.success) {
+            if (response.error_message.empty()) {
+                auto err = handle_error_response<MachineFile>(response);
+                event_bus_.emit(events::MACHINE_FILE_FETCH_ERROR,
+                                std::map<std::string, std::string>{
+                                    {"licenseKey", license_key},
+                                    {"fingerprint", request.fingerprint},
+                                    {"error", err.error_message()}});
+                return err;
+            }
+
+            event_bus_.emit(events::MACHINE_FILE_FETCH_ERROR,
+                            std::map<std::string, std::string>{{"licenseKey", license_key},
+                                                               {"fingerprint", request.fingerprint},
+                                                               {"error", response.error_message}});
+            return Result<MachineFile>::error(ErrorCode::NetworkError, response.error_message);
+        }
+
+        try {
+            auto j = nlohmann::json::parse(response.body);
+            auto machine_file = json::parse_machine_file(j);
+            if (machine_file.license_key.empty()) {
+                machine_file.license_key = license_key;
+            }
+            if (machine_file.fingerprint.empty()) {
+                machine_file.fingerprint = request.fingerprint;
+            }
+
+            storage_->set_machine_file(machine_file);
+
+            auto key_id = extract_machine_file_key_id(machine_file);
+            if (key_id.has_value() && !key_id->empty() && config_.signing_public_key.empty()) {
+                auto cached_key = storage_->get_signing_key(*key_id);
+                if (!cached_key.has_value()) {
+                    (void)fetch_signing_key(*key_id);
+                }
+            }
+
+            event_bus_.emit(events::MACHINE_FILE_FETCHED, machine_file);
+            event_bus_.emit(events::MACHINE_FILE_READY, machine_file);
+            return Result<MachineFile>::ok(std::move(machine_file));
+        } catch (const nlohmann::json::exception& e) {
+            event_bus_.emit(events::MACHINE_FILE_FETCH_ERROR,
+                            std::map<std::string, std::string>{{"licenseKey", license_key},
+                                                               {"fingerprint", request.fingerprint},
+                                                               {"error", e.what()}});
+            return Result<MachineFile>::error(
+                ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
+        }
+    }
+
     Result<bool> verify_offline_token(const OfflineToken& offline_token,
                                       const std::string& public_key_b64) {
         // Perform basic validity checks first
@@ -510,6 +593,19 @@ class Client::Impl {
 
         if (offline_token.is_not_yet_valid()) {
             return Result<bool>::error(ErrorCode::LicenseNotStarted, "Offline token is not yet valid");
+        }
+
+        const auto token_fingerprint = offline_token.token.fingerprint.has_value()
+                                           ? *offline_token.token.fingerprint
+                                           : offline_token.token.device_id.value_or("");
+        if (!token_fingerprint.empty() && !constant_time_equal(token_fingerprint, device_id_)) {
+            return Result<bool>::error(ErrorCode::FingerprintMismatch,
+                                       "Offline token fingerprint does not match this device");
+        }
+
+        if (offline_token.is_license_expired()) {
+            return Result<bool>::error(ErrorCode::LicenseExpired,
+                                       "Underlying license has expired");
         }
 
         // Determine which public key to use
@@ -536,6 +632,68 @@ class Client::Impl {
             event_bus_.emit(events::OFFLINE_TOKEN_VERIFIED, offline_token);
         }
         return result;
+    }
+
+    Result<MachineFileVerificationResult> verify_machine_file(const MachineFile& machine_file,
+                                                              const std::string& public_key_b64,
+                                                              const std::string& license_key,
+                                                              const std::string& device_id_param) {
+        std::string resolved_license_key = license_key;
+        if (resolved_license_key.empty()) {
+            resolved_license_key = machine_file.license_key;
+        }
+        if (resolved_license_key.empty()) {
+            auto cached_license = storage_->get_license();
+            if (cached_license.has_value()) {
+                resolved_license_key = cached_license->license_key;
+            }
+        }
+
+        std::string resolved_fingerprint = device_id_param;
+        if (resolved_fingerprint.empty()) {
+            resolved_fingerprint = device_id_;
+        }
+
+        if (resolved_license_key.empty()) {
+            return Result<MachineFileVerificationResult>::error(ErrorCode::InvalidLicenseKey,
+                                                                "License key is required");
+        }
+
+        if (resolved_fingerprint.empty()) {
+            return Result<MachineFileVerificationResult>::error(ErrorCode::MissingParameter,
+                                                                "Fingerprint is required");
+        }
+
+        auto key_id = extract_machine_file_key_id(machine_file);
+        auto public_key = resolve_signing_key(key_id, public_key_b64, false);
+        if (public_key.empty()) {
+            return Result<MachineFileVerificationResult>::error(
+                ErrorCode::MissingParameter,
+                "Public key required for machine file verification");
+        }
+
+        auto crypto_result = crypto::verify_machine_file(machine_file, resolved_license_key,
+                                                         resolved_fingerprint, public_key);
+
+        MachineFileVerificationResult result;
+        if (crypto_result.is_error()) {
+            result.valid = false;
+            result.code = offline_error_code_string(crypto_result.error_code());
+            result.message = crypto_result.error_message();
+            event_bus_.emit(events::MACHINE_FILE_VERIFICATION_FAILED,
+                            std::map<std::string, std::string>{
+                                {"fingerprint", resolved_fingerprint},
+                                {"licenseKey", resolved_license_key},
+                                {"code", result.code},
+                                {"error", result.message}});
+            return Result<MachineFileVerificationResult>::ok(std::move(result));
+        }
+
+        result.valid = true;
+        result.payload = std::move(crypto_result.value());
+        event_bus_.emit(events::MACHINE_FILE_VERIFIED, *result.payload);
+
+        return Result<MachineFileVerificationResult>::ok(std::move(result));
     }
 
     Result<std::string> fetch_signing_key(const std::string& key_id) {
@@ -645,6 +803,10 @@ class Client::Impl {
                     cached_validation_ = offline_result.value();
                 }
 
+                current_auto_license_key_ = license_key;
+                current_heartbeat_license_key_ = license_key;
+                offline_refresh_license_key_ = license_key;
+
                 // Start network recheck to detect when we come back online
                 start_network_recheck();
             } else {
@@ -652,8 +814,12 @@ class Client::Impl {
                 // Use OfflineInvalid (not Invalid) for offline failures (matches Swift SDK)
                 result.status = ClientStatus::OfflineInvalid;
                 result.message = offline_result.is_ok()
-                                     ? "Offline token verification failed: " + offline_result.value().code
+                                     ? "Offline verification failed: " + offline_result.value().code
                                      : offline_result.error_message();
+
+                current_auto_license_key_ = license_key;
+                current_heartbeat_license_key_ = license_key;
+                offline_refresh_license_key_ = license_key;
 
                 // Start network recheck to detect when we come back online
                 start_network_recheck();
@@ -1089,6 +1255,7 @@ class Client::Impl {
     const Config& config() const noexcept { return config_; }
 
     const std::string& device_id() const noexcept { return device_id_; }
+    const std::string& fingerprint() const noexcept { return device_id_; }
 
   private:
     /// Send a POST request, injecting telemetry if enabled
@@ -1181,6 +1348,7 @@ class Client::Impl {
         current_activation_.reset();
         storage_->clear_license();
         storage_->clear_offline_token();
+        storage_->clear_machine_file();
 
         // Stop all timers - no point continuing without a valid license
         // Note: These are called without lock, so they must be thread-safe
@@ -1233,7 +1401,244 @@ class Client::Impl {
         return result == 0;
     }
 
-    Result<ValidationResult> verify_cached_offline() {
+    std::string offline_error_code_string(ErrorCode code) const {
+        switch (code) {
+            case ErrorCode::InvalidLicenseKey:
+                return "invalid_license_key";
+            case ErrorCode::MissingParameter:
+                return "missing_parameter";
+            case ErrorCode::InvalidParameter:
+                return "invalid_parameter";
+            case ErrorCode::InvalidSignature:
+                return "verification_failed";
+            case ErrorCode::LicenseExpired:
+                return "license_expired";
+            case ErrorCode::LicenseNotStarted:
+                return "token_not_yet_valid";
+            case ErrorCode::DeviceNotActivated:
+                return "device_not_activated";
+            case ErrorCode::DecryptionFailed:
+                return "decryption_failed";
+            case ErrorCode::TokenExpired:
+                return "token_expired";
+            case ErrorCode::TokenNotYetValid:
+                return "token_not_yet_valid";
+            case ErrorCode::FingerprintMismatch:
+                return "fingerprint_mismatch";
+            case ErrorCode::ActivationNotFound:
+                return "machine_not_found";
+            default:
+                return "verification_failed";
+        }
+    }
+
+    std::optional<std::string> extract_machine_file_key_id(const MachineFile& machine_file) const {
+        if (machine_file.certificate.empty()) {
+            return std::nullopt;
+        }
+
+        std::string cleaned = machine_file.certificate;
+        const std::string begin_marker = "-----BEGIN MACHINE FILE-----";
+        const std::string end_marker = "-----END MACHINE FILE-----";
+
+        auto begin_pos = cleaned.find(begin_marker);
+        if (begin_pos != std::string::npos) {
+            cleaned.erase(begin_pos, begin_marker.size());
+        }
+
+        auto end_pos = cleaned.find(end_marker);
+        if (end_pos != std::string::npos) {
+            cleaned.erase(end_pos, end_marker.size());
+        }
+
+        cleaned.erase(std::remove_if(cleaned.begin(), cleaned.end(),
+                                     [](unsigned char ch) { return std::isspace(ch) != 0; }),
+                      cleaned.end());
+
+        auto decoded = crypto::base64_decode(cleaned);
+        if (decoded.empty()) {
+            return std::nullopt;
+        }
+
+        try {
+            auto envelope =
+                nlohmann::json::parse(std::string(decoded.begin(), decoded.end()));
+            auto key_id = envelope.value("kid", std::string{});
+            if (key_id.empty()) {
+                return std::nullopt;
+            }
+            return key_id;
+        } catch (const nlohmann::json::exception&) {
+            return std::nullopt;
+        }
+    }
+
+    std::string resolve_signing_key(const std::optional<std::string>& key_id,
+                                    const std::string& explicit_public_key,
+                                    bool allow_fetch) {
+        if (!explicit_public_key.empty()) {
+            return explicit_public_key;
+        }
+
+        if (!config_.signing_public_key.empty()) {
+            return config_.signing_public_key;
+        }
+
+        auto resolve_by_key_id = [&](const std::string& candidate_key_id) -> std::string {
+            if (candidate_key_id.empty()) {
+                return "";
+            }
+
+            auto cached_key = storage_->get_signing_key(candidate_key_id);
+            if (cached_key.has_value()) {
+                return *cached_key;
+            }
+
+            if (!allow_fetch) {
+                return "";
+            }
+
+            auto fetched_key = fetch_signing_key(candidate_key_id);
+            if (fetched_key.is_ok()) {
+                return fetched_key.value();
+            }
+
+            return "";
+        };
+
+        if (key_id.has_value()) {
+            auto key = resolve_by_key_id(*key_id);
+            if (!key.empty()) {
+                return key;
+            }
+        }
+
+        if (!config_.signing_key_id.empty()) {
+            return resolve_by_key_id(config_.signing_key_id);
+        }
+
+        return "";
+    }
+
+    std::string reconnect_license_key() const {
+        if (!offline_refresh_license_key_.empty()) {
+            return offline_refresh_license_key_;
+        }
+
+        if (!current_auto_license_key_.empty()) {
+            return current_auto_license_key_;
+        }
+
+        if (!current_heartbeat_license_key_.empty()) {
+            return current_heartbeat_license_key_;
+        }
+
+        auto cached_license = storage_->get_license();
+        if (cached_license.has_value()) {
+            return cached_license->license_key;
+        }
+
+        return "";
+    }
+
+    bool is_clock_tampered(int64_t now_unix) const {
+        auto last_seen = storage_->get_last_seen_timestamp();
+        if (!last_seen.has_value()) {
+            return false;
+        }
+
+        const auto max_skew_sec = config_.max_clock_skew_ms / 1000.0;
+        return static_cast<double>(now_unix) + max_skew_sec < *last_seen;
+    }
+
+    void update_last_seen(int64_t now_unix) {
+        storage_->set_last_seen_timestamp(static_cast<double>(now_unix));
+    }
+
+    License fallback_license_for_machine_payload(
+        const MachineFilePayload& payload,
+        const std::optional<CachedLicense>& cached_license) const {
+        if (cached_license.has_value() && cached_license->license_data.has_value()) {
+            return *cached_license->license_data;
+        }
+
+        std::optional<Timestamp> expires_at;
+        if (payload.license_expires_at.has_value()) {
+            expires_at = std::chrono::system_clock::from_time_t(
+                static_cast<std::time_t>(*payload.license_expires_at));
+        }
+
+        Product product;
+        if (cached_license.has_value() && cached_license->license_data.has_value()) {
+            product = cached_license->license_data->product();
+        }
+
+        return License(payload.license_key, LicenseStatus::Active, LicenseMode::Unknown, "",
+                       std::nullopt, 0, std::nullopt, expires_at, {}, {}, product);
+    }
+
+    Result<ValidationResult> verify_cached_machine_file() {
+        auto cached_machine_file = storage_->get_machine_file();
+        if (!cached_machine_file.has_value()) {
+            ValidationResult result;
+            result.valid = false;
+            result.offline = true;
+            result.code = "no_machine_file";
+            return Result<ValidationResult>::ok(std::move(result));
+        }
+
+        auto verify_result = verify_machine_file(*cached_machine_file, "", "", "");
+        ValidationResult result;
+        result.offline = true;
+
+        if (!verify_result.is_ok()) {
+            result.valid = false;
+            result.code = offline_error_code_string(verify_result.error_code());
+            result.message = verify_result.error_message();
+            return Result<ValidationResult>::ok(std::move(result));
+        }
+
+        if (!verify_result.value().valid || !verify_result.value().payload.has_value()) {
+            result.valid = false;
+            result.code = verify_result.value().code.empty() ? "verification_failed"
+                                                             : verify_result.value().code;
+            result.message = verify_result.value().message;
+            return Result<ValidationResult>::ok(std::move(result));
+        }
+
+        const auto& payload = *verify_result.value().payload;
+        auto cached_license = storage_->get_license();
+
+        if (cached_license.has_value() && !cached_license->license_key.empty() &&
+            !payload.license_key.empty() &&
+            !constant_time_equal(payload.license_key, cached_license->license_key)) {
+            result.valid = false;
+            result.code = "license_mismatch";
+            return Result<ValidationResult>::ok(std::move(result));
+        }
+
+        auto now = std::chrono::system_clock::now();
+        auto now_unix = std::chrono::duration_cast<std::chrono::seconds>(
+                            now.time_since_epoch())
+                            .count();
+
+        if (is_clock_tampered(now_unix)) {
+            result.valid = false;
+            result.code = "clock_tamper";
+            return Result<ValidationResult>::ok(std::move(result));
+        }
+
+        update_last_seen(now_unix);
+
+        result.valid = true;
+        result.license = payload.license.has_value()
+                             ? *payload.license
+                             : fallback_license_for_machine_payload(payload, cached_license);
+
+        return Result<ValidationResult>::ok(std::move(result));
+    }
+
+    Result<ValidationResult> verify_cached_offline_token() {
         auto cached_offline = storage_->get_offline_token();
         if (!cached_offline) {
             ValidationResult result;
@@ -1267,13 +1672,14 @@ class Client::Impl {
 
         if (!verify_result.is_ok() || !verify_result.value()) {
             result.valid = false;
-            result.code = "signature_invalid";
+            result.code = verify_result.is_ok() ? "signature_invalid"
+                                                : offline_error_code_string(verify_result.error_code());
+            result.message = verify_result.is_ok() ? "" : verify_result.error_message();
             event_bus_.emit(events::OFFLINE_TOKEN_VERIFICATION_FAILED,
                             std::map<std::string, std::string>{{"kid", cached_offline->signature.key_id}});
             return Result<ValidationResult>::ok(result);
         }
 
-        // 1. License key match (constant-time comparison) - matches Swift SDK
         auto cached_license = storage_->get_license();
         if (!cached_license) {
             result.valid = false;
@@ -1287,7 +1693,6 @@ class Client::Impl {
             return Result<ValidationResult>::ok(result);
         }
 
-        // 2. Check token expiry (exp is Unix timestamp)
         auto now = std::chrono::system_clock::now();
         auto now_unix = std::chrono::duration_cast<std::chrono::seconds>(
                             now.time_since_epoch())
@@ -1299,23 +1704,19 @@ class Client::Impl {
             return Result<ValidationResult>::ok(result);
         }
 
-        // 3. Check not-before (nbf is Unix timestamp)
         if (now_unix < cached_offline->token.nbf) {
             result.valid = false;
             result.code = "token_not_yet_valid";
             return Result<ValidationResult>::ok(result);
         }
 
-        // 4. Check license expiry if present
-        if (cached_offline->token.license_expires_at.has_value()) {
-            if (now_unix > *cached_offline->token.license_expires_at) {
-                result.valid = false;
-                result.code = "license_expired";
-                return Result<ValidationResult>::ok(result);
-            }
+        if (cached_offline->token.license_expires_at.has_value() &&
+            now_unix > *cached_offline->token.license_expires_at) {
+            result.valid = false;
+            result.code = "license_expired";
+            return Result<ValidationResult>::ok(result);
         }
 
-        // 5. Grace period check (matches Swift SDK)
         if (config_.max_offline_days > 0) {
             auto last_validated = cached_license->last_validated;
             auto last_validated_unix = std::chrono::duration_cast<std::chrono::seconds>(
@@ -1329,27 +1730,17 @@ class Client::Impl {
             }
         }
 
-        // 6. Clock tamper detection (matches Swift SDK)
-        auto last_seen = storage_->get_last_seen_timestamp();
-        if (last_seen) {
-            auto now_ms = static_cast<double>(now_unix);
-            auto max_skew_sec = config_.max_clock_skew_ms / 1000.0;
-            if (now_ms + max_skew_sec < *last_seen) {
-                result.valid = false;
-                result.code = "clock_tamper";
-                return Result<ValidationResult>::ok(result);
-            }
+        if (is_clock_tampered(now_unix)) {
+            result.valid = false;
+            result.code = "clock_tamper";
+            return Result<ValidationResult>::ok(result);
         }
 
-        // Update last seen timestamp
-        storage_->set_last_seen_timestamp(static_cast<double>(now_unix));
+        update_last_seen(now_unix);
 
-        // Build successful response with entitlements from token
         result.valid = true;
         result.code = "";
 
-        // Build license from token data for consistent offline response
-        // token.entitlements already contains Entitlement objects with proper Timestamp types
         std::vector<Entitlement> entitlements = cached_offline->token.entitlements;
 
         std::optional<Timestamp> license_expires;
@@ -1364,8 +1755,8 @@ class Client::Impl {
             license_mode_from_string(cached_offline->token.mode),
             cached_offline->token.plan_key,
             cached_offline->token.seat_limit,
-            0,  // active_seats not available in offline token
-            std::nullopt,  // starts_at
+            0,
+            std::nullopt,
             license_expires,
             entitlements,
             cached_offline->token.metadata,
@@ -1374,8 +1765,38 @@ class Client::Impl {
         return Result<ValidationResult>::ok(result);
     }
 
+    Result<ValidationResult> verify_cached_offline() {
+        auto machine_result = verify_cached_machine_file();
+        if (machine_result.is_ok() && machine_result.value().valid) {
+            return machine_result;
+        }
+
+        auto offline_token_result = verify_cached_offline_token();
+        if (offline_token_result.is_ok() && offline_token_result.value().valid) {
+            return offline_token_result;
+        }
+
+        if (machine_result.is_ok() && machine_result.value().code != "no_machine_file") {
+            return machine_result;
+        }
+
+        return offline_token_result;
+    }
+
     void sync_offline_assets_impl(const std::string& license_key, const std::string& device_id) {
         if (license_key.empty()) {
+            return;
+        }
+
+        auto machine_file_result = checkout_machine_file(license_key, device_id, 30);
+        if (machine_file_result.is_ok()) {
+            auto verify_result = verify_machine_file(machine_file_result.value(), "", "", "");
+            if (verify_result.is_ok() && verify_result.value().valid) {
+                return;
+            }
+        }
+
+        if (!config_.enable_legacy_offline_tokens) {
             return;
         }
 
@@ -1496,18 +1917,14 @@ class Client::Impl {
                     // Stop the recheck timer since we're online now
                     network_recheck_running_ = false;
 
-                    // Restart auto-validation and heartbeat if we have license keys
-                    if (!current_auto_license_key_.empty()) {
-                        auto future = std::async(std::launch::async, [this]() {
-                            this->start_auto_validation(current_auto_license_key_);
-                        });
-                        store_future(std::move(future));
-                    }
-                    if (!current_heartbeat_license_key_.empty()) {
-                        auto future = std::async(std::launch::async, [this]() {
-                            this->start_heartbeat(current_heartbeat_license_key_);
-                        });
-                        store_future(std::move(future));
+                    auto license_key = reconnect_license_key();
+                    if (!license_key.empty()) {
+                        auto validation_result = this->validate(license_key, "");
+                        if (validation_result.is_ok() && validation_result.value().valid) {
+                            this->start_auto_validation(license_key);
+                            this->start_heartbeat(license_key);
+                            this->start_offline_refresh(license_key);
+                        }
                     }
                 }
             }
@@ -1574,8 +1991,18 @@ class Client::Impl {
         return response.success;
     }
 
+    Metadata local_fingerprint_components_for(const std::string& requested_fingerprint) const {
+        if (!device_id_auto_generated_ || device_id_ == "unknown-device" ||
+            requested_fingerprint != device_id_) {
+            return {};
+        }
+
+        return device::collect_fingerprint_components();
+    }
+
     Config config_;
     std::string device_id_;
+    bool device_id_auto_generated_ = false;
     std::unique_ptr<http::HttpClient> http_client_;
     std::unique_ptr<StorageInterface> storage_;
     std::optional<Activation> current_activation_;
@@ -1678,9 +2105,23 @@ Result<OfflineToken> Client::generate_offline_token(const std::string& license_k
     return impl_->generate_offline_token(license_key, device_id, ttl_days);
 }
 
+Result<MachineFile> Client::checkout_machine_file(const std::string& license_key,
+                                                  const std::string& device_id,
+                                                  int ttl_days) {
+    return impl_->checkout_machine_file(license_key, device_id, ttl_days);
+}
+
 Result<bool> Client::verify_offline_token(const OfflineToken& offline_token,
                                           const std::string& public_key_b64) {
     return impl_->verify_offline_token(offline_token, public_key_b64);
+}
+
+Result<MachineFileVerificationResult> Client::verify_machine_file(
+    const MachineFile& machine_file,
+    const std::string& public_key_b64,
+    const std::string& license_key,
+    const std::string& device_id) {
+    return impl_->verify_machine_file(machine_file, public_key_b64, license_key, device_id);
 }
 
 Result<std::string> Client::fetch_signing_key(const std::string& key_id) {
@@ -1755,5 +2196,7 @@ void Client::reset() { impl_->reset(); }
 const Config& Client::config() const noexcept { return impl_->config(); }
 
 const std::string& Client::device_id() const { return impl_->device_id(); }
+
+const std::string& Client::fingerprint() const { return impl_->fingerprint(); }
 
 }  // namespace licenseseat

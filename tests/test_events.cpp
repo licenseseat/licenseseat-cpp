@@ -191,6 +191,14 @@ TEST(EventConstantsTest, EventNamesAreDefined) {
     EXPECT_STREQ(events::OFFLINE_TOKEN_VERIFIED, "offlineToken:verified");
     EXPECT_STREQ(events::OFFLINE_TOKEN_VERIFICATION_FAILED, "offlineToken:verificationFailed");
 
+    // Machine file events
+    EXPECT_STREQ(events::MACHINE_FILE_FETCHING, "machineFile:fetching");
+    EXPECT_STREQ(events::MACHINE_FILE_FETCHED, "machineFile:fetched");
+    EXPECT_STREQ(events::MACHINE_FILE_FETCH_ERROR, "machineFile:fetchError");
+    EXPECT_STREQ(events::MACHINE_FILE_READY, "machineFile:ready");
+    EXPECT_STREQ(events::MACHINE_FILE_VERIFIED, "machineFile:verified");
+    EXPECT_STREQ(events::MACHINE_FILE_VERIFICATION_FAILED, "machineFile:verificationFailed");
+
     // Heartbeat events
     EXPECT_STREQ(events::HEARTBEAT_SUCCESS, "heartbeat:success");
     EXPECT_STREQ(events::HEARTBEAT_ERROR, "heartbeat:error");

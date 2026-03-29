@@ -65,8 +65,14 @@ class EventSubscription {
  * - "network:offline" - Network became unavailable
  * - "autovalidation:cycle" - Auto-validation cycle completed
  * - "autovalidation:stopped" - Auto-validation stopped
- * - "offlineLicense:ready" - Offline license ready
- * - "offlineLicense:verified" - Offline license verified
+ * - "offlineToken:ready" - Legacy offline token ready
+ * - "offlineToken:verified" - Legacy offline token verified
+ * - "machineFile:fetching" - Machine file fetch started
+ * - "machineFile:fetched" - Machine file fetched from server
+ * - "machineFile:fetchError" - Machine file fetch failed
+ * - "machineFile:ready" - Machine file cached locally
+ * - "machineFile:verified" - Machine file verified locally
+ * - "machineFile:verificationFailed" - Machine file verification failed
  * - "sdk:reset" - SDK state was reset
  */
 class EventBus {
@@ -208,6 +214,14 @@ constexpr const char* OFFLINE_TOKEN_FETCH_ERROR = "offlineToken:fetchError";
 constexpr const char* OFFLINE_TOKEN_READY = "offlineToken:ready";
 constexpr const char* OFFLINE_TOKEN_VERIFIED = "offlineToken:verified";
 constexpr const char* OFFLINE_TOKEN_VERIFICATION_FAILED = "offlineToken:verificationFailed";
+
+// Machine file events
+constexpr const char* MACHINE_FILE_FETCHING = "machineFile:fetching";
+constexpr const char* MACHINE_FILE_FETCHED = "machineFile:fetched";
+constexpr const char* MACHINE_FILE_FETCH_ERROR = "machineFile:fetchError";
+constexpr const char* MACHINE_FILE_READY = "machineFile:ready";
+constexpr const char* MACHINE_FILE_VERIFIED = "machineFile:verified";
+constexpr const char* MACHINE_FILE_VERIFICATION_FAILED = "machineFile:verificationFailed";
 
 // Heartbeat events
 constexpr const char* HEARTBEAT_SUCCESS = "heartbeat:success";

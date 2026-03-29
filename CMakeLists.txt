@@ -47,7 +47,7 @@ if(LICENSESEAT_ENABLE_CLANG_TIDY)
     endif()
 endif()
 
-# OpenSSL is the only external dependency (for HTTPS)
+# OpenSSL is the only external dependency (for HTTPS and machine-file AES-GCM)
 find_package(OpenSSL REQUIRED)
 
 # JSON and HTTP are bundled (no installation needed)

@@ -3,6 +3,7 @@
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <vector>
 
@@ -37,6 +38,29 @@ std::string sha256_hex(const std::string& input);
 }  // namespace internal
 
 namespace {
+
+#if defined(LICENSESEAT_PLATFORM_LINUX)
+std::string trim_identifier(const std::string& value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return "";
+    }
+
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::string read_trimmed_file(const char* path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        return "";
+    }
+
+    std::string value;
+    std::getline(file, value);
+    return trim_identifier(value);
+}
+#endif
 
 #if defined(LICENSESEAT_PLATFORM_MACOS)
 
@@ -74,34 +98,19 @@ std::string get_macos_platform_uuid() {
 #elif defined(LICENSESEAT_PLATFORM_LINUX)
 
 std::string get_linux_machine_id() {
-    // Try /etc/machine-id first (systemd)
-    std::ifstream machine_id_file("/etc/machine-id");
-    if (machine_id_file.is_open()) {
-        std::string machine_id;
-        std::getline(machine_id_file, machine_id);
-        if (!machine_id.empty()) {
-            return machine_id;
-        }
+    auto machine_id = read_trimmed_file("/etc/machine-id");
+    if (!machine_id.empty()) {
+        return machine_id;
     }
 
-    // Fallback to /var/lib/dbus/machine-id
-    std::ifstream dbus_file("/var/lib/dbus/machine-id");
-    if (dbus_file.is_open()) {
-        std::string machine_id;
-        std::getline(dbus_file, machine_id);
-        if (!machine_id.empty()) {
-            return machine_id;
-        }
+    auto dbus_machine_id = read_trimmed_file("/var/lib/dbus/machine-id");
+    if (!dbus_machine_id.empty()) {
+        return dbus_machine_id;
     }
 
-    // Fallback to DMI product UUID (requires root)
-    std::ifstream dmi_file("/sys/class/dmi/id/product_uuid");
-    if (dmi_file.is_open()) {
-        std::string uuid;
-        std::getline(dmi_file, uuid);
-        if (!uuid.empty()) {
-            return uuid;
-        }
+    auto dmi_uuid = read_trimmed_file("/sys/class/dmi/id/product_uuid");
+    if (!dmi_uuid.empty()) {
+        return dmi_uuid;
     }
 
     // Final fallback: hostname (for minimal containers like Alpine Docker)
@@ -145,15 +154,21 @@ std::string get_windows_machine_guid() {
 }  // namespace
 
 std::string generate_device_id() {
+    auto components = collect_fingerprint_components();
     std::string raw_id;
 
-#if defined(LICENSESEAT_PLATFORM_MACOS)
-    raw_id = get_macos_platform_uuid();
-#elif defined(LICENSESEAT_PLATFORM_LINUX)
-    raw_id = get_linux_machine_id();
-#elif defined(LICENSESEAT_PLATFORM_WINDOWS)
-    raw_id = get_windows_machine_guid();
-#endif
+    const auto use_component = [&](const char* key) {
+        auto it = components.find(key);
+        if (it != components.end() && !it->second.empty()) {
+            raw_id = it->second;
+            return true;
+        }
+        return false;
+    };
+
+    use_component("platform_uuid") || use_component("machine_id") ||
+        use_component("dbus_machine_id") || use_component("dmi_product_uuid") ||
+        use_component("machine_guid") || use_component("hostname");
 
     if (raw_id.empty()) {
         return "";
@@ -196,6 +211,60 @@ std::string get_hostname() {
     }
 #endif
     return "unknown";
+}
+
+std::map<std::string, std::string> collect_fingerprint_components() {
+    std::map<std::string, std::string> components;
+    components["schema_version"] = "1";
+    components["strategy"] = "stable_exact";
+    components["platform"] = get_platform_name();
+
+    const auto hostname = get_hostname();
+    if (!hostname.empty() && hostname != "unknown") {
+        components["hostname"] = hostname;
+    }
+
+#if defined(LICENSESEAT_PLATFORM_MACOS)
+    auto platform_uuid = get_macos_platform_uuid();
+    if (!platform_uuid.empty()) {
+        components["platform_uuid"] = platform_uuid;
+        components["primary_signal"] = "platform_uuid";
+    }
+#elif defined(LICENSESEAT_PLATFORM_LINUX)
+    auto machine_id = read_trimmed_file("/etc/machine-id");
+    if (!machine_id.empty()) {
+        components["machine_id"] = machine_id;
+        components["primary_signal"] = "machine_id";
+    }
+
+    auto dbus_machine_id = read_trimmed_file("/var/lib/dbus/machine-id");
+    if (!dbus_machine_id.empty() && dbus_machine_id != machine_id) {
+        components["dbus_machine_id"] = dbus_machine_id;
+        if (components.find("primary_signal") == components.end()) {
+            components["primary_signal"] = "dbus_machine_id";
+        }
+    }
+
+    auto dmi_uuid = read_trimmed_file("/sys/class/dmi/id/product_uuid");
+    if (!dmi_uuid.empty()) {
+        components["dmi_product_uuid"] = dmi_uuid;
+        if (components.find("primary_signal") == components.end()) {
+            components["primary_signal"] = "dmi_product_uuid";
+        }
+    }
+#elif defined(LICENSESEAT_PLATFORM_WINDOWS)
+    auto machine_guid = get_windows_machine_guid();
+    if (!machine_guid.empty()) {
+        components["machine_guid"] = machine_guid;
+        components["primary_signal"] = "machine_guid";
+    }
+#endif
+
+    if (components.find("primary_signal") == components.end() && components.count("hostname") > 0) {
+        components["primary_signal"] = "hostname";
+    }
+
+    return components;
 }
 
 }  // namespace device

@@ -282,9 +282,10 @@ using nlohmann::json;
         id = j["id"].get<int64_t>();
     }
 
-    // New API uses "device_id" instead of "device_identifier"
     std::string device_id;
-    if (j.contains("device_id")) {
+    if (j.contains("fingerprint")) {
+        device_id = j["fingerprint"].get<std::string>();
+    } else if (j.contains("device_id")) {
         device_id = j["device_id"].get<std::string>();
     }
 
@@ -438,8 +439,12 @@ using nlohmann::json;
         payload.seat_limit = j["seat_limit"].get<int>();
     }
 
-    if (j.contains("device_id") && !j["device_id"].is_null()) {
+    if (j.contains("fingerprint") && !j["fingerprint"].is_null()) {
+        payload.fingerprint = j["fingerprint"].get<std::string>();
+        payload.device_id = payload.fingerprint;
+    } else if (j.contains("device_id") && !j["device_id"].is_null()) {
         payload.device_id = j["device_id"].get<std::string>();
+        payload.fingerprint = payload.device_id;
     }
 
     if (j.contains("iat") && j["iat"].is_number()) {
@@ -545,6 +550,9 @@ using nlohmann::json;
     if (offline.token.seat_limit.has_value()) {
         j["token"]["seat_limit"] = *offline.token.seat_limit;
     }
+    if (offline.token.fingerprint.has_value()) {
+        j["token"]["fingerprint"] = *offline.token.fingerprint;
+    }
     if (offline.token.device_id.has_value()) {
         j["token"]["device_id"] = *offline.token.device_id;
     }
@@ -579,6 +587,148 @@ using nlohmann::json;
 [[nodiscard]] inline OfflineToken offline_token_from_json(const std::string& json_str) {
     auto j = json::parse(json_str);
     return parse_offline_token(j);
+}
+
+// ==================== Machine File Parsing ====================
+
+/// Parse machine-file response from API
+[[nodiscard]] inline MachineFile parse_machine_file(const json& j) {
+    MachineFile machine_file;
+
+    const json* data = &j;
+    if (j.contains("data") && j["data"].is_object()) {
+        data = &j["data"];
+    }
+
+    if (data->contains("attributes") && (*data)["attributes"].is_object()) {
+        const auto& attrs = (*data)["attributes"];
+        machine_file.certificate = attrs.value("certificate", "");
+        machine_file.algorithm = attrs.value("algorithm", machine_file.algorithm);
+        machine_file.ttl = attrs.value("ttl", int64_t{0});
+        if (attrs.contains("issued") && attrs["issued"].is_string()) {
+            machine_file.issued_at = parse_timestamp(attrs["issued"].get<std::string>());
+        }
+        if (attrs.contains("expiry") && attrs["expiry"].is_string()) {
+            machine_file.expires_at = parse_timestamp(attrs["expiry"].get<std::string>());
+        }
+    }
+
+    if (data->contains("relationships") && (*data)["relationships"].is_object()) {
+        const auto& relationships = (*data)["relationships"];
+        if (relationships.contains("license") && relationships["license"].contains("data")) {
+            machine_file.license_key =
+                relationships["license"]["data"].value("id", std::string{});
+        }
+        if (relationships.contains("machine") && relationships["machine"].contains("data")) {
+            machine_file.fingerprint =
+                relationships["machine"]["data"].value("id", std::string{});
+        }
+    }
+
+    return machine_file;
+}
+
+/// Parse license data embedded in a machine-file payload
+[[nodiscard]] inline License parse_machine_file_license(const json& j) {
+    const auto& attrs = j.contains("attributes") && j["attributes"].is_object() ? j["attributes"] : j;
+
+    std::string key = attrs.value("key", j.value("id", std::string{}));
+    auto status = license_status_from_string(attrs.value("status", std::string{}));
+    auto mode = license_mode_from_string(attrs.value("mode", std::string{}));
+    std::string plan_key = attrs.value("plan_key", std::string{});
+
+    std::optional<int> seat_limit;
+    if (attrs.contains("seat_limit") && !attrs["seat_limit"].is_null()) {
+        seat_limit = attrs["seat_limit"].get<int>();
+    }
+
+    std::optional<Timestamp> starts_at;
+    if (attrs.contains("starts_at") && !attrs["starts_at"].is_null()) {
+        starts_at = parse_timestamp(attrs["starts_at"].get<std::string>());
+    }
+
+    std::optional<Timestamp> expires_at;
+    if (attrs.contains("ends_at") && !attrs["ends_at"].is_null()) {
+        expires_at = parse_timestamp(attrs["ends_at"].get<std::string>());
+    }
+
+    std::vector<Entitlement> entitlements;
+    if (attrs.contains("entitlements") && attrs["entitlements"].is_array()) {
+        entitlements = parse_entitlements(attrs["entitlements"]);
+    }
+
+    Metadata metadata;
+    if (attrs.contains("metadata") && attrs["metadata"].is_object()) {
+        metadata = parse_metadata(attrs["metadata"]);
+    }
+
+    std::string product_slug = attrs.value("product_slug", std::string{});
+    return License(std::move(key), status, mode, std::move(plan_key), seat_limit, 0, starts_at,
+                   expires_at, std::move(entitlements), std::move(metadata),
+                   Product{product_slug, product_slug});
+}
+
+/// Parse decrypted machine-file payload
+[[nodiscard]] inline MachineFilePayload parse_machine_file_payload(const json& j) {
+    MachineFilePayload payload;
+
+    if (j.contains("meta") && j["meta"].is_object()) {
+        const auto& meta = j["meta"];
+        payload.schema_version = meta.value("schema_version", 0);
+        payload.issued = meta.value("issued", std::string{});
+        payload.iat = meta.value("iat", int64_t{0});
+        payload.expiry = meta.value("expiry", std::string{});
+        payload.exp = meta.value("exp", int64_t{0});
+        payload.nbf = meta.value("nbf", int64_t{0});
+        payload.ttl = meta.value("ttl", int64_t{0});
+        payload.grace_period = meta.value("grace_period", int64_t{0});
+        payload.license_key = meta.value("lic", std::string{});
+        if (meta.contains("license_exp") && !meta["license_exp"].is_null()) {
+            payload.license_expires_at = meta["license_exp"].get<int64_t>();
+        }
+        payload.key_id = meta.value("kid", std::string{});
+        if (meta.contains("sdk_version") && !meta["sdk_version"].is_null()) {
+            payload.sdk_version = meta["sdk_version"].get<std::string>();
+        }
+    }
+
+    if (j.contains("data") && j["data"].is_object()) {
+        const auto& data = j["data"];
+        payload.machine_id = data.value("id", std::string{});
+        if (data.contains("attributes") && data["attributes"].is_object()) {
+            const auto& attrs = data["attributes"];
+            if (attrs.contains("fingerprint") && attrs["fingerprint"].is_string()) {
+                payload.fingerprint = attrs["fingerprint"].get<std::string>();
+            }
+            if (attrs.contains("fingerprint_components") &&
+                attrs["fingerprint_components"].is_object()) {
+                payload.fingerprint_components = parse_metadata(attrs["fingerprint_components"]);
+            }
+            if (attrs.contains("name") && attrs["name"].is_string()) {
+                payload.device_name = attrs["name"].get<std::string>();
+            }
+            if (attrs.contains("platform") && attrs["platform"].is_string()) {
+                payload.platform = attrs["platform"].get<std::string>();
+            }
+            if (attrs.contains("created") && attrs["created"].is_string()) {
+                payload.created_at = parse_timestamp(attrs["created"].get<std::string>());
+            }
+            if (attrs.contains("metadata") && attrs["metadata"].is_object()) {
+                payload.metadata = parse_metadata(attrs["metadata"]);
+            }
+        }
+    }
+
+    if (j.contains("included") && j["included"].is_array()) {
+        for (const auto& included : j["included"]) {
+            if (included.value("type", std::string{}) == "licenses") {
+                payload.license = parse_machine_file_license(included);
+                break;
+            }
+        }
+    }
+
+    return payload;
 }
 
 // ==================== Release Parsing ====================
@@ -672,10 +822,24 @@ struct ApiError {
 
 /// Parse error response from JSON (new API format)
 /// New format: {"error": {"code": "...", "message": "...", "details": {...}}}
+/// Machine-file endpoints may also return: {"errors": [{"code": "...", "title": "...", "detail": "..."}]}
 [[nodiscard]] inline ApiError parse_error_response(const json& j) {
     ApiError err;
 
-    if (j.contains("error") && j["error"].is_object()) {
+    if (j.contains("errors") && j["errors"].is_array() && !j["errors"].empty() &&
+        j["errors"][0].is_object()) {
+        const auto& error_obj = j["errors"][0];
+        if (error_obj.contains("code")) {
+            err.code = error_obj["code"].get<std::string>();
+        }
+        if (error_obj.contains("detail")) {
+            err.message = error_obj["detail"].get<std::string>();
+        } else if (error_obj.contains("message")) {
+            err.message = error_obj["message"].get<std::string>();
+        } else if (error_obj.contains("title")) {
+            err.message = error_obj["title"].get<std::string>();
+        }
+    } else if (j.contains("error") && j["error"].is_object()) {
         const auto& error_obj = j["error"];
         if (error_obj.contains("code")) {
             err.code = error_obj["code"].get<std::string>();
@@ -709,6 +873,8 @@ struct ApiError {
         return ErrorCode::ActivationNotFound;
     if (code == "device_already_activated")
         return ErrorCode::DeviceAlreadyActivated;
+    if (code == "device_not_activated" || code == "DEVICE_NOT_ACTIVATED")
+        return ErrorCode::DeviceNotActivated;
     if (code == "product_not_found")
         return ErrorCode::ProductNotFound;
     if (code == "release_not_found")
@@ -731,18 +897,43 @@ struct ApiError {
         return ErrorCode::FeatureNotConfigured;
     if (code == "server_error")
         return ErrorCode::ServerError;
+    if (code == "DECRYPTION_FAILED" || code == "decryption_failed")
+        return ErrorCode::DecryptionFailed;
+    if (code == "TOKEN_EXPIRED" || code == "token_expired")
+        return ErrorCode::TokenExpired;
+    if (code == "TOKEN_NOT_YET_VALID" || code == "token_not_yet_valid")
+        return ErrorCode::TokenNotYetValid;
+    if (code == "FINGERPRINT_MISMATCH" || code == "fingerprint_mismatch")
+        return ErrorCode::FingerprintMismatch;
+    if (code == "VERIFICATION_FAILED" || code == "verification_failed")
+        return ErrorCode::InvalidSignature;
+    if (code == "INVALID_FINGERPRINT" || code == "invalid_fingerprint")
+        return ErrorCode::InvalidParameter;
+    if (code == "MACHINE_NOT_FOUND" || code == "machine_not_found")
+        return ErrorCode::ActivationNotFound;
+    if (code == "AMBIGUOUS_MACHINE" || code == "ambiguous_machine")
+        return ErrorCode::InvalidParameter;
 
     return ErrorCode::Unknown;
 }
 
 // ==================== Request Body Builders ====================
 
+[[nodiscard]] inline json fingerprint_alias_payload(const std::string& fingerprint,
+                                                    bool include_when_empty = false) {
+    json body;
+    if (include_when_empty || !fingerprint.empty()) {
+        body["fingerprint"] = fingerprint;
+        body["device_id"] = fingerprint;
+    }
+    return body;
+}
+
 /// Build JSON body for activation request (new API format)
 [[nodiscard]] inline json build_activate_request(const std::string& device_id,
                                                  const std::string& device_name,
                                                  const Metadata& metadata) {
-    json body;
-    body["device_id"] = device_id;
+    json body = fingerprint_alias_payload(device_id, true);
 
     if (!device_name.empty()) {
         body["device_name"] = device_name;
@@ -757,30 +948,36 @@ struct ApiError {
 
 /// Build JSON body for deactivation request (new API format)
 [[nodiscard]] inline json build_deactivate_request(const std::string& device_id) {
-    json body;
-    body["device_id"] = device_id;
-    return body;
+    return fingerprint_alias_payload(device_id, true);
 }
 
 /// Build JSON body for validation request (new API format)
 [[nodiscard]] inline json build_validate_request(const std::string& device_id) {
-    json body;
-    if (!device_id.empty()) {
-        body["device_id"] = device_id;
-    }
-    return body;
+    return fingerprint_alias_payload(device_id);
 }
 
 /// Build JSON body for offline token request (new API format)
 [[nodiscard]] inline json build_offline_token_request(const std::string& device_id,
                                                       int ttl_days) {
-    json body;
-    if (!device_id.empty()) {
-        body["device_id"] = device_id;
-    }
+    json body = fingerprint_alias_payload(device_id);
     if (ttl_days > 0) {
         body["ttl_days"] = ttl_days;
     }
+    return body;
+}
+
+/// Build JSON body for machine-file request
+[[nodiscard]] inline json build_machine_file_request(const std::string& device_id,
+                                                     int ttl_days,
+                                                     const Metadata& fingerprint_components = {}) {
+    json body = fingerprint_alias_payload(device_id);
+    if (ttl_days > 0) {
+        body["ttl"] = ttl_days;
+    }
+    if (!fingerprint_components.empty()) {
+        body["fingerprint_components"] = metadata_to_json(fingerprint_components);
+    }
+    body["include"] = json::array({"license"});
     return body;
 }
 

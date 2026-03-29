@@ -1,12 +1,12 @@
 /**
- * @file crypto_minimal.cpp
- * @brief Minimal crypto implementation without OpenSSL dependency
+ * @file crypto.cpp
+ * @brief Crypto implementation for signatures, hashing, and machine files
  *
  * Uses vendored libraries:
  * - orlp/ed25519 for Ed25519 signature verification
  * - PicoSHA2 for SHA-256 hashing
  *
- * This file is compiled when LICENSESEAT_USE_OPENSSL=OFF
+ * AES-256-GCM machine-file decryption currently uses OpenSSL EVP.
  */
 
 #ifndef LICENSESEAT_USE_OPENSSL
@@ -22,8 +22,12 @@ extern "C" {
 // Vendored PicoSHA2 library (header-only)
 #include "PicoSHA2/picosha2.h"
 
+#include <openssl/evp.h>
+
 #include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <memory>
 
 namespace licenseseat {
 namespace crypto {
@@ -42,6 +46,81 @@ inline int base64_char_value(unsigned char c) {
     if (c == '+') return 62;
     if (c == '/') return 63;
     return -1;
+}
+
+struct ParsedMachineFileEnvelope {
+    std::string enc;
+    std::string sig;
+    std::string alg;
+    std::string kid;
+};
+
+std::vector<uint8_t> sha256_bytes(const std::string& input) {
+    std::vector<uint8_t> hash(picosha2::k_digest_size);
+    picosha2::hash256(input.begin(), input.end(), hash.begin(), hash.end());
+    return hash;
+}
+
+Result<ParsedMachineFileEnvelope> parse_machine_file_envelope(const std::string& certificate) {
+    if (certificate.empty()) {
+        return Result<ParsedMachineFileEnvelope>::error(ErrorCode::MissingParameter,
+                                                        "Machine file certificate is empty");
+    }
+
+    std::string cleaned = certificate;
+    const std::string begin_marker = "-----BEGIN MACHINE FILE-----";
+    const std::string end_marker = "-----END MACHINE FILE-----";
+
+    auto begin_pos = cleaned.find(begin_marker);
+    if (begin_pos != std::string::npos) {
+        cleaned.erase(begin_pos, begin_marker.size());
+    }
+
+    auto end_pos = cleaned.find(end_marker);
+    if (end_pos != std::string::npos) {
+        cleaned.erase(end_pos, end_marker.size());
+    }
+
+    cleaned.erase(std::remove_if(cleaned.begin(), cleaned.end(),
+                                 [](unsigned char ch) { return std::isspace(ch) != 0; }),
+                  cleaned.end());
+
+    auto decoded = base64_decode(cleaned);
+    if (decoded.empty() && !cleaned.empty()) {
+        return Result<ParsedMachineFileEnvelope>::error(ErrorCode::ParseError,
+                                                        "Invalid machine file encoding");
+    }
+
+    try {
+        auto envelope_json = nlohmann::json::parse(std::string(decoded.begin(), decoded.end()));
+        ParsedMachineFileEnvelope envelope;
+        envelope.enc = envelope_json.value("enc", std::string{});
+        envelope.sig = envelope_json.value("sig", std::string{});
+        envelope.alg = envelope_json.value("alg", std::string{});
+        envelope.kid = envelope_json.value("kid", std::string{});
+
+        if (envelope.enc.empty() || envelope.sig.empty() || envelope.kid.empty()) {
+            return Result<ParsedMachineFileEnvelope>::error(ErrorCode::ParseError,
+                                                            "Machine file envelope is incomplete");
+        }
+
+        return Result<ParsedMachineFileEnvelope>::ok(std::move(envelope));
+    } catch (const nlohmann::json::exception&) {
+        return Result<ParsedMachineFileEnvelope>::error(ErrorCode::ParseError,
+                                                        "Invalid machine file JSON");
+    }
+}
+
+bool constant_time_equal(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+
+    int diff = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+    }
+    return diff == 0;
 }
 
 }  // namespace
@@ -208,10 +287,142 @@ Result<bool> verify_offline_token_signature(const OfflineToken& offline_token,
                                     public_key_b64);
 }
 
+Result<MachineFilePayload> verify_machine_file(const MachineFile& machine_file,
+                                               const std::string& license_key,
+                                               const std::string& fingerprint,
+                                               const std::string& public_key_b64) {
+    if (license_key.empty()) {
+        return Result<MachineFilePayload>::error(ErrorCode::InvalidLicenseKey,
+                                                 "License key is required");
+    }
+
+    if (fingerprint.empty()) {
+        return Result<MachineFilePayload>::error(ErrorCode::MissingParameter,
+                                                 "Fingerprint is required");
+    }
+
+    if (public_key_b64.empty()) {
+        return Result<MachineFilePayload>::error(ErrorCode::MissingParameter,
+                                                 "Public key is required");
+    }
+
+    auto envelope_result = parse_machine_file_envelope(machine_file.certificate);
+    if (envelope_result.is_error()) {
+        return Result<MachineFilePayload>::error(envelope_result.error_code(),
+                                                 envelope_result.error_message());
+    }
+
+    auto envelope = envelope_result.value();
+    if (!envelope.alg.empty() && envelope.alg != "aes-256-gcm+ed25519") {
+        return Result<MachineFilePayload>::error(ErrorCode::InvalidParameter,
+                                                 "Unsupported machine file algorithm");
+    }
+
+    auto signature_result =
+        verify_ed25519_signature("machine/" + envelope.enc, envelope.sig, public_key_b64);
+    if (signature_result.is_error()) {
+        return Result<MachineFilePayload>::error(signature_result.error_code(),
+                                                 signature_result.error_message());
+    }
+
+    size_t first_dot = envelope.enc.find('.');
+    size_t second_dot = envelope.enc.find('.', first_dot == std::string::npos ? first_dot : first_dot + 1);
+    if (first_dot == std::string::npos || second_dot == std::string::npos) {
+        return Result<MachineFilePayload>::error(ErrorCode::ParseError,
+                                                 "Invalid encrypted machine file format");
+    }
+
+    const std::string ciphertext_part = envelope.enc.substr(0, first_dot);
+    const std::string nonce_part = envelope.enc.substr(first_dot + 1, second_dot - first_dot - 1);
+    const std::string tag_part = envelope.enc.substr(second_dot + 1);
+
+    auto ciphertext = base64url_decode(ciphertext_part);
+    auto nonce = base64url_decode(nonce_part);
+    auto tag = base64url_decode(tag_part);
+
+    if (ciphertext.empty() || nonce.size() != 12 || tag.size() != 16) {
+        return Result<MachineFilePayload>::error(ErrorCode::ParseError,
+                                                 "Invalid encrypted machine file payload");
+    }
+
+    auto key = sha256_bytes(license_key + fingerprint);
+
+    using EvpCtxPtr = std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>;
+    EvpCtxPtr ctx(EVP_CIPHER_CTX_new(), &EVP_CIPHER_CTX_free);
+    if (!ctx) {
+        return Result<MachineFilePayload>::error(ErrorCode::ServerError,
+                                                 "Failed to initialize crypto context");
+    }
+
+    std::vector<uint8_t> plaintext(ciphertext.size() + 16);
+    int len = 0;
+    int plaintext_len = 0;
+
+    if (EVP_DecryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN,
+                            static_cast<int>(nonce.size()), nullptr) != 1 ||
+        EVP_DecryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), nonce.data()) != 1 ||
+        EVP_DecryptUpdate(ctx.get(), plaintext.data(), &len, ciphertext.data(),
+                          static_cast<int>(ciphertext.size())) != 1) {
+        return Result<MachineFilePayload>::error(ErrorCode::DecryptionFailed,
+                                                 "Machine file decryption setup failed");
+    }
+
+    plaintext_len = len;
+
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_TAG, static_cast<int>(tag.size()),
+                            tag.data()) != 1) {
+        return Result<MachineFilePayload>::error(ErrorCode::DecryptionFailed,
+                                                 "Machine file tag validation failed");
+    }
+
+    if (EVP_DecryptFinal_ex(ctx.get(), plaintext.data() + plaintext_len, &len) != 1) {
+        return Result<MachineFilePayload>::error(ErrorCode::DecryptionFailed,
+                                                 "Machine file decryption failed");
+    }
+
+    plaintext_len += len;
+    plaintext.resize(static_cast<size_t>(plaintext_len));
+
+    try {
+        auto payload_json = nlohmann::json::parse(std::string(plaintext.begin(), plaintext.end()));
+        auto payload = json::parse_machine_file_payload(payload_json);
+        const auto now = std::time(nullptr);
+
+        if (payload.nbf > 0 && payload.nbf > now + 300) {
+            return Result<MachineFilePayload>::error(ErrorCode::TokenNotYetValid,
+                                                     "Machine file is not yet valid");
+        }
+
+        if (payload.exp > 0 && now > payload.exp + payload.grace_period) {
+            return Result<MachineFilePayload>::error(ErrorCode::TokenExpired,
+                                                     "Machine file has expired");
+        }
+
+        if (payload.license_expires_at.has_value() && now > *payload.license_expires_at) {
+            return Result<MachineFilePayload>::error(ErrorCode::LicenseExpired,
+                                                     "Underlying license has expired");
+        }
+
+        if (!payload.fingerprint.empty() &&
+            !constant_time_equal(payload.fingerprint, fingerprint)) {
+            return Result<MachineFilePayload>::error(ErrorCode::FingerprintMismatch,
+                                                     "Machine file fingerprint does not match this device");
+        }
+
+        return Result<MachineFilePayload>::ok(std::move(payload));
+    } catch (const nlohmann::json::exception& e) {
+        return Result<MachineFilePayload>::error(ErrorCode::ParseError,
+                                                 std::string("Failed to parse decrypted machine file payload: ") +
+                                                     e.what());
+    }
+}
+
 }  // namespace crypto
 
 // ==================== SHA-256 for Device ID ====================
-// This is used by device.cpp for hashing the device identifier
+// Used by device.cpp to hash the stable device fingerprint into the legacy
+// public `device_id` string exposed by the C++ API.
 
 namespace device {
 namespace internal {

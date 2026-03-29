@@ -42,7 +42,7 @@ int main() {
     // Create the client
     licenseseat::Client client(config);
 
-    // The client auto-generates a unique device identifier based on hardware
+    // The client auto-generates a stable device fingerprint based on hardware
     std::cout << "Device ID: " << client.device_id() << "\n";
 
     // Example 0: Subscribe to SDK events (using event constants)

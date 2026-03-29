@@ -1,9 +1,109 @@
 #include <gtest/gtest.h>
 #include <licenseseat/crypto.hpp>
 
+extern "C" {
+#include "ed25519/ed25519.h"
+}
+
+#include "PicoSHA2/picosha2.h"
+
+#include <nlohmann/json.hpp>
+#include <openssl/evp.h>
+
+#include <array>
+#include <memory>
+
 namespace licenseseat {
 namespace crypto {
 namespace {
+
+std::vector<uint8_t> sha256_test_bytes(const std::string& input) {
+    std::vector<uint8_t> hash(picosha2::k_digest_size);
+    picosha2::hash256(input.begin(), input.end(), hash.begin(), hash.end());
+    return hash;
+}
+
+std::string build_machine_file_certificate(const std::string& license_key,
+                                           const std::string& fingerprint,
+                                           const nlohmann::json& payload_json,
+                                           std::string* public_key_b64_out) {
+    const std::array<unsigned char, 32> seed = {
+        0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+        0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22};
+
+    std::array<unsigned char, 32> public_key{};
+    std::array<unsigned char, 64> private_key{};
+    ed25519_create_keypair(public_key.data(), private_key.data(), seed.data());
+
+    if (public_key_b64_out != nullptr) {
+        *public_key_b64_out =
+            base64_encode(std::vector<uint8_t>(public_key.begin(), public_key.end()));
+    }
+
+    const auto key = sha256_test_bytes(license_key + fingerprint);
+    const std::array<unsigned char, 12> nonce = {
+        0x01, 0x03, 0x05, 0x07, 0x09, 0x0b,
+        0x0d, 0x0f, 0x11, 0x13, 0x15, 0x17};
+
+    using EvpCtxPtr = std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>;
+    EvpCtxPtr ctx(EVP_CIPHER_CTX_new(), &EVP_CIPHER_CTX_free);
+    if (!ctx) {
+        return "";
+    }
+
+    const auto plaintext = payload_json.dump();
+    std::vector<uint8_t> ciphertext(plaintext.size() + 16);
+    int len = 0;
+    int ciphertext_len = 0;
+
+    if (EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN,
+                            static_cast<int>(nonce.size()), nullptr) != 1 ||
+        EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), nonce.data()) != 1 ||
+        EVP_EncryptUpdate(ctx.get(), ciphertext.data(), &len,
+                          reinterpret_cast<const unsigned char*>(plaintext.data()),
+                          static_cast<int>(plaintext.size())) != 1) {
+        return "";
+    }
+    ciphertext_len = len;
+    if (EVP_EncryptFinal_ex(ctx.get(), ciphertext.data() + ciphertext_len, &len) != 1) {
+        return "";
+    }
+    ciphertext_len += len;
+    ciphertext.resize(static_cast<size_t>(ciphertext_len));
+
+    std::array<unsigned char, 16> tag{};
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG,
+                            static_cast<int>(tag.size()), tag.data()) != 1) {
+        return "";
+    }
+
+    const auto enc = base64url_encode(ciphertext) + "." +
+                     base64url_encode(std::vector<uint8_t>(nonce.begin(), nonce.end())) + "." +
+                     base64url_encode(std::vector<uint8_t>(tag.begin(), tag.end()));
+
+    std::array<unsigned char, 64> signature{};
+    const auto message = std::string("machine/") + enc;
+    ed25519_sign(signature.data(),
+                 reinterpret_cast<const unsigned char*>(message.data()),
+                 message.size(),
+                 public_key.data(),
+                 private_key.data());
+
+    nlohmann::json envelope = {{"enc", enc},
+                               {"sig",
+                                base64url_encode(std::vector<uint8_t>(signature.begin(),
+                                                                       signature.end()))},
+                               {"alg", "aes-256-gcm+ed25519"},
+                               {"kid", "test-kid"}};
+
+    const auto encoded =
+        base64_encode(std::vector<uint8_t>(envelope.dump().begin(), envelope.dump().end()));
+
+    return "-----BEGIN MACHINE FILE-----\n" + encoded + "\n-----END MACHINE FILE-----";
+}
 
 // ==================== Base64 Encoding Tests ====================
 
@@ -352,6 +452,123 @@ TEST(RFC8032Test, WrongPublicKeyFails) {
 
     EXPECT_TRUE(result.is_error()) << "Wrong public key should fail verification";
     EXPECT_EQ(result.error_code(), ErrorCode::InvalidSignature);
+}
+
+// ==================== Machine File Verification Tests ====================
+
+TEST(MachineFileVerificationTest, ValidMachineFileDecryptsAndVerifies) {
+    const auto now = std::time(nullptr);
+    const std::string license_key = "KEY-123";
+    const std::string fingerprint = "fp-123";
+
+    nlohmann::json payload = {
+        {"meta",
+         {{"schema_version", 2},
+          {"issued", "2026-03-25T10:00:00Z"},
+          {"iat", now},
+          {"expiry", "2026-04-24T10:00:00Z"},
+          {"exp", now + 86400},
+          {"nbf", now},
+          {"ttl", 86400},
+          {"grace_period", 3600},
+          {"lic", license_key},
+          {"license_exp", now + 86400 * 30},
+          {"kid", "test-kid"}}},
+        {"data",
+         {{"type", "machines"},
+          {"id", "42"},
+          {"attributes",
+           {{"fingerprint", fingerprint},
+            {"name", "Studio Mac"},
+            {"platform", "darwin"},
+            {"created", "2026-03-24T10:00:00Z"},
+            {"metadata", {{"device_name", "Studio Mac"}}}}}}},
+        {"included",
+         nlohmann::json::array(
+             {{{"type", "licenses"},
+               {"id", license_key},
+               {"attributes",
+                {{"key", license_key},
+                 {"status", "active"},
+                 {"mode", "hardware_locked"},
+                 {"plan_key", "pro"},
+                 {"product_slug", "my-app"}}}}})}};
+
+    std::string public_key_b64;
+    MachineFile machine_file;
+    machine_file.certificate =
+        build_machine_file_certificate(license_key, fingerprint, payload, &public_key_b64);
+
+    auto result = verify_machine_file(machine_file, license_key, fingerprint, public_key_b64);
+
+    ASSERT_TRUE(result.is_ok()) << result.error_message();
+    EXPECT_EQ(result.value().license_key, license_key);
+    EXPECT_EQ(result.value().fingerprint, fingerprint);
+    ASSERT_TRUE(result.value().license.has_value());
+    EXPECT_EQ(result.value().license->plan_key(), "pro");
+}
+
+TEST(MachineFileVerificationTest, WrongFingerprintFailsDecryption) {
+    const auto now = std::time(nullptr);
+    const std::string license_key = "KEY-123";
+    const std::string fingerprint = "fp-123";
+
+    nlohmann::json payload = {
+        {"meta",
+         {{"schema_version", 2},
+          {"iat", now},
+          {"exp", now + 86400},
+          {"nbf", now},
+          {"ttl", 86400},
+          {"grace_period", 0},
+          {"lic", license_key},
+          {"kid", "test-kid"}}},
+        {"data",
+         {{"type", "machines"},
+          {"id", "42"},
+          {"attributes", {{"fingerprint", fingerprint}}}}}};
+
+    std::string public_key_b64;
+    MachineFile machine_file;
+    machine_file.certificate =
+        build_machine_file_certificate(license_key, fingerprint, payload, &public_key_b64);
+
+    auto result =
+        verify_machine_file(machine_file, license_key, "different-fingerprint", public_key_b64);
+
+    EXPECT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::DecryptionFailed);
+}
+
+TEST(MachineFileVerificationTest, ExpiredMachineFileFails) {
+    const auto now = std::time(nullptr);
+    const std::string license_key = "KEY-123";
+    const std::string fingerprint = "fp-123";
+
+    nlohmann::json payload = {
+        {"meta",
+         {{"schema_version", 2},
+          {"iat", now - 86400},
+          {"exp", now - 3600},
+          {"nbf", now - 86400},
+          {"ttl", 86400},
+          {"grace_period", 0},
+          {"lic", license_key},
+          {"kid", "test-kid"}}},
+        {"data",
+         {{"type", "machines"},
+          {"id", "42"},
+          {"attributes", {{"fingerprint", fingerprint}}}}}};
+
+    std::string public_key_b64;
+    MachineFile machine_file;
+    machine_file.certificate =
+        build_machine_file_certificate(license_key, fingerprint, payload, &public_key_b64);
+
+    auto result = verify_machine_file(machine_file, license_key, fingerprint, public_key_b64);
+
+    EXPECT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::TokenExpired);
 }
 
 }  // namespace rfc8032

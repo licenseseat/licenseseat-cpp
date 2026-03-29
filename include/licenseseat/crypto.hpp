@@ -56,5 +56,20 @@ namespace crypto {
 [[nodiscard]] Result<bool> verify_offline_token_signature(const OfflineToken& offline_token,
                                                           const std::string& public_key_b64);
 
+/**
+ * @brief Verify and decrypt a machine file certificate
+ *
+ * @param machine_file The machine file to verify
+ * @param license_key The license key used to derive the AES key
+ * @param fingerprint The local device fingerprint used to derive the AES key
+ * @param public_key_b64 Base64-encoded Ed25519 public key
+ * @return Result<MachineFilePayload> Decrypted machine-file payload on success
+ */
+[[nodiscard]] Result<MachineFilePayload> verify_machine_file(
+    const MachineFile& machine_file,
+    const std::string& license_key,
+    const std::string& fingerprint,
+    const std::string& public_key_b64);
+
 }  // namespace crypto
 }  // namespace licenseseat

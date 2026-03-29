@@ -1,7 +1,8 @@
 /**
  * Offline Workflow Test
  *
- * Demonstrates both automatic and manual offline storage workflows.
+ * Demonstrates automatic and manual offline workflows with machine files
+ * as the preferred artifact and offline tokens as a compatibility fallback.
  *
  * Environment variables:
  *   LICENSESEAT_API_KEY        - API key
@@ -48,7 +49,7 @@ struct TestConfig {
 
 // Test 1: Automatic storage (recommended)
 bool test_automatic() {
-    std::cout << "\n=== Test: Automatic Storage ===\n";
+    std::cout << "\n=== Test: Automatic Storage (Machine File Preferred) ===\n";
     auto cfg = TestConfig::from_env();
 
     licenseseat::Config client_cfg;
@@ -75,7 +76,7 @@ bool test_automatic() {
     return true;
 }
 
-// Test 2: Manual storage with serialization helpers
+// Test 2: Manual storage with explicit machine-file checkout and token fallback
 bool test_manual() {
     std::cout << "\n=== Test: Manual Storage ===\n";
     auto cfg = TestConfig::from_env();
@@ -86,7 +87,45 @@ bool test_manual() {
 
     licenseseat::Client client(client_cfg);
 
-    // Generate offline token
+    // Manual offline issuance still requires an activation first.
+    auto activation_result = client.activate(cfg.license_key);
+    if (activation_result.is_error() &&
+        activation_result.error_code() != licenseseat::ErrorCode::DeviceAlreadyActivated) {
+        std::cerr << "FAIL: " << activation_result.error_message() << "\n";
+        return false;
+    }
+
+    // Preferred path: checkout and persist a machine file
+    auto machine_result = client.checkout_machine_file(cfg.license_key);
+    if (machine_result.is_error()) {
+        std::cerr << "FAIL: " << machine_result.error_message() << "\n";
+        return false;
+    }
+    auto machine_file = machine_result.value();
+
+    std::ofstream machine_out(fs::path(cfg.storage_path) / "machine_file.cert");
+    machine_out << machine_file.certificate;
+    machine_out.close();
+
+    licenseseat::MachineFile loaded_machine_file = machine_file;
+    std::ifstream machine_in(fs::path(cfg.storage_path) / "machine_file.cert");
+    loaded_machine_file.certificate.assign(std::istreambuf_iterator<char>(machine_in),
+                                           std::istreambuf_iterator<char>());
+
+    auto machine_verify = client.verify_machine_file(loaded_machine_file);
+    if (machine_verify.is_error() || !machine_verify.value().valid ||
+        !machine_verify.value().payload.has_value()) {
+        std::cerr << "FAIL: Machine file verification failed\n";
+        return false;
+    }
+
+    std::cout << "OK: Verified machine file offline\n";
+    std::cout << "  License: " << machine_verify.value().payload->license_key << "\n";
+    if (machine_verify.value().payload->license) {
+        std::cout << "  Plan: " << machine_verify.value().payload->license->plan_key() << "\n";
+    }
+
+    // Compatibility fallback: generate and serialize an offline token too
     auto token_result = client.generate_offline_token(cfg.license_key);
     if (token_result.is_error()) {
         std::cerr << "FAIL: " << token_result.error_message() << "\n";
@@ -94,7 +133,6 @@ bool test_manual() {
     }
     auto token = token_result.value();
 
-    // Fetch public key
     auto key_result = client.fetch_signing_key(token.token.kid);
     if (key_result.is_error()) {
         std::cerr << "FAIL: " << key_result.error_message() << "\n";
@@ -102,21 +140,18 @@ bool test_manual() {
     }
     auto public_key = key_result.value();
 
-    // Serialize with one-liner
     std::string json_str = licenseseat::json::offline_token_to_json(token);
-    std::cout << "OK: Serialized (" << json_str.size() << " bytes)\n";
+    std::cout << "OK: Serialized fallback token (" << json_str.size() << " bytes)\n";
 
-    // Deserialize
     auto loaded = licenseseat::json::offline_token_from_json(json_str);
 
-    // Verify offline
     auto verify = client.verify_offline_token(loaded, public_key);
     if (verify.is_error() || !verify.value()) {
-        std::cerr << "FAIL: Verification failed\n";
+        std::cerr << "FAIL: Fallback token verification failed\n";
         return false;
     }
 
-    std::cout << "OK: Verified offline\n";
+    std::cout << "OK: Verified fallback token offline\n";
     std::cout << "  License: " << loaded.token.license_key << "\n";
     std::cout << "  Plan: " << loaded.token.plan_key << "\n";
 
