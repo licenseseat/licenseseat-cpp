@@ -10,6 +10,13 @@ The official C++ SDK for [LicenseSeat](https://licenseseat.com) – the licensin
 > [!TIP]
 > Building a **VST/AU plugin** or **Unreal Engine** game? We provide a [Unreal Engine plugin](#unreal-engine-plugin) and a [single-header integration for JUCE VST/AU plugins](#juce-vst--au--aax).
 
+<p align="center">
+  <img src="images/demo-synthdemo.webp" alt="SynthDemo - Example app showing LicenseSeat licensing with FREE tier and PRO features" width="480">
+  <img src="images/demo-activation.webp" alt="License activation dialog" width="480">
+  <br>
+  <em>Demo app showing feature-gated licensing: FREE tier with PRO upgrades</em>
+</p>
+
 ---
 
 ## Features
@@ -119,6 +126,12 @@ A compact audio synthesizer demo showing LicenseSeat integration. Built with ray
 - Session restore on app restart
 - Network status indicators
 - Toast notifications
+
+<p align="center">
+  <img src="images/demo-admin-view.webp" alt="SDK Admin view showing runtime status, license details, and entitlements" width="600">
+  <br>
+  <em>SDK Admin view: runtime status, heartbeat, auto-validation, machine file caching, and entitlements</em>
+</p>
 
 **Location:** [`demo/`](demo/)
 
