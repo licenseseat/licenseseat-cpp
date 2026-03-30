@@ -99,8 +99,9 @@ std::string build_machine_file_certificate(const std::string& license_key,
                                {"alg", "aes-256-gcm+ed25519"},
                                {"kid", "test-kid"}};
 
+    const auto envelope_dump = envelope.dump();
     const auto encoded =
-        base64_encode(std::vector<uint8_t>(envelope.dump().begin(), envelope.dump().end()));
+        base64_encode(std::vector<uint8_t>(envelope_dump.begin(), envelope_dump.end()));
 
     return "-----BEGIN MACHINE FILE-----\n" + encoded + "\n-----END MACHINE FILE-----";
 }
