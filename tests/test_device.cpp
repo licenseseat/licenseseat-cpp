@@ -3,6 +3,8 @@
 
 #include <cstdlib>
 
+#include "test_env.hpp"
+
 namespace licenseseat {
 namespace device {
 namespace {
@@ -98,19 +100,7 @@ TEST(DeviceIdTest, GenerateDeviceIdSucceedsOnCI) {
     // On CI runners (standard environments), device ID generation should always succeed.
     // This catches regressions in platform-specific code that would silently fail otherwise.
     // Locally, developers may run in sandboxed/restricted environments where this legitimately fails.
-    bool is_ci = false;
-#if defined(_WIN32) || defined(_WIN64)
-    // Use _dupenv_s on Windows (getenv is deprecated by MSVC)
-    char* ci_env = nullptr;
-    size_t len = 0;
-    if (_dupenv_s(&ci_env, &len, "CI") == 0 && ci_env != nullptr) {
-        is_ci = (std::string(ci_env) == "true");
-        free(ci_env);
-    }
-#else
-    const char* ci_env = std::getenv("CI");
-    is_ci = (ci_env != nullptr && std::string(ci_env) == "true");
-#endif
+    bool is_ci = (test_env::get("CI") == "true");
 
     if (is_ci) {
         auto device_id = generate_device_id();

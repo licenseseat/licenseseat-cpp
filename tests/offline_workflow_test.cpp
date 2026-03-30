@@ -17,6 +17,8 @@
 #include <licenseseat/json.hpp>
 #include <licenseseat/licenseseat.hpp>
 
+#include "test_env.hpp"
+
 namespace fs = std::filesystem;
 
 struct TestConfig {
@@ -27,21 +29,16 @@ struct TestConfig {
 
     static TestConfig from_env() {
         TestConfig cfg;
-        auto get_env = [](const char* name) -> std::string {
-            const char* val = std::getenv(name);
-            return val ? val : "";
-        };
-
-        cfg.api_key = get_env("LICENSESEAT_API_KEY");
-        cfg.product_slug = get_env("LICENSESEAT_PRODUCT_SLUG");
-        cfg.license_key = get_env("LICENSESEAT_LICENSE_KEY");
+        cfg.api_key = test_env::get("LICENSESEAT_API_KEY");
+        cfg.product_slug = test_env::get("LICENSESEAT_PRODUCT_SLUG");
+        cfg.license_key = test_env::get("LICENSESEAT_LICENSE_KEY");
 
         if (cfg.api_key.empty() || cfg.product_slug.empty() || cfg.license_key.empty()) {
             std::cerr << "Missing: LICENSESEAT_API_KEY, LICENSESEAT_PRODUCT_SLUG, LICENSESEAT_LICENSE_KEY\n";
             std::exit(1);
         }
 
-        cfg.storage_path = fs::temp_directory_path() / "licenseseat_test";
+        cfg.storage_path = (fs::temp_directory_path() / "licenseseat_test").string();
         fs::create_directories(cfg.storage_path);
         return cfg;
     }

@@ -32,6 +32,8 @@
 #include <thread>
 #include <vector>
 
+#include "test_env.hpp"
+
 // ==================== Globals ====================
 
 static std::string API_URL;
@@ -55,8 +57,7 @@ static int scenario_counter = 0;
 // ==================== Helpers ====================
 
 static std::string get_env(const char* name, const char* fallback) {
-    const char* val = std::getenv(name);
-    return (val && val[0] != '\0') ? std::string(val) : std::string(fallback);
+    return test_env::get(name, fallback);
 }
 
 static void printHeader(const std::string& title) {

@@ -39,11 +39,12 @@
 #include <iostream>
 #include <thread>
 
+#include "test_env.hpp"
+
 namespace {
 
 std::string get_env(const char* name) {
-    const char* value = std::getenv(name);
-    return value ? std::string(value) : std::string();
+    return test_env::get(name);
 }
 
 std::string API_KEY;
