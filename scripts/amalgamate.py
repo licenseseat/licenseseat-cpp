@@ -252,8 +252,9 @@ def generate_header():
  * LICENSE:
  *   MIT License - see https://github.com/licenseseat/licenseseat-cpp
  *
- * This build does NOT require OpenSSL - uses vendored ed25519 and PicoSHA2.
- * HTTPS support requires cpp-httplib compiled with CPPHTTPLIB_OPENSSL_SUPPORT.
+ * This amalgamated build still requires OpenSSL for HTTPS and machine-file
+ * AES-256-GCM verification. JUCE standalone is the zero-OpenSSL path.
+ * HTTPS support also requires cpp-httplib compiled with CPPHTTPLIB_OPENSSL_SUPPORT.
  */
 
 #ifndef LICENSESEAT_SINGLE_HPP

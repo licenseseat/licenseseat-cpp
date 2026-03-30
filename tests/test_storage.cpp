@@ -103,6 +103,32 @@ TEST_F(MemoryStorageTest, ClearOfflineToken) {
     EXPECT_FALSE(storage.get_offline_token().has_value());
 }
 
+TEST_F(MemoryStorageTest, SetAndGetMachineFile) {
+    MachineFile machine_file;
+    machine_file.certificate = "-----BEGIN MACHINE FILE-----\nabc\n-----END MACHINE FILE-----";
+    machine_file.license_key = "KEY-789";
+    machine_file.fingerprint = "fp-123";
+    machine_file.ttl = 2592000;
+
+    EXPECT_TRUE(storage.set_machine_file(machine_file));
+
+    auto retrieved = storage.get_machine_file();
+    ASSERT_TRUE(retrieved.has_value());
+    EXPECT_EQ(retrieved->license_key, "KEY-789");
+    EXPECT_EQ(retrieved->fingerprint, "fp-123");
+    EXPECT_EQ(retrieved->ttl, 2592000);
+}
+
+TEST_F(MemoryStorageTest, ClearMachineFile) {
+    MachineFile machine_file;
+    machine_file.license_key = "KEY-789";
+    storage.set_machine_file(machine_file);
+
+    storage.clear_machine_file();
+
+    EXPECT_FALSE(storage.get_machine_file().has_value());
+}
+
 TEST_F(MemoryStorageTest, SetAndGetSigningKey) {
     EXPECT_TRUE(storage.set_signing_key("key-id-1", "base64-encoded-key"));
 
@@ -141,6 +167,10 @@ TEST_F(MemoryStorageTest, ClearAll) {
     offline.token.license_key = "KEY-456";
     storage.set_offline_token(offline);
 
+    MachineFile machine_file;
+    machine_file.license_key = "KEY-789";
+    storage.set_machine_file(machine_file);
+
     storage.set_signing_key("key-1", "pk-1");
     storage.set_last_seen_timestamp(123.456);
 
@@ -148,6 +178,7 @@ TEST_F(MemoryStorageTest, ClearAll) {
 
     EXPECT_FALSE(storage.get_license().has_value());
     EXPECT_FALSE(storage.get_offline_token().has_value());
+    EXPECT_FALSE(storage.get_machine_file().has_value());
     EXPECT_FALSE(storage.get_signing_key("key-1").has_value());
     EXPECT_FALSE(storage.get_last_seen_timestamp().has_value());
 }
@@ -274,6 +305,30 @@ TEST_F(FileStorageTest, SetAndGetOfflineToken) {
     EXPECT_EQ(retrieved->token.entitlements[0].key, "updates");
 }
 
+TEST_F(FileStorageTest, SetAndGetMachineFile) {
+    FileStorage storage(temp_dir.path().string());
+
+    MachineFile machine_file;
+    machine_file.certificate = "-----BEGIN MACHINE FILE-----\nabc\n-----END MACHINE FILE-----";
+    machine_file.algorithm = "aes-256-gcm+ed25519";
+    machine_file.ttl = 2592000;
+    machine_file.license_key = "KEY-789";
+    machine_file.fingerprint = "fp-123";
+    machine_file.issued_at = std::chrono::system_clock::now();
+    machine_file.expires_at = std::chrono::system_clock::now() + std::chrono::hours(24);
+
+    EXPECT_TRUE(storage.set_machine_file(machine_file));
+
+    auto retrieved = storage.get_machine_file();
+    ASSERT_TRUE(retrieved.has_value());
+    EXPECT_EQ(retrieved->license_key, "KEY-789");
+    EXPECT_EQ(retrieved->fingerprint, "fp-123");
+    EXPECT_EQ(retrieved->algorithm, "aes-256-gcm+ed25519");
+    EXPECT_EQ(retrieved->ttl, 2592000);
+    EXPECT_TRUE(retrieved->issued_at.has_value());
+    EXPECT_TRUE(retrieved->expires_at.has_value());
+}
+
 TEST_F(FileStorageTest, SetAndGetSigningKey) {
     FileStorage storage(temp_dir.path().string());
 
@@ -309,6 +364,10 @@ TEST_F(FileStorageTest, ClearAll) {
     offline.token.license_key = "OFFLINE";
     storage.set_offline_token(offline);
 
+    MachineFile machine_file;
+    machine_file.license_key = "MACHINE";
+    storage.set_machine_file(machine_file);
+
     storage.set_signing_key("key-1", "pk-1");
     storage.set_last_seen_timestamp(123.0);
 
@@ -316,6 +375,7 @@ TEST_F(FileStorageTest, ClearAll) {
 
     EXPECT_FALSE(storage.get_license().has_value());
     EXPECT_FALSE(storage.get_offline_token().has_value());
+    EXPECT_FALSE(storage.get_machine_file().has_value());
     EXPECT_FALSE(storage.get_signing_key("key-1").has_value());
     EXPECT_FALSE(storage.get_last_seen_timestamp().has_value());
 }

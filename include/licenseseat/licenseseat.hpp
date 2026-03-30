@@ -48,6 +48,7 @@ enum class ErrorCode {
     SeatLimitExceeded,
     ActivationNotFound,
     DeviceAlreadyActivated,
+    DeviceNotActivated,
 
     // Product errors
     ProductNotFound,
@@ -70,6 +71,10 @@ enum class ErrorCode {
     // Parse errors
     ParseError,
     InvalidSignature,
+    DecryptionFailed,
+    TokenExpired,
+    TokenNotYetValid,
+    FingerprintMismatch,
 
     // File errors
     FileError,
@@ -109,6 +114,8 @@ enum class ErrorCode {
             return "Activation not found";
         case ErrorCode::DeviceAlreadyActivated:
             return "Device already activated";
+        case ErrorCode::DeviceNotActivated:
+            return "Device not activated";
         case ErrorCode::ProductNotFound:
             return "Product not found";
         case ErrorCode::ReleaseNotFound:
@@ -133,6 +140,14 @@ enum class ErrorCode {
             return "Parse error";
         case ErrorCode::InvalidSignature:
             return "Invalid signature";
+        case ErrorCode::DecryptionFailed:
+            return "Decryption failed";
+        case ErrorCode::TokenExpired:
+            return "Token expired";
+        case ErrorCode::TokenNotYetValid:
+            return "Token not yet valid";
+        case ErrorCode::FingerprintMismatch:
+            return "Fingerprint mismatch";
         case ErrorCode::FileError:
             return "File error";
         case ErrorCode::FileNotFound:
@@ -493,6 +508,9 @@ class Activation {
     /// Get the device ID
     [[nodiscard]] const std::string& device_id() const noexcept { return device_id_; }
 
+    /// Preferred alias for the canonical device fingerprint.
+    [[nodiscard]] const std::string& fingerprint() const noexcept { return device_id_; }
+
     /// Get the device name
     [[nodiscard]] const std::string& device_name() const noexcept { return device_name_; }
 
@@ -537,6 +555,7 @@ struct OfflineTokenPayload {
     std::string plan_key;
     std::string mode;                   // "hardware_locked", "floating", etc.
     std::optional<int> seat_limit;
+    std::optional<std::string> fingerprint;  // Preferred field name
     std::optional<std::string> device_id;  // Required for hardware_locked mode
     int64_t iat = 0;                    // Issued at (Unix timestamp)
     int64_t exp = 0;                    // Token expires at (Unix timestamp)
@@ -607,6 +626,57 @@ struct OfflineToken {
 };
 
 /**
+ * @brief Machine file returned by the API for offline validation
+ *
+ * The certificate is a PEM-like encoded container that is signed and encrypted.
+ */
+struct MachineFile {
+    std::string certificate;
+    std::string algorithm = "aes-256-gcm+ed25519";
+    int64_t ttl = 0;                    // Seconds
+    std::optional<Timestamp> issued_at;
+    std::optional<Timestamp> expires_at;
+    std::string license_key;
+    std::string fingerprint;
+};
+
+/**
+ * @brief Decrypted machine-file payload used for offline validation
+ */
+struct MachineFilePayload {
+    int schema_version = 0;
+    std::string issued;
+    int64_t iat = 0;
+    std::string expiry;
+    int64_t exp = 0;
+    int64_t nbf = 0;
+    int64_t ttl = 0;
+    int64_t grace_period = 0;
+    std::string license_key;
+    std::optional<int64_t> license_expires_at;
+    std::string key_id;
+    std::optional<std::string> sdk_version;
+    std::string machine_id;
+    std::string fingerprint;
+    Metadata fingerprint_components;
+    std::string device_name;
+    std::string platform;
+    std::optional<Timestamp> created_at;
+    Metadata metadata;
+    std::optional<License> license;
+};
+
+/**
+ * @brief Result of local machine-file verification
+ */
+struct MachineFileVerificationResult {
+    bool valid = false;
+    std::string code;
+    std::string message;
+    std::optional<MachineFilePayload> payload;
+};
+
+/**
  * @brief Represents a software release
  */
 struct Release {
@@ -670,7 +740,7 @@ struct Config {
     /// Product slug to validate licenses against (required)
     std::string product_slug;
 
-    /// Device ID (auto-generated if empty)
+    /// Device fingerprint (legacy config name `device_id`, auto-generated if empty)
     std::string device_id;
 
     /// Path for license cache storage (required for persistence)
@@ -679,8 +749,9 @@ struct Config {
     /// Storage prefix for file names
     std::string storage_prefix = "licenseseat";
 
-    /// Ed25519 public key for offline token verification (base64-encoded)
-    /// If not provided, will be fetched from API on first use
+    /// Ed25519 public key for offline artifact verification.
+    /// Used for machine files and legacy offline tokens. If not provided, it
+    /// will be fetched from the API on first use when possible.
     std::string signing_public_key;
 
     /// Key ID for the signing public key
@@ -711,14 +782,18 @@ struct Config {
     /// Offline fallback mode
     OfflineFallbackMode offline_fallback_mode = OfflineFallbackMode::NetworkOnly;
 
-    /// Maximum days to allow offline operation (0 = disabled/unlimited)
+    /// Maximum days to allow offline operation locally (0 = disabled/unlimited)
     int max_offline_days = 0;  // Disabled by default (matches Swift SDK)
 
     /// Maximum clock skew allowed in milliseconds (for tamper detection)
     double max_clock_skew_ms = 300000.0;  // 5 minutes (matches Swift SDK)
 
-    /// Interval for refreshing offline license (seconds)
+    /// Interval for refreshing offline artifacts (seconds)
     double offline_license_refresh_interval = 259200.0;  // 3 days (matches Swift SDK)
+
+    /// Enable legacy offline-token fetching as a fallback after machine-file sync fails
+    /// Disabled by default; machine files are the preferred offline artifact.
+    bool enable_legacy_offline_tokens = false;
 
     // ========== Heartbeat Settings ==========
 
@@ -816,8 +891,9 @@ struct EntitlementStatus {
  *
  * ## Offline Fallback
  *
- * When network is unavailable, the SDK automatically falls back to
- * cached offline license verification (Ed25519 signature).
+ * When network is unavailable, the SDK automatically falls back to cached
+ * offline artifacts. Machine files are preferred; legacy offline tokens are
+ * only used when explicitly enabled.
  */
 class Client {
   public:
@@ -913,9 +989,10 @@ class Client {
         HeartbeatCallback callback,
         const std::string& device_id = "");
 
-    // ========== Offline Tokens ==========
+    // ========== Legacy Offline Tokens ==========
 
-    /// Generate an offline token from the server
+    /// Generate a legacy offline token from the server
+    /// Machine files are preferred for new integrations.
     /// @param license_key The license key to generate offline token for
     /// @param device_id Optional device ID (required for hardware_locked licenses)
     /// @param ttl_days Token lifetime in days (default: 30, max: 90)
@@ -924,18 +1001,38 @@ class Client {
         const std::string& device_id = "",
         int ttl_days = 30);
 
-    /// Verify an offline token locally (no network required)
+    /// Generate a machine file from the server
+    /// @param license_key The license key to generate a machine file for
+    /// @param device_id Optional device fingerprint (uses config if empty)
+    /// @param ttl_days Requested machine-file lifetime in days
+    [[nodiscard]] Result<MachineFile> checkout_machine_file(
+        const std::string& license_key,
+        const std::string& device_id = "",
+        int ttl_days = 0);
+
+    /// Verify a legacy offline token locally (no network required)
     /// @param offline_token The offline token to verify
     /// @param public_key_b64 Base64-encoded Ed25519 public key (uses config if empty)
     [[nodiscard]] Result<bool> verify_offline_token(
         const OfflineToken& offline_token,
         const std::string& public_key_b64 = "");
 
+    /// Verify a machine file locally (no network required)
+    /// @param machine_file The machine file to verify
+    /// @param public_key_b64 Base64-encoded Ed25519 public key (uses config/cache if empty)
+    /// @param license_key License key override (uses machine file payload/cache if empty)
+    /// @param device_id Device fingerprint override (uses config if empty)
+    [[nodiscard]] Result<MachineFileVerificationResult> verify_machine_file(
+        const MachineFile& machine_file,
+        const std::string& public_key_b64 = "",
+        const std::string& license_key = "",
+        const std::string& device_id = "");
+
     /// Fetch a signing key for offline verification from the API
     /// @param key_id The key ID to fetch
     [[nodiscard]] Result<std::string> fetch_signing_key(const std::string& key_id);
 
-    /// Sync offline assets (fetch offline license and public key)
+    /// Sync offline assets (machine files first, legacy tokens only if enabled)
     void sync_offline_assets();
 
     // ========== Auto-Validation ==========
@@ -970,7 +1067,7 @@ class Client {
     /// 1. Load cached license key from storage
     /// 2. Check connectivity via health()
     /// 3. If online: validate with server
-    /// 4. If offline: verify cached offline token
+    /// 4. If offline: verify cached machine file, then legacy offline token if present
     /// 5. Start appropriate timers (auto-validation, heartbeat, offline refresh)
     ///
     /// Call this on application startup to restore the previous session.
@@ -1055,6 +1152,9 @@ class Client {
 
     /// Get the device ID (auto-generated if not in config)
     [[nodiscard]] const std::string& device_id() const;
+
+    /// Preferred alias for the canonical device fingerprint.
+    [[nodiscard]] const std::string& fingerprint() const;
 
   private:
     class Impl;

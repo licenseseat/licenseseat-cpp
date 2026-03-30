@@ -32,7 +32,9 @@ jobs:
       - name: Verify single-header compiles
         run: |
           sudo apt-get update
-          sudo apt-get install -y nlohmann-json3-dev
+          sudo apt-get install -y \
+            libssl-dev \
+            nlohmann-json3-dev
           git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
           sudo cp /tmp/cpp-httplib/httplib.h /usr/local/include/
 
@@ -41,7 +43,14 @@ jobs:
           #include "licenseseat_single.hpp"
           int main() { return 0; }
           EOF
-          g++ -std=c++17 -I. -I/usr/local/include -c /tmp/test.cpp -o /tmp/test.o
+          g++ -std=c++17 \
+            -DCPPHTTPLIB_OPENSSL_SUPPORT \
+            -I. \
+            -I/usr/local/include \
+            /tmp/test.cpp \
+            -o /tmp/test \
+            -lssl \
+            -lcrypto
 
       - name: Upload single-header artifact
         uses: actions/upload-artifact@v4
@@ -218,7 +227,7 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: "c82f74667287d3dc386bce81e44964370c91a289"
+          vcpkgGitCommitId: "b5d1a94fb7f88fd835e360fd23a45a09ceedbf48"
 
       - name: Cache vcpkg installed packages
         uses: actions/cache@v4
@@ -317,7 +326,7 @@ jobs:
             ## Installation
 
             ### Single-Header (Recommended for plugins/games)
-            Download `licenseseat_single.hpp` - no external dependencies except nlohmann/json and cpp-httplib.
+            Download `licenseseat_single.hpp`.
 
             ```cpp
             // In ONE .cpp file:
@@ -339,10 +348,10 @@ jobs:
             - `lib/` - Static library (`liblicenseseat.a` or `licenseseat.lib`)
             - `include/` - Header files
 
-            Link with OpenSSL (`-lssl -lcrypto`) when using prebuilt libraries.
+            Link with OpenSSL (`-lssl -lcrypto`) when using the prebuilt libraries or the single-header implementation.
 
             ## Requirements
             - C++17 compiler
             - nlohmann/json (for JSON parsing)
             - cpp-httplib (for HTTP/HTTPS requests)
-            - OpenSSL (for prebuilt libraries; not needed for single-header)
+            - OpenSSL (for HTTPS and machine-file cryptography)

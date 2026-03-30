@@ -7,25 +7,38 @@
  * Provides cross-platform device fingerprinting functionality.
  */
 
+#include <map>
 #include <string>
 
 namespace licenseseat {
 namespace device {
 
 /**
- * @brief Generate a unique device identifier based on hardware
+ * @brief Generate a stable device fingerprint based on hardware
  *
- * This function generates a stable, unique identifier for the current device
+ * This function generates a stable, unique fingerprint for the current device
  * based on available hardware information:
  * - macOS: IOPlatformUUID from IOKit
- * - Linux: /etc/machine-id or DMI system UUID
- * - Windows: SMBIOS system UUID
+ * - Linux: /etc/machine-id, D-Bus machine-id, DMI UUID, or hostname fallback
+ * - Windows: platform machine ID / machine GUID
  *
  * The identifier is hashed to a consistent format for privacy.
  *
- * @return A stable device identifier string, or empty string on failure
+ * @return A stable device fingerprint string, or empty string on failure
  */
 [[nodiscard]] std::string generate_device_id();
+
+/**
+ * @brief Collect structured fingerprint components for diagnostics/future matching
+ *
+ * The SDK still uses a single stable fingerprint for binding. This helper exposes
+ * the underlying signals that were available when that fingerprint was generated
+ * so the server can persist them for future analytics or carefully versioned
+ * matching policies.
+ *
+ * @return Flat key/value component map (all values are strings for JSON transport)
+ */
+[[nodiscard]] std::map<std::string, std::string> collect_fingerprint_components();
 
 /**
  * @brief Get the platform name

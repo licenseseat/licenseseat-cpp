@@ -30,7 +30,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         -Wno-unused-parameter
     )
 elseif(MSVC)
-    add_compile_options(/W4 /WX)
+    add_compile_options(/W4 /WX /wd4100)
 endif()
 
 # clang-tidy integration
@@ -47,7 +47,7 @@ if(LICENSESEAT_ENABLE_CLANG_TIDY)
     endif()
 endif()
 
-# OpenSSL is the only external dependency (for HTTPS)
+# OpenSSL is the only external dependency (for HTTPS and machine-file AES-GCM)
 find_package(OpenSSL REQUIRED)
 
 # JSON and HTTP are bundled (no installation needed)

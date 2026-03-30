@@ -112,13 +112,6 @@ license.validateAsync("LICENSE-KEY", [](auto& result)
 
 A compact audio synthesizer demo showing LicenseSeat integration. Built with raylib + raygui.
 
-```bash
-cd demo
-cmake -B build
-cmake --build build
-open build/synthdemo.app  # macOS
-```
-
 **Features demonstrated:**
 - License activation with auto-closing modal
 - Feature gating (free: sine wave, Pro: sawtooth/square/noise)
@@ -127,6 +120,54 @@ open build/synthdemo.app  # macOS
 - Toast notifications
 
 **Location:** [`demo/`](demo/)
+
+#### Prerequisites
+
+- CMake 3.16+
+- C++17 compiler (Clang, GCC, or MSVC)
+- OpenSSL (for HTTPS)
+
+```bash
+# macOS
+brew install cmake openssl
+
+# Ubuntu/Debian
+sudo apt install cmake libssl-dev libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+
+# Alpine Linux
+apk add build-base cmake openssl-dev mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+
+# Windows (with vcpkg)
+vcpkg install openssl
+```
+
+#### Build & Run
+
+```bash
+cd demo
+
+# Configure (downloads raylib automatically via FetchContent)
+cmake -B build
+
+# Build
+cmake --build build
+
+# Run
+open build/synthdemo.app                  # macOS
+./build/synthdemo                         # Linux
+.\build\Debug\synthdemo.exe               # Windows
+```
+
+#### Build Options
+
+```bash
+# Release build (faster, smaller binary)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+
+# Specify OpenSSL path (if not found automatically)
+cmake -B build -DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3
+```
 
 > [!NOTE]
 > **macOS users:** Window management apps like Magnet or Rectangle can cause click delays due to how they intercept mouse events. If you experience slow button responses, try excluding the app from your window manager's settings.

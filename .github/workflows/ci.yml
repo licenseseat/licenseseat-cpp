@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, 'pr/**']
 
 env:
   BUILD_TYPE: Release
@@ -125,7 +125,7 @@ jobs:
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgGitCommitId: "c82f74667287d3dc386bce81e44964370c91a289"
+          vcpkgGitCommitId: "b5d1a94fb7f88fd835e360fd23a45a09ceedbf48"
 
       - name: Cache vcpkg installed packages
         uses: actions/cache@v4
@@ -165,7 +165,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y nlohmann-json3-dev
+          sudo apt-get install -y \
+            libssl-dev \
+            nlohmann-json3-dev
 
       - name: Install cpp-httplib
         run: |
@@ -219,7 +221,13 @@ jobs:
               return 0;
           }
           EOF
-          g++ -std=c++17 -I. -I/usr/local/include -o /tmp/test_single_header /tmp/test_single_header.cpp
+          g++ -std=c++17 \
+            -DCPPHTTPLIB_OPENSSL_SUPPORT \
+            -I. \
+            -I/usr/local/include \
+            -o /tmp/test_single_header /tmp/test_single_header.cpp \
+            -lssl \
+            -lcrypto
           /tmp/test_single_header
 
       - name: Upload amalgamated header

@@ -225,6 +225,18 @@ TEST(JsonActivationTest, ParseDeactivatedActivation) {
     EXPECT_TRUE(activation.deactivated_at().has_value());
 }
 
+TEST(JsonActivationTest, ParseFingerprintFieldAsDeviceId) {
+    nlohmann::json j = {{"id", 7},
+                        {"fingerprint", "fp-123"},
+                        {"license_key", "KEY-123"},
+                        {"activated_at", "2026-01-19T12:00:00Z"}};
+
+    auto activation = parse_activation(j);
+
+    EXPECT_EQ(activation.device_id(), "fp-123");
+    EXPECT_EQ(activation.fingerprint(), "fp-123");
+}
+
 // ==================== Deactivation Parsing Tests ====================
 
 TEST(JsonDeactivationTest, ParseDeactivation) {
@@ -370,6 +382,154 @@ TEST(JsonOfflineTokenTest, ParseMinimalOfflineToken) {
     EXPECT_FALSE(offline.token.device_id.has_value());
 }
 
+TEST(JsonOfflineTokenTest, ParseFingerprintAsPreferredBindingField) {
+    nlohmann::json j = {
+        {"token",
+         {{"license_key", "KEY-123"},
+          {"product_slug", "my-app"},
+          {"fingerprint", "fp-123"},
+          {"iat", 1737280800},
+          {"exp", 1737367200},
+          {"nbf", 1737280800}}},
+        {"signature", {{"algorithm", "Ed25519"}, {"key_id", "key-v1"}, {"value", "abc123"}}},
+        {"canonical", R"({"license_key":"KEY-123"})"}};
+
+    auto offline = parse_offline_token(j);
+
+    ASSERT_TRUE(offline.token.fingerprint.has_value());
+    ASSERT_TRUE(offline.token.device_id.has_value());
+    EXPECT_EQ(*offline.token.fingerprint, "fp-123");
+    EXPECT_EQ(*offline.token.device_id, "fp-123");
+}
+
+// ==================== Machine File Tests ====================
+
+TEST(JsonMachineFileTest, ParseMachineFileResponse) {
+    nlohmann::json j;
+    j["data"]["type"] = "machine-files";
+    j["data"]["attributes"]["certificate"] =
+        "-----BEGIN MACHINE FILE-----\nabc\n-----END MACHINE FILE-----";
+    j["data"]["attributes"]["algorithm"] = "aes-256-gcm+ed25519";
+    j["data"]["attributes"]["ttl"] = 2592000;
+    j["data"]["attributes"]["issued"] = "2026-03-25T10:00:00Z";
+    j["data"]["attributes"]["expiry"] = "2026-04-24T10:00:00Z";
+    j["data"]["relationships"]["license"]["data"]["type"] = "licenses";
+    j["data"]["relationships"]["license"]["data"]["id"] = "KEY-123";
+    j["data"]["relationships"]["machine"]["data"]["type"] = "machines";
+    j["data"]["relationships"]["machine"]["data"]["id"] = "fp-123";
+
+    auto machine_file = parse_machine_file(j);
+
+    EXPECT_EQ(machine_file.license_key, "KEY-123");
+    EXPECT_EQ(machine_file.fingerprint, "fp-123");
+    EXPECT_EQ(machine_file.algorithm, "aes-256-gcm+ed25519");
+    EXPECT_EQ(machine_file.ttl, 2592000);
+    EXPECT_TRUE(machine_file.issued_at.has_value());
+    EXPECT_TRUE(machine_file.expires_at.has_value());
+}
+
+TEST(JsonMachineFileTest, ParseMachineFilePayloadWithLicense) {
+    nlohmann::json j = {
+        {"meta",
+         {{"schema_version", 2},
+          {"issued", "2026-03-25T10:00:00Z"},
+          {"iat", 1742896800},
+          {"expiry", "2026-04-24T10:00:00Z"},
+          {"exp", 1745488800},
+          {"nbf", 1742896800},
+          {"ttl", 2592000},
+          {"grace_period", 259200},
+          {"lic", "KEY-123"},
+          {"license_exp", 1760000000},
+          {"kid", "kid-v1"},
+          {"sdk_version", "cpp-0.4.1"}}},
+        {"data",
+         {{"type", "machines"},
+          {"id", "42"},
+          {"attributes",
+           {{"fingerprint", "fp-123"},
+            {"fingerprint_components",
+             {{"schema_version", "1"},
+              {"platform", "macos"},
+              {"platform_uuid", "ABC-123"}}},
+            {"name", "Studio Mac"},
+            {"platform", "darwin"},
+            {"created", "2026-03-24T10:00:00Z"},
+            {"metadata", {{"device_name", "Studio Mac"}}}}}}},
+        {"included",
+         nlohmann::json::array(
+             {{{"type", "licenses"},
+               {"id", "KEY-123"},
+               {"attributes",
+                {{"key", "KEY-123"},
+                 {"status", "active"},
+                 {"mode", "hardware_locked"},
+                 {"plan_key", "pro"},
+                 {"product_slug", "my-app"},
+                 {"entitlements", {{{"key", "pro_features"}}}}}}}})}};
+
+    auto payload = parse_machine_file_payload(j);
+
+    EXPECT_EQ(payload.schema_version, 2);
+    EXPECT_EQ(payload.license_key, "KEY-123");
+    EXPECT_EQ(payload.key_id, "kid-v1");
+    EXPECT_EQ(payload.fingerprint, "fp-123");
+    EXPECT_EQ(payload.fingerprint_components.at("platform_uuid"), "ABC-123");
+    EXPECT_EQ(payload.device_name, "Studio Mac");
+    ASSERT_TRUE(payload.license.has_value());
+    EXPECT_EQ(payload.license->key(), "KEY-123");
+    EXPECT_EQ(payload.license->plan_key(), "pro");
+}
+
+TEST(JsonMachineFileTest, ParseMachineFilePayloadWithNullableOptionalFields) {
+    nlohmann::json j = {
+        {"meta",
+         {{"schema_version", 2},
+          {"issued", "2026-03-25T10:00:00Z"},
+          {"iat", 1742896800},
+          {"expiry", "2026-04-24T10:00:00Z"},
+          {"exp", 1745488800},
+          {"nbf", 1742896800},
+          {"ttl", 2592000},
+          {"grace_period", 259200},
+          {"lic", "KEY-123"},
+          {"license_exp", nullptr},
+          {"kid", "kid-v1"},
+          {"sdk_version", nullptr}}},
+        {"data",
+         {{"type", "machines"},
+          {"id", "42"},
+          {"attributes",
+           {{"fingerprint", "fp-123"},
+            {"name", nullptr},
+            {"platform", nullptr},
+            {"created", "2026-03-24T10:00:00Z"},
+            {"metadata", {{"device_name", "Studio Mac"}, {"created_during_grace_period", false}}}}}}},
+        {"included",
+         nlohmann::json::array({{{"type", "licenses"},
+                                 {"id", "KEY-123"},
+                                 {"attributes",
+                                  {{"key", "KEY-123"},
+                                   {"status", "active"},
+                                   {"mode", "hardware_locked"},
+                                   {"plan_key", "pro"},
+                                   {"product_slug", "my-app"},
+                                   {"starts_at", nullptr},
+                                   {"ends_at", nullptr},
+                                   {"entitlements", {{{"key", "updates"}}}},
+                                   {"metadata", {{"issued_manually", true}}}}}}})}};
+
+    auto payload = parse_machine_file_payload(j);
+
+    EXPECT_EQ(payload.license_key, "KEY-123");
+    EXPECT_EQ(payload.fingerprint, "fp-123");
+    EXPECT_TRUE(payload.device_name.empty());
+    EXPECT_TRUE(payload.platform.empty());
+    ASSERT_TRUE(payload.license.has_value());
+    EXPECT_EQ(payload.license->key(), "KEY-123");
+    EXPECT_EQ(payload.license->plan_key(), "pro");
+}
+
 // ==================== Release Tests ====================
 
 TEST(JsonReleaseTest, ParseFullRelease) {
@@ -443,6 +603,19 @@ TEST(JsonErrorResponseTest, ParseError) {
     EXPECT_EQ(err.message, "License not found");
 }
 
+TEST(JsonErrorResponseTest, ParseMachineFileErrorsArray) {
+    nlohmann::json j = {{"errors",
+                         nlohmann::json::array(
+                             {{{"code", "DEVICE_NOT_ACTIVATED"},
+                               {"title", "Device not activated"},
+                               {"detail", "Activate first"}}})}};
+
+    auto err = parse_error_response(j);
+
+    EXPECT_EQ(err.code, "DEVICE_NOT_ACTIVATED");
+    EXPECT_EQ(err.message, "Activate first");
+}
+
 TEST(JsonErrorCodeMappingTest, ErrorCodeToErrorCode) {
     EXPECT_EQ(error_code_to_error_code("license_not_found"), ErrorCode::LicenseNotFound);
     EXPECT_EQ(error_code_to_error_code("license_expired"), ErrorCode::LicenseExpired);
@@ -464,6 +637,7 @@ TEST(JsonErrorCodeMappingTest, ErrorCodeToErrorCode) {
 TEST(JsonRequestBuilderTest, BuildValidateRequest) {
     auto body = build_validate_request("device-001");
 
+    EXPECT_EQ(body["fingerprint"], "device-001");
     EXPECT_EQ(body["device_id"], "device-001");
 }
 
@@ -477,6 +651,7 @@ TEST(JsonRequestBuilderTest, BuildActivateRequest) {
     Metadata meta{{"os", "macos"}};
     auto body = build_activate_request("device-001", "My MacBook", meta);
 
+    EXPECT_EQ(body["fingerprint"], "device-001");
     EXPECT_EQ(body["device_id"], "device-001");
     EXPECT_EQ(body["device_name"], "My MacBook");
     EXPECT_EQ(body["metadata"]["os"], "macos");
@@ -486,6 +661,7 @@ TEST(JsonRequestBuilderTest, BuildActivateRequestMinimal) {
     Metadata meta;
     auto body = build_activate_request("device-001", "", meta);
 
+    EXPECT_EQ(body["fingerprint"], "device-001");
     EXPECT_EQ(body["device_id"], "device-001");
     EXPECT_FALSE(body.contains("device_name"));
     EXPECT_FALSE(body.contains("metadata"));
@@ -494,12 +670,14 @@ TEST(JsonRequestBuilderTest, BuildActivateRequestMinimal) {
 TEST(JsonRequestBuilderTest, BuildDeactivateRequest) {
     auto body = build_deactivate_request("device-001");
 
+    EXPECT_EQ(body["fingerprint"], "device-001");
     EXPECT_EQ(body["device_id"], "device-001");
 }
 
 TEST(JsonRequestBuilderTest, BuildOfflineTokenRequest) {
     auto body = build_offline_token_request("device-001", 30);
 
+    EXPECT_EQ(body["fingerprint"], "device-001");
     EXPECT_EQ(body["device_id"], "device-001");
     EXPECT_EQ(body["ttl_days"], 30);
 }
@@ -523,6 +701,31 @@ TEST(JsonRequestBuilderTest, BuildDownloadTokenRequestMinimal) {
 
     EXPECT_EQ(body["license_key"], "KEY-123");
     EXPECT_FALSE(body.contains("platform"));
+}
+
+TEST(JsonRequestBuilderTest, BuildMachineFileRequest) {
+    auto body = build_machine_file_request("fp-123", 45);
+
+    EXPECT_EQ(body["fingerprint"], "fp-123");
+    EXPECT_EQ(body["device_id"], "fp-123");
+    EXPECT_EQ(body["ttl"], 45);
+    ASSERT_TRUE(body["include"].is_array());
+    EXPECT_EQ(body["include"].size(), static_cast<size_t>(1));
+    EXPECT_EQ(body["include"][0], "license");
+}
+
+TEST(JsonRequestBuilderTest, BuildMachineFileRequestWithFingerprintComponents) {
+    Metadata fingerprint_components{
+        {"schema_version", "1"},
+        {"platform", "linux"},
+        {"machine_id", "machine-123"}};
+
+    auto body = build_machine_file_request("fp-123", 45, fingerprint_components);
+
+    ASSERT_TRUE(body.contains("fingerprint_components"));
+    EXPECT_EQ(body["fingerprint_components"]["schema_version"], "1");
+    EXPECT_EQ(body["fingerprint_components"]["platform"], "linux");
+    EXPECT_EQ(body["fingerprint_components"]["machine_id"], "machine-123");
 }
 
 }  // namespace

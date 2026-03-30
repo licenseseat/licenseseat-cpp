@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <cctype>
 #include <fstream>
 
 namespace licenseseat {
@@ -21,6 +22,10 @@ std::filesystem::path FileStorage::get_license_path() const {
 
 std::filesystem::path FileStorage::get_offline_token_path() const {
     return storage_path_ / (prefix_ + "_offline_token.json");
+}
+
+std::filesystem::path FileStorage::get_machine_file_path() const {
+    return storage_path_ / (prefix_ + "_machine_file.json");
 }
 
 std::filesystem::path FileStorage::get_signing_key_path(const std::string& key_id) const {
@@ -181,6 +186,12 @@ bool FileStorage::set_offline_token(const OfflineToken& offline) {
             j["token"]["seat_limit"] = nullptr;
         }
 
+        if (offline.token.fingerprint) {
+            j["token"]["fingerprint"] = *offline.token.fingerprint;
+        } else {
+            j["token"]["fingerprint"] = nullptr;
+        }
+
         if (offline.token.device_id) {
             j["token"]["device_id"] = *offline.token.device_id;
         } else {
@@ -256,6 +267,69 @@ void FileStorage::clear_offline_token() {
     std::lock_guard<std::mutex> lock(mutex_);
     try {
         std::filesystem::remove(get_offline_token_path());
+    } catch (...) {
+    }
+}
+
+bool FileStorage::set_machine_file(const MachineFile& machine_file) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    try {
+        nlohmann::json j;
+        j["certificate"] = machine_file.certificate;
+        j["algorithm"] = machine_file.algorithm;
+        j["ttl"] = machine_file.ttl;
+        j["license_key"] = machine_file.license_key;
+        j["fingerprint"] = machine_file.fingerprint;
+        if (machine_file.issued_at.has_value()) {
+            j["issued_at"] = json::format_timestamp(*machine_file.issued_at);
+        } else {
+            j["issued_at"] = nullptr;
+        }
+        if (machine_file.expires_at.has_value()) {
+            j["expires_at"] = json::format_timestamp(*machine_file.expires_at);
+        } else {
+            j["expires_at"] = nullptr;
+        }
+
+        return write_file(get_machine_file_path(), j.dump(2));
+    } catch (...) {
+        return false;
+    }
+}
+
+std::optional<MachineFile> FileStorage::get_machine_file() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto content = read_file(get_machine_file_path());
+    if (!content) {
+        return std::nullopt;
+    }
+
+    try {
+        auto j = nlohmann::json::parse(*content);
+        MachineFile machine_file;
+        machine_file.certificate = j.value("certificate", "");
+        machine_file.algorithm = j.value("algorithm", machine_file.algorithm);
+        machine_file.ttl = j.value("ttl", int64_t{0});
+        machine_file.license_key = j.value("license_key", "");
+        machine_file.fingerprint = j.value("fingerprint", "");
+        if (j.contains("issued_at") && !j["issued_at"].is_null()) {
+            machine_file.issued_at = json::parse_timestamp(j["issued_at"].get<std::string>());
+        }
+        if (j.contains("expires_at") && !j["expires_at"].is_null()) {
+            machine_file.expires_at = json::parse_timestamp(j["expires_at"].get<std::string>());
+        }
+        return machine_file;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+void FileStorage::clear_machine_file() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    try {
+        std::filesystem::remove(get_machine_file_path());
     } catch (...) {
     }
 }
@@ -365,6 +439,22 @@ void MemoryStorage::clear_offline_token() {
     offline_token_.reset();
 }
 
+bool MemoryStorage::set_machine_file(const MachineFile& machine_file) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    machine_file_ = machine_file;
+    return true;
+}
+
+std::optional<MachineFile> MemoryStorage::get_machine_file() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return machine_file_;
+}
+
+void MemoryStorage::clear_machine_file() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    machine_file_.reset();
+}
+
 bool MemoryStorage::set_signing_key(const std::string& key_id, const std::string& public_key_b64) {
     std::lock_guard<std::mutex> lock(mutex_);
     signing_keys_[key_id] = public_key_b64;
@@ -395,6 +485,7 @@ void MemoryStorage::clear_all() {
     std::lock_guard<std::mutex> lock(mutex_);
     license_.reset();
     offline_token_.reset();
+    machine_file_.reset();
     signing_keys_.clear();
     last_seen_timestamp_.reset();
 }
