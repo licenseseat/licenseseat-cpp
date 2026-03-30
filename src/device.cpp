@@ -95,33 +95,6 @@ std::string get_macos_platform_uuid() {
     return result;
 }
 
-#elif defined(LICENSESEAT_PLATFORM_LINUX)
-
-std::string get_linux_machine_id() {
-    auto machine_id = read_trimmed_file("/etc/machine-id");
-    if (!machine_id.empty()) {
-        return machine_id;
-    }
-
-    auto dbus_machine_id = read_trimmed_file("/var/lib/dbus/machine-id");
-    if (!dbus_machine_id.empty()) {
-        return dbus_machine_id;
-    }
-
-    auto dmi_uuid = read_trimmed_file("/sys/class/dmi/id/product_uuid");
-    if (!dmi_uuid.empty()) {
-        return dmi_uuid;
-    }
-
-    // Final fallback: hostname (for minimal containers like Alpine Docker)
-    char hostname[256] = {0};
-    if (gethostname(hostname, sizeof(hostname)) == 0 && hostname[0] != '\0') {
-        return std::string("hostname:") + hostname;
-    }
-
-    return "";
-}
-
 #elif defined(LICENSESEAT_PLATFORM_WINDOWS)
 
 std::string get_windows_machine_guid() {
