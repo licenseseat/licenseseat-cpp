@@ -15,11 +15,12 @@ The official C++ SDK for [LicenseSeat](https://licenseseat.com) – the licensin
 ## Features
 
 - **License activation & deactivation** – Activate licenses with automatic device fingerprinting
-- **Online & offline validation** – Validate licenses with Ed25519 cryptographic verification
-- **Session restore** – `restore_license()` handles startup logic (check cache, validate, fallback to offline)
-- **Client status** – `get_client_status()` returns `Active`, `OfflineValid`, `Inactive`, `Invalid`, or `Pending`
-- **Entitlement checking** – Check feature access with `has_entitlement()` and `check_entitlement()`
-- **Local caching** – File-based caching with automatic offline fallback
+- **Online & offline validation** – Fingerprint-aware validation with signed offline artifacts
+- **Machine files** – AES-256-GCM + Ed25519 machine files for preferred offline validation
+- **Session restore** – `restore_license()` restores cached state and prefers machine files offline
+- **Client status** – `get_client_status()` returns `Active`, `OfflineValid`, `OfflineInvalid`, `Inactive`, or `Invalid`
+- **Entitlement checking** – Check feature access with `check_entitlement()`
+- **Local caching** – File-based caching for machine files, license state, and optional legacy offline tokens
 - **Auto-validation** – Background validation with configurable intervals
 - **Heartbeat** – Track active device usage with manual or automatic heartbeats
 - **Network recovery** – Auto-restarts validation/heartbeat when connectivity returns
@@ -125,7 +126,7 @@ A compact audio synthesizer demo showing LicenseSeat integration. Built with ray
 
 - CMake 3.16+
 - C++17 compiler (Clang, GCC, or MSVC)
-- OpenSSL (for HTTPS)
+- OpenSSL (for HTTPS and machine-file AES-256-GCM verification)
 
 ```bash
 # macOS
@@ -146,6 +147,11 @@ vcpkg install openssl
 ```bash
 cd demo
 
+# Configure runtime settings (recommended for local/dev servers)
+export LICENSESEAT_API_URL="http://localhost:YOUR_PORT/api/v1"
+export LICENSESEAT_API_KEY="pk_test_xxxxxxxx"
+export LICENSESEAT_PRODUCT_SLUG="synthdemo"
+
 # Configure (downloads raylib automatically via FetchContent)
 cmake -B build
 
@@ -157,6 +163,22 @@ open build/synthdemo.app                  # macOS
 ./build/synthdemo                         # Linux
 .\build\Debug\synthdemo.exe               # Windows
 ```
+
+#### One-Line Launch
+
+```bash
+cd /Users/javi/GitHub/licenseseat-cpp/demo && LICENSESEAT_API_URL="http://localhost:YOUR_PORT/api/v1" LICENSESEAT_API_KEY="pk_test_..." LICENSESEAT_PRODUCT_SLUG="synthdemo" LICENSESEAT_VERIFY_SSL="false" open build/synthdemo.app
+```
+
+The demo reads its runtime config from environment variables:
+
+- `LICENSESEAT_API_URL` - API endpoint to use. Set this for local development instead of relying on a fixed port.
+- `LICENSESEAT_API_KEY` - Publishable API key used by the demo.
+- `LICENSESEAT_PRODUCT_SLUG` - Product slug used by the demo.
+- `LICENSESEAT_STORAGE_PATH` - Override the default cache path (`/tmp/synthdemo`).
+- `LICENSESEAT_TIMEOUT_SECONDS` - HTTP timeout for the demo client.
+- `LICENSESEAT_VERIFY_SSL` - Set to `true` or `false`.
+- `LICENSESEAT_ENABLE_LEGACY_OFFLINE_TOKENS` - Optional. Set to `true` only if you want the demo to fetch deprecated offline-token fallbacks too.
 
 #### Build Options
 
@@ -195,12 +217,13 @@ Download `licenseseat_single.hpp` from the [latest release](https://github.com/l
 
 ### Requirements
 
-The single-header still requires two external header-only libraries:
+The single-header still requires two external header-only libraries plus OpenSSL:
 
 - **[nlohmann/json](https://github.com/nlohmann/json)** – JSON parsing (single header)
 - **[cpp-httplib](https://github.com/yhirose/cpp-httplib)** – HTTP client (single header, optional for offline-only)
+- **OpenSSL** – required for HTTPS and machine-file AES-256-GCM verification in the full SDK path
 
-The single-header does **NOT** require OpenSSL – it uses vendored ed25519 and PicoSHA2.
+The only zero-OpenSSL path in this repo is the dedicated JUCE standalone helper above. The full/amalgamated SDK now requires OpenSSL for machine files.
 
 ### Generate Locally
 
@@ -251,7 +274,7 @@ sudo cmake --install build
 - PicoSHA2 – SHA-256 hashing
 
 **External (the only thing you need to install):**
-- OpenSSL – for HTTPS
+- OpenSSL – for HTTPS and machine-file AES-256-GCM verification
 
 ```bash
 # Ubuntu/Debian
@@ -290,7 +313,7 @@ int main()
         std::cout << "Licensed!\n";
 
         // Check entitlements
-        if (client.has_entitlement("pro")) {
+        if (client.check_entitlement("pro").active) {
             enable_pro_features();
         }
     } else {
@@ -330,7 +353,7 @@ switch (result.status) {
         enable_full_features();
         break;
     case ClientStatus::OfflineValid:
-        // Offline but cached token valid
+        // Offline but cached machine file (or legacy token, if enabled) is valid
         enable_full_features();
         show_offline_indicator();
         break;
@@ -393,7 +416,7 @@ licenseseat::Client client(config);
 auto result = client.validate("XXXX-XXXX-XXXX-XXXX");
 if (result.is_ok() && result.value().valid) {
     // License valid — enable features
-    if (client.has_entitlement("pro")) {
+    if (client.check_entitlement("pro").active) {
         enable_pro_mode();
     }
 }
@@ -402,7 +425,7 @@ if (result.is_ok() && result.value().valid) {
 ### 4. Activate Device (for hardware-locked licenses)
 
 ```cpp
-std::string device_id = licenseseat::generate_device_id();
+std::string device_id = licenseseat::generate_device_id();  // Auto-generated fingerprint
 auto result = client.activate("LICENSE-KEY", device_id, "User's MacBook");
 
 if (result.is_ok()) {
@@ -415,17 +438,24 @@ if (result.is_ok()) {
 ### 5. Enable Offline Support (optional)
 
 ```cpp
-// Generate and save offline token while online
+client.activate("LICENSE-KEY");  // Required once: consumes the seat and binds the fingerprint
+
+// Preferred: machine files
+auto machine_file = client.checkout_machine_file("LICENSE-KEY").value();
+auto verify = client.verify_machine_file(machine_file);
+
+if (verify.is_ok() && verify.value().valid) {
+    const auto& payload = *verify.value().payload;
+    if (payload.license && client.check_entitlement("pro").active) {
+        enable_pro_mode();
+    }
+}
+
+// Legacy compatibility only: offline tokens
 auto token = client.generate_offline_token("LICENSE-KEY").value();
 auto key = client.fetch_signing_key(token.token.kid).value();
 std::string json = licenseseat::json::offline_token_to_json(token);
 save_to_disk(json, key);
-
-// Later, verify offline
-auto [loaded, pub_key] = load_from_disk();
-if (client.verify_offline_token(loaded, pub_key).value()) {
-    // Valid! Access: loaded.token.plan_key, .metadata, .entitlements
-}
 ```
 
 ### 6. Background Validation
@@ -457,7 +487,7 @@ config.timeout_seconds = 30;
 config.max_retries = 3;
 
 // Optional - Device identification
-config.device_id = "";  // Auto-generated if empty
+config.device_id = "";  // Legacy config name; auto-generates the device fingerprint if empty
 
 // Optional - Offline support
 config.signing_public_key = "base64-ed25519-public-key";  // Pre-configure for offline
@@ -487,9 +517,9 @@ config.app_build = "142";         // Included in telemetry
 | `api_url`                | string | `https://licenseseat.com/api/v1`   | API endpoint                                       |
 | `timeout_seconds`        | int    | `30`                               | HTTP request timeout                               |
 | `max_retries`            | int    | `3`                                | Retry attempts for failed requests                 |
-| `device_id`              | string | `""`                               | Device identifier (auto-generated if empty)        |
-| `signing_public_key`     | string | `""`                               | Ed25519 public key for offline verification        |
-| `max_offline_days`       | int    | `0`                                | Maximum days license works offline (0 = disabled)  |
+| `device_id`              | string | `""`                               | Device fingerprint (legacy config name, auto-generated if empty) |
+| `signing_public_key`     | string | `""`                               | Ed25519 public key for machine files and legacy offline tokens |
+| `max_offline_days`       | int    | `0`                                | Local offline restore limit in days (0 = disabled/unlimited) |
 | `storage_path`           | string | `""`                               | Path for license cache (empty = no persistence)    |
 | `auto_validate_interval` | double | `3600.0`                           | Seconds between auto-validation cycles             |
 | `telemetry_enabled`      | bool   | `true`                             | Enable anonymous telemetry collection              |
@@ -631,7 +661,7 @@ if (result.is_ok()) {
 ### Async Validation
 
 ```cpp
-client.validate_async("LICENSE-KEY", [](licenseseat::Result<licenseseat::Validation> result) {
+client.validate_async("LICENSE-KEY", [](licenseseat::Result<licenseseat::ValidationResult> result) {
     if (result.is_ok() && result.value().valid) {
         // License is valid
     }
@@ -681,7 +711,7 @@ if (result.is_ok()) {
 
 ```cpp
 // Simple boolean check (uses cached license data)
-if (client.has_entitlement("pro")) {
+if (client.check_entitlement("pro").active) {
     enable_pro_features();
 }
 
@@ -732,7 +762,7 @@ for (const auto& ent : license.active_entitlements()) {
 }
 ```
 
-From offline tokens, metadata is accessed directly:
+If you still rely on legacy offline tokens, metadata is accessed directly there too:
 
 ```cpp
 // License metadata from offline token
@@ -761,7 +791,7 @@ std::cout << "Code: " << status.code << "\n";
 
 ### Reset
 
-Clear all cached data (license, offline tokens, etc.).
+Clear all cached data (license, machine files, legacy offline tokens, etc.).
 
 ```cpp
 client.reset();
@@ -771,45 +801,69 @@ client.reset();
 
 ## Offline Support
 
-The SDK supports offline license validation using Ed25519 cryptographic signatures.
+The SDK supports offline license validation with two artifacts:
+
+- `machine files` are the preferred path. They are encrypted with AES-256-GCM, signed with Ed25519, and bound to the local fingerprint.
+- `offline tokens` remain available only as a legacy compatibility path and use Ed25519 signatures only.
 
 ### Automatic (Recommended)
 
-Just set `storage_path` and call `activate()` — the SDK handles everything:
+Just set `storage_path` and call `activate()` — the SDK automatically syncs a machine file:
 
 ```cpp
 config.storage_path = "/path/to/cache";
 licenseseat::Client client(config);
 
-client.activate("LICENSE-KEY");  // Automatically syncs offline assets
+client.activate("LICENSE-KEY");  // Automatically syncs a machine file
 
-// If network fails later, validation automatically falls back to cached offline token
+// If network fails later, validation prefers the cached machine file
 auto result = client.validate("LICENSE-KEY");  // Works offline!
+```
+
+If you still need the old token path, enable it explicitly:
+
+```cpp
+config.enable_legacy_offline_tokens = true;
+licenseseat::Client client(config);
+
+client.activate("LICENSE-KEY");  // Syncs machine file first, then legacy token only if needed
 ```
 
 ### Manual Storage
 
-For custom storage (encrypted, database, etc.), use the serialization helpers:
+For custom storage (encrypted, database, etc.), store the machine file certificate directly:
+
+```cpp
+// Save (online)
+auto machine_file = client.checkout_machine_file("LICENSE-KEY").value();
+save_to_secure_storage(machine_file.certificate);
+
+// Load and verify (offline)
+licenseseat::MachineFile loaded;
+loaded.certificate = load_from_secure_storage();
+loaded.license_key = "LICENSE-KEY";
+loaded.fingerprint = client.fingerprint();
+
+auto verified = client.verify_machine_file(loaded);
+if (verified.is_ok() && verified.value().valid) {
+    const auto& payload = *verified.value().payload;
+    if (payload.license) {
+        std::cout << "Plan: " << payload.license->plan_key() << "\n";
+    }
+}
+```
+
+If you still need portable JSON serialization for a legacy integration, use offline tokens explicitly:
 
 ```cpp
 #include <licenseseat/json.hpp>
 
-// Save (online)
+client.activate("LICENSE-KEY");  // Offline tokens also require an existing activation
 auto token = client.generate_offline_token("LICENSE-KEY").value();
 auto key = client.fetch_signing_key(token.token.kid).value();
-
 std::string token_json = licenseseat::json::offline_token_to_json(token);
-// Save token_json and key to your storage
-
-// Load and verify (offline)
 auto loaded = licenseseat::json::offline_token_from_json(token_json);
-if (client.verify_offline_token(loaded, key).value()) {
-    // Access license data
-    std::cout << "Plan: " << loaded.token.plan_key << "\n";
-    for (const auto& [k, v] : loaded.token.metadata) {
-        std::cout << k << " = " << v << "\n";
-    }
-}
+auto verified = client.verify_offline_token(loaded, key);
 ```
 
 ### Pre-configured Public Key
@@ -838,7 +892,8 @@ auto result = client.verify_offline_token(offline_token);  // No key param neede
 | `plan_key`         | string   | Plan identifier (e.g., "pro-annual")             |
 | `mode`             | string   | License mode ("hardware_locked" or "floating")   |
 | `seat_limit`       | int      | Maximum allowed activations                      |
-| `device_id`        | string   | Device this token is bound to (if hardware_locked) |
+| `fingerprint`      | string   | Preferred binding field for the local machine    |
+| `device_id`        | string   | Legacy alias for `fingerprint`                    |
 | `iat`              | int64    | Issued at (Unix timestamp)                       |
 | `exp`              | int64    | Expires at (Unix timestamp)                      |
 | `nbf`              | int64    | Not valid before (Unix timestamp)                |
@@ -890,9 +945,9 @@ auto sub2 = client.on(licenseseat::events::VALIDATION_FAILED, [](const std::any&
     std::cout << "License validation failed\n";
 });
 
-// Subscribe to offline token ready
-auto sub3 = client.on(licenseseat::events::OFFLINE_TOKEN_READY, [](const std::any& data) {
-    std::cout << "Offline token generated\n";
+// Subscribe to machine-file readiness
+auto sub3 = client.on(licenseseat::events::MACHINE_FILE_READY, [](const std::any& data) {
+    std::cout << "Machine file cached\n";
 });
 
 // Later: cancel subscriptions
@@ -915,8 +970,8 @@ sub3.cancel();
 | `VALIDATION_FAILED`              | License validation returned invalid          |
 | `VALIDATION_ERROR`               | Validation request failed (network, etc.)    |
 | `VALIDATION_AUTH_FAILED`         | Authentication failed (invalid API key)      |
-| `VALIDATION_OFFLINE_SUCCESS`     | Offline token verified successfully          |
-| `VALIDATION_OFFLINE_FAILED`      | Offline token verification failed            |
+| `VALIDATION_OFFLINE_SUCCESS`     | Offline artifact verified successfully       |
+| `VALIDATION_OFFLINE_FAILED`      | Offline artifact verification failed         |
 | `VALIDATION_AUTO_FAILED`         | Auto-validation cycle failed                 |
 | `DEACTIVATION_START`             | Deactivation request starting                |
 | `DEACTIVATION_SUCCESS`           | Device deactivated successfully              |
@@ -925,12 +980,18 @@ sub3.cancel();
 | `NETWORK_OFFLINE`                | Network connectivity lost                    |
 | `AUTOVALIDATION_CYCLE`           | Auto-validation cycle completed              |
 | `AUTOVALIDATION_STOPPED`         | Auto-validation stopped                      |
-| `OFFLINE_TOKEN_FETCHING`         | Fetching offline token from server           |
-| `OFFLINE_TOKEN_FETCHED`          | Offline token fetched successfully           |
-| `OFFLINE_TOKEN_FETCH_ERROR`      | Failed to fetch offline token                |
-| `OFFLINE_TOKEN_READY`            | Offline token ready for use                  |
-| `OFFLINE_TOKEN_VERIFIED`         | Offline token verified locally               |
-| `OFFLINE_TOKEN_VERIFICATION_FAILED` | Offline token local verification failed   |
+| `OFFLINE_TOKEN_FETCHING`         | Fetching legacy offline token from server    |
+| `OFFLINE_TOKEN_FETCHED`          | Legacy offline token fetched successfully    |
+| `OFFLINE_TOKEN_FETCH_ERROR`      | Failed to fetch legacy offline token         |
+| `OFFLINE_TOKEN_READY`            | Legacy offline token ready for use           |
+| `OFFLINE_TOKEN_VERIFIED`         | Legacy offline token verified locally        |
+| `OFFLINE_TOKEN_VERIFICATION_FAILED` | Legacy offline token local verification failed |
+| `MACHINE_FILE_FETCHING`          | Fetching machine file from server            |
+| `MACHINE_FILE_FETCHED`           | Machine file fetched successfully            |
+| `MACHINE_FILE_FETCH_ERROR`       | Failed to fetch machine file                 |
+| `MACHINE_FILE_READY`             | Machine file cached for offline use          |
+| `MACHINE_FILE_VERIFIED`          | Machine file verified locally                |
+| `MACHINE_FILE_VERIFICATION_FAILED` | Machine file verification failed           |
 | `HEARTBEAT_SUCCESS`              | Heartbeat sent successfully                  |
 | `HEARTBEAT_ERROR`                | Heartbeat request failed                     |
 | `SDK_RESET`                      | SDK state reset                              |
@@ -1033,9 +1094,9 @@ if (result.is_ok()) {
 | macOS    | Apple Clang 12+ (ARM & Intel) | Supported |
 | Windows  | MSVC 2019+                    | Supported |
 
-### Device Identification
+### Device Fingerprinting
 
-The SDK automatically generates a unique device identifier:
+The SDK automatically generates a stable device fingerprint. The public C++ API still uses the legacy name `device_id` for compatibility:
 
 - **macOS**: IOKit Platform UUID
 - **Windows**: Machine GUID from registry
@@ -1097,7 +1158,7 @@ The SDK includes comprehensive tests:
 | Test Suite           | Tests | Network | Description                                 |
 | -------------------- | ----- | ------- | ------------------------------------------- |
 | Unit tests           | 298   | No      | Core functionality, parsing, crypto         |
-| Crypto stress tests  | 44    | Yes     | Ed25519, Base64, offline token verification |
+| Crypto stress tests  | 44    | Yes     | Ed25519, Base64, machine-file + legacy-token verification |
 | Integration tests    | 48    | Yes     | Full API testing                            |
 | Scenario tests       | 38    | Yes     | Real-world workflows (10 scenarios)         |
 | Offline workflow     | 4     | Yes     | Manual & automatic offline storage          |
@@ -1118,7 +1179,7 @@ cmake --build build
 
 # Run integration tests
 ./build/tests/integration_test      # 48 tests - Full API coverage
-./build/tests/crypto_stress_test    # 44 tests - Crypto & offline tokens
+./build/tests/crypto_stress_test    # 44 tests - Crypto, machine files, and legacy offline tokens
 ./build/tests/scenario_test         # 38 tests - Real-world scenarios
 ```
 
@@ -1128,7 +1189,7 @@ The scenario tests validate 10 real-world use cases matching the Swift SDK test 
 
 1. **First app launch & activation** – Fresh install, validation, activation
 2. **Returning user** – Cached license, session persistence
-3. **Offline mode** – Offline token generation and verification
+3. **Offline mode** – Machine-file restore plus legacy-token compatibility paths
 4. **Security** – Fake keys, wrong product, invalid API key, tampered signatures
 5. **License persistence** – State consistency during session
 6. **Grace period & expiration** – Token expiry handling

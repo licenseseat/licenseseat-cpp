@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SynthDemo - LicenseSeat SDK Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #0a0a0a;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .container {
+            text-align: center;
+            padding: 20px;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #fff;
+        }
+
+        .subtitle {
+            color: #888;
+            font-size: 0.9rem;
+            margin-bottom: 24px;
+        }
+
+        .canvas-container {
+            position: relative;
+            display: inline-block;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            max-width: 100%;
+        }
+
+        canvas {
+            display: block;
+            border-radius: 12px;
+            max-width: 100%;
+            height: auto;
+        }
+
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #666;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #333;
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .test-keys {
+            margin: 24px auto 0;
+            padding: 16px 24px;
+            background: #1a1a1a;
+            border-radius: 8px;
+            text-align: left;
+            display: table;
+        }
+
+        .test-keys h3 {
+            font-size: 0.8rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 12px;
+        }
+
+        .test-keys code {
+            display: inline-block;
+            background: #252525;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+            color: #3b82f6;
+        }
+
+        .test-keys ul {
+            list-style: none;
+        }
+
+        .test-keys li {
+            margin: 8px 0;
+            font-size: 0.9rem;
+            color: #aaa;
+        }
+
+        .test-keys li span {
+            color: #666;
+            margin-left: 8px;
+        }
+
+        .about {
+            margin: 24px auto 0;
+            max-width: 500px;
+            padding: 16px 24px;
+            background: #141414;
+            border-radius: 8px;
+            text-align: left;
+            font-size: 0.85rem;
+            color: #888;
+            line-height: 1.6;
+        }
+
+        .about a {
+            color: #3b82f6;
+            text-decoration: none;
+        }
+
+        .about a:hover {
+            text-decoration: underline;
+        }
+
+        .footer {
+            margin-top: 24px;
+            color: #444;
+            font-size: 0.8rem;
+        }
+
+        .footer a {
+            color: #3b82f6;
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        /* Hide canvas until loaded */
+        canvas.loading {
+            visibility: hidden;
+        }
+
+        /* Responsive */
+        @media (max-width: 600px) {
+            .container {
+                padding: 12px;
+            }
+
+            h1 {
+                font-size: 1.25rem;
+            }
+
+            .subtitle {
+                font-size: 0.8rem;
+                margin-bottom: 16px;
+            }
+
+            .test-keys, .about {
+                padding: 12px 16px;
+                font-size: 0.8rem;
+            }
+
+            .test-keys code {
+                font-size: 0.75rem;
+                padding: 2px 6px;
+            }
+
+            .test-keys li {
+                font-size: 0.8rem;
+            }
+
+            .about {
+                max-width: 100%;
+            }
+
+            .footer {
+                font-size: 0.75rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SynthDemo</h1>
+        <p class="subtitle">LicenseSeat C++ SDK Demo</p>
+
+        <div class="canvas-container">
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <div>Loading...</div>
+            </div>
+            <canvas class="emscripten loading" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+        </div>
+
+        <div class="test-keys">
+            <h3>Test License Keys</h3>
+            <ul>
+                <li><code>4242-4242-4242-4242</code> <span>Valid Pro license</span></li>
+                <li><code>4000-0000-0000-0002</code> <span>Invalid key</span></li>
+                <li><code>4000-0000-0000-0010</code> <span>Expired license</span></li>
+                <li><code>4000-0000-0000-0020</code> <span>Suspended license</span></li>
+                <li><code>4000-0000-0000-0069</code> <span>Seat limit exceeded</span></li>
+            </ul>
+        </div>
+
+        <div class="about">
+            This is a real C++ application compiled to WebAssembly for this web demo.
+            It demonstrates how software licensing works with the
+            <a href="https://github.com/licenseseat/licenseseat-cpp" target="_blank">LicenseSeat C++ SDK</a>.
+            The full source code is in the
+            <a href="https://github.com/licenseseat/licenseseat-cpp/tree/main/demo" target="_blank">demo/</a>
+            folder. In production, this same code runs natively on macOS, Windows, and Linux
+            for apps like audio plugins, desktop tools, and games.
+        </div>
+
+        <p class="footer">
+            Powered by <a href="https://licenseseat.com" target="_blank">LicenseSeat</a>
+        </p>
+    </div>
+
+    <script>
+        var Module = {
+            canvas: (function() {
+                var canvas = document.getElementById('canvas');
+                canvas.addEventListener('webglcontextlost', function(e) {
+                    alert('WebGL context lost. Reload the page.');
+                    e.preventDefault();
+                }, false);
+                return canvas;
+            })(),
+            onRuntimeInitialized: function() {
+                // Hide loading, show canvas
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('canvas').classList.remove('loading');
+
+                // Focus canvas for keyboard input
+                document.getElementById('canvas').focus();
+            }
+        };
+
+        // Handle browser audio autoplay policy
+        // Audio context needs user interaction to start
+        document.addEventListener('click', function() {
+            if (typeof Module !== 'undefined' && Module.resumeAudio) {
+                Module.resumeAudio();
+            }
+        }, { once: true });
+
+        document.addEventListener('keydown', function() {
+            if (typeof Module !== 'undefined' && Module.resumeAudio) {
+                Module.resumeAudio();
+            }
+        }, { once: true });
+    </script>
+    {{{ SCRIPT }}}
+</body>
+</html>
