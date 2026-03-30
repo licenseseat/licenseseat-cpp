@@ -32,7 +32,7 @@ public:
      */
     LicenseSeatJuce(const juce::String& apiKey,
                     const juce::String& productSlug,
-                    const juce::String& apiUrl = "https://licenseseat.com/api")
+                    const juce::String& apiUrl = "https://licenseseat.com/api/v1")
     {
         licenseseat::Config config;
         config.api_key = apiKey.toStdString();
@@ -68,11 +68,11 @@ public:
     }
 
     /**
-     * Get the device identifier
+     * Get the current device fingerprint
      */
     juce::String getDeviceId() const
     {
-        return juce::String(client->device_identifier());
+        return juce::String(client->fingerprint());
     }
 
     /**

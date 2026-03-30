@@ -105,8 +105,8 @@ public:
     bool IsLicenseValid() const;
 
     /**
-     * Get the device identifier
-     * @return Unique device ID used for activations
+     * Get the device fingerprint
+     * @return Unique device fingerprint used for activations
      */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "LicenseSeat")
     FString GetDeviceId() const;

@@ -74,7 +74,7 @@ public:
     {
         juce::String apiKey;
         juce::String productSlug;
-        juce::String apiUrl = "https://licenseseat.com/api";
+        juce::String apiUrl = "https://licenseseat.com/api/v1";
         int timeoutMs = 10000;
         int maxRetries = 1;
 
@@ -98,7 +98,7 @@ public:
 
     LicenseSeatJuceStandalone(const juce::String& apiKey,
                               const juce::String& productSlug,
-                              const juce::String& apiUrl = "https://licenseseat.com/api")
+                              const juce::String& apiUrl = "https://licenseseat.com/api/v1")
     {
         cfg.apiKey = apiKey;
         cfg.productSlug = productSlug;
@@ -124,7 +124,7 @@ public:
         return validFlag.load(std::memory_order_relaxed);
     }
 
-    /** Get the device identifier. */
+    /** Get the device fingerprint (legacy API name). */
     juce::String getDeviceId() const
     {
         return deviceId;
@@ -388,6 +388,74 @@ private:
         return result;
     }
 
+    juce::String licenseEndpoint(const juce::String& licenseKey, const juce::String& action) const
+    {
+        return "products/" + cfg.productSlug + "/licenses/" + licenseKey + "/" + action;
+    }
+
+    static juce::String extractErrorMessage(const juce::var& response)
+    {
+        if (response.hasProperty("errors"))
+        {
+            auto errors = response["errors"];
+            if (auto* arr = errors.getArray(); arr != nullptr && !arr->isEmpty())
+            {
+                auto first = arr->getReference(0);
+                if (first.hasProperty("detail"))
+                    return first["detail"].toString();
+                if (first.hasProperty("message"))
+                    return first["message"].toString();
+                if (first.hasProperty("title"))
+                    return first["title"].toString();
+            }
+        }
+
+        if (response.hasProperty("error"))
+        {
+            auto error = response["error"];
+            if (error.hasProperty("message"))
+                return error["message"].toString();
+            return error.toString();
+        }
+
+        if (response.hasProperty("message"))
+            return response["message"].toString();
+
+        return "Request failed";
+    }
+
+    static bool varToBool(const juce::var& value)
+    {
+        if (value.isBool())
+            return static_cast<bool>(value);
+
+        auto text = value.toString().trim();
+        return text.equalsIgnoreCase("true") || text == "1";
+    }
+
+    juce::var buildFingerprintComponents() const
+    {
+        auto* components = new juce::DynamicObject();
+        components->setProperty("schema_version", "1");
+        components->setProperty("sdk", "juce-standalone");
+        components->setProperty("platform", juce::SystemStats::getOperatingSystemName());
+        components->setProperty("hostname", juce::SystemStats::getComputerName());
+        return juce::var(components);
+    }
+
+    juce::var buildDeviceBody(const juce::String& deviceName = {}) const
+    {
+        auto* body = new juce::DynamicObject();
+        body->setProperty("fingerprint", deviceId);
+        body->setProperty("device_id", deviceId);
+        body->setProperty("fingerprint_components", buildFingerprintComponents());
+
+        if (deviceName.isNotEmpty())
+            body->setProperty("device_name", deviceName);
+
+        return juce::var(body);
+    }
+
     //--------------------------------------------------------------------------
     // Core Operations
     //--------------------------------------------------------------------------
@@ -396,19 +464,13 @@ private:
     {
         ValidationResult result;
 
-        // Build request body
-        auto* body = new juce::DynamicObject();
-        body->setProperty("license_key", licenseKey);
-        body->setProperty("product_slug", cfg.productSlug);
-        body->setProperty("device_identifier", deviceId);
-
-        auto response = httpPost("licenses/validate", juce::var(body));
+        auto response = httpPost(licenseEndpoint(licenseKey, "validate"), buildDeviceBody());
 
         // Handle error
-        if (response.hasProperty("error"))
+        if (response.hasProperty("error") || response.hasProperty("errors"))
         {
             result.valid = false;
-            result.reason = response["error"].toString();
+            result.reason = extractErrorMessage(response);
 
             // Update state
             validFlag.store(false, std::memory_order_relaxed);
@@ -416,16 +478,19 @@ private:
         }
 
         // Parse response
-        result.valid = response["valid"].toString() == "true" ||
-                      static_cast<bool>(response["valid"]);
-        result.reason = response["reason"].toString();
-        result.licensee = response["licensee"].toString();
-        result.licenseType = response["license_type"].toString();
+        result.valid = varToBool(response["valid"]);
+        result.reason = response["message"].toString();
+
+        auto license = response["license"];
+        if (license.hasProperty("key"))
+            result.licensee = license["key"].toString();
+        if (license.hasProperty("plan_key"))
+            result.licenseType = license["plan_key"].toString();
 
         // Parse metadata
-        if (response.hasProperty("metadata"))
+        if (license.hasProperty("metadata"))
         {
-            auto meta = response["metadata"];
+            auto meta = license["metadata"];
             if (auto* obj = meta.getDynamicObject())
             {
                 for (const auto& prop : obj->getProperties())
@@ -434,13 +499,13 @@ private:
         }
 
         // Parse entitlements
-        if (response.hasProperty("entitlements"))
+        if (license.hasProperty("active_entitlements"))
         {
-            auto ent = response["entitlements"];
+            auto ent = license["active_entitlements"];
             if (auto* arr = ent.getArray())
             {
                 for (const auto& item : *arr)
-                    result.entitlements.add(item.toString());
+                    result.entitlements.add(item["key"].toString());
             }
         }
 
@@ -460,27 +525,26 @@ private:
     {
         ActivationResult result;
 
-        auto* body = new juce::DynamicObject();
-        body->setProperty("license_key", licenseKey);
-        body->setProperty("product_slug", cfg.productSlug);
-        body->setProperty("device_identifier", deviceId);
-        body->setProperty("device_name", juce::SystemStats::getComputerName());
+        auto response = httpPost(
+            licenseEndpoint(licenseKey, "activate"),
+            buildDeviceBody(juce::SystemStats::getComputerName()));
 
-        auto response = httpPost("licenses/activate", juce::var(body));
-
-        if (response.hasProperty("error"))
+        if (response.hasProperty("error") || response.hasProperty("errors"))
         {
             result.success = false;
-            result.message = response["error"].toString();
+            result.message = extractErrorMessage(response);
             return result;
         }
 
-        result.success = response["success"].toString() == "true" ||
-                        static_cast<bool>(response["success"]);
-        result.message = response["message"].toString();
-        result.activationId = response["activation_id"].toString();
-        result.seatsUsed = static_cast<int>(response["seats_used"]);
-        result.seatsTotal = static_cast<int>(response["seats_total"]);
+        result.success = response.hasProperty("id");
+        result.message = result.success ? "Activation successful" : extractErrorMessage(response);
+        result.activationId = response["id"].toString();
+
+        auto license = response["license"];
+        if (license.hasProperty("active_seats"))
+            result.seatsUsed = static_cast<int>(license["active_seats"]);
+        if (license.hasProperty("seat_limit") && !license["seat_limit"].isVoid())
+            result.seatsTotal = static_cast<int>(license["seat_limit"]);
 
         // Also validate after successful activation
         if (result.success)
@@ -495,21 +559,15 @@ private:
 
     bool performDeactivation(const juce::String& licenseKey, juce::String& outMessage)
     {
-        auto* body = new juce::DynamicObject();
-        body->setProperty("license_key", licenseKey);
-        body->setProperty("product_slug", cfg.productSlug);
-        body->setProperty("device_identifier", deviceId);
+        auto response = httpPost(licenseEndpoint(licenseKey, "deactivate"), buildDeviceBody());
 
-        auto response = httpDelete("licenses/deactivate", juce::var(body));
-
-        if (response.hasProperty("error"))
+        if (response.hasProperty("error") || response.hasProperty("errors"))
         {
-            outMessage = response["error"].toString();
+            outMessage = extractErrorMessage(response);
             return false;
         }
 
-        bool success = response["success"].toString() == "true" ||
-                      static_cast<bool>(response["success"]);
+        bool success = response.hasProperty("activation_id");
 
         if (success)
         {
@@ -521,7 +579,7 @@ private:
         }
         else
         {
-            outMessage = response["message"].toString();
+            outMessage = extractErrorMessage(response);
         }
 
         return success;
@@ -531,21 +589,14 @@ private:
                                   const juce::String& entitlementKey,
                                   juce::String& outMessage)
     {
-        auto* body = new juce::DynamicObject();
-        body->setProperty("license_key", licenseKey);
-        body->setProperty("product_slug", cfg.productSlug);
-        body->setProperty("entitlement_key", entitlementKey);
-
-        auto response = httpPost("licenses/entitlement", juce::var(body));
-
-        if (response.hasProperty("error"))
+        auto validation = performValidation(licenseKey);
+        if (!validation.valid)
         {
-            outMessage = response["error"].toString();
+            outMessage = validation.reason.isNotEmpty() ? validation.reason : "License not valid";
             return false;
         }
 
-        bool hasEntitlement = response["has_entitlement"].toString() == "true" ||
-                             static_cast<bool>(response["has_entitlement"]);
+        bool hasEntitlement = validation.entitlements.contains(entitlementKey);
 
         outMessage = hasEntitlement ? "Entitlement granted" : "Entitlement not available";
         return hasEntitlement;
