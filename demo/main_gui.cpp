@@ -465,6 +465,14 @@ static MockValidationResult MockValidate(const std::string& key) {
     }
     return result;
 }
+
+extern "C" {
+EMSCRIPTEN_KEEPALIVE
+void ResizeEmbeddedDemo(int width, int height) {
+    if (width <= 0 || height <= 0) return;
+    SetWindowSize(width, height);
+}
+}
 #endif
 
 // App state
@@ -1386,7 +1394,11 @@ int main() {
     const int screenWidth = 720;
     const int screenHeight = 360;
 
+#ifdef __EMSCRIPTEN__
+    SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_HIGHDPI);
+#else
     SetConfigFlags(FLAG_VSYNC_HINT);
+#endif
     InitWindow(screenWidth, screenHeight, TextFormat("%s v%s", TOOL_NAME, TOOL_VERSION));
     SetExitKey(0);  // Disable ESC closing the app
     SetTargetFPS(60);

@@ -6,6 +6,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
+function(replace_or_fail variable search replace)
+    string(FIND "${${variable}}" "${search}" match_index)
+    if(match_index EQUAL -1)
+        message(FATAL_ERROR "Failed to patch raylib web backend. Expected snippet was not found.")
+    endif()
+
+    string(REPLACE "${search}" "${replace}" updated_value "${${variable}}")
+    set(${variable} "${updated_value}" PARENT_SCOPE)
+endfunction()
+
 # Detect WASM/Emscripten build
 if(EMSCRIPTEN)
     message(STATUS "Building for WebAssembly (WASM Demo Mode)")
@@ -34,6 +44,40 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(raygui)
+
+if(WASM_BUILD)
+    # Emscripten's GLFW runtime already supports GLFW_SCALE_TO_MONITOR/devicePixelRatio.
+    # raylib's web backend leaves that hint commented out and still sizes the viewport
+    # from the logical window instead of the framebuffer. That leaves the web build
+    # blurry on HiDPI displays, and enabling only the HiDPI hint renders into the
+    # lower-left of an oversized canvas because SetupViewport() still sees logical
+    # window pixels. Patch it in-place so the embedded demo uses framebuffer pixels.
+    # Upstream trail: raylib issue #3372 and PR #3520.
+    set(RAYLIB_RCORE_WEB "${raylib_SOURCE_DIR}/src/platforms/rcore_web.c")
+    file(READ "${RAYLIB_RCORE_WEB}" RAYLIB_RCORE_WEB_CONTENTS)
+
+    replace_or_fail(RAYLIB_RCORE_WEB_CONTENTS
+        "    //if (FLAG_IS_SET(CORE.Window.flags, FLAG_WINDOW_HIGHDPI)) glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);\n    //else glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_FALSE);"
+        "    if (FLAG_IS_SET(CORE.Window.flags, FLAG_WINDOW_HIGHDPI)) glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);\n    else glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_FALSE);"
+    )
+
+    replace_or_fail(RAYLIB_RCORE_WEB_CONTENTS
+        "        int fbWidth = CORE.Window.screen.width;\n        int fbHeight = CORE.Window.screen.height;\n\n        CORE.Window.render.width = fbWidth;\n        CORE.Window.render.height = fbHeight;\n        CORE.Window.currentFbo.width = fbWidth;\n        CORE.Window.currentFbo.height = fbHeight;"
+        "        int fbWidth;\n        int fbHeight;\n\n        glfwGetFramebufferSize(platform.handle, &fbWidth, &fbHeight);\n\n        // Screen scaling matrix is required in case desired screen area is different from display area\n        CORE.Window.screenScale = MatrixScale((float)fbWidth/CORE.Window.screen.width, (float)fbHeight/CORE.Window.screen.height, 1.0f);\n\n        // no need to scale mouse as glfw is doing it already\n\n        CORE.Window.render.width = fbWidth;\n        CORE.Window.render.height = fbHeight;\n        CORE.Window.currentFbo.width = fbWidth;\n        CORE.Window.currentFbo.height = fbHeight;"
+    )
+
+    replace_or_fail(RAYLIB_RCORE_WEB_CONTENTS
+        "static void WindowSizeCallback(GLFWwindow *window, int width, int height)\n{\n    // Reset viewport and projection matrix for new size\n    SetupViewport(width, height);\n\n    CORE.Window.currentFbo.width = width;\n    CORE.Window.currentFbo.height = height;\n    CORE.Window.resizedLastFrame = true;\n\n    if (IsWindowFullscreen()) return;\n\n    // Set current screen size\n    if (FLAG_IS_SET(CORE.Window.flags, FLAG_WINDOW_HIGHDPI))\n    {\n        Vector2 windowScaleDPI = GetWindowScaleDPI();\n\n        CORE.Window.screen.width = (unsigned int)(width/windowScaleDPI.x);\n        CORE.Window.screen.height = (unsigned int)(height/windowScaleDPI.y);\n    }\n    else\n    {\n        CORE.Window.screen.width = width;\n        CORE.Window.screen.height = height;\n    }\n\n    // NOTE: Postprocessing texture is not scaled to new size\n}\n\n// GLFW3: Called on window content (framebuffer) scaled\nstatic void WindowContentScaleCallback(GLFWwindow *window, float scalex, float scaley)\n{\n    CORE.Window.screenScale = MatrixScale(scalex, scaley, 1.0f);\n}"
+        "static void WindowSizeCallback(GLFWwindow *window, int width, int height)\n{\n    CORE.Window.screen.width = width;\n    CORE.Window.screen.height = height;\n\n    int fbWidth;\n    int fbHeight;\n\n    glfwGetFramebufferSize(platform.handle, &fbWidth, &fbHeight);\n\n    // Screen scaling matrix is required in case desired screen area is different from display area\n    CORE.Window.screenScale = MatrixScale((float)fbWidth/(float)CORE.Window.screen.width, (float)fbHeight/(float)CORE.Window.screen.height, 1.0f);\n\n    CORE.Window.render.width = fbWidth;\n    CORE.Window.render.height = fbHeight;\n    CORE.Window.currentFbo.width = fbWidth;\n    CORE.Window.currentFbo.height = fbHeight;\n    CORE.Window.resizedLastFrame = true;\n\n    SetupViewport(fbWidth, fbHeight);\n\n    // NOTE: Postprocessing texture is not scaled to new size\n}\n\n// GLFW3: Called on window content (framebuffer) scaled\nstatic void WindowContentScaleCallback(GLFWwindow *window, float scalex, float scaley)\n{\n    CORE.Window.screenScale = MatrixScale(scalex, scaley, 1.0f);\n}"
+    )
+
+    replace_or_fail(RAYLIB_RCORE_WEB_CONTENTS
+        "    emscripten_set_canvas_element_size(platform.canvasId, width, height);\n\n    SetupViewport(width, height); // Reset viewport and projection matrix for new size\n\n    CORE.Window.currentFbo.width = width;\n    CORE.Window.currentFbo.height = height;\n    CORE.Window.resizedLastFrame = true;\n\n    if (IsWindowFullscreen()) return 1;\n\n    // Set current screen size\n    CORE.Window.screen.width = width;\n    CORE.Window.screen.height = height;\n\n    glfwSetWindowSize(platform.handle, CORE.Window.screen.width, CORE.Window.screen.height);\n\n    // NOTE: Postprocessing texture is not scaled to new size\n\n    return 0;"
+        "    if (IsWindowFullscreen()) return 1;\n\n    SetWindowSize(width, height); // will trigger callback\n\n    return 1; // The event was consumed by the callback handler"
+    )
+
+    file(WRITE "${RAYLIB_RCORE_WEB}" "${RAYLIB_RCORE_WEB_CONTENTS}")
+endif()
 
 # === Platform-specific configuration ===
 if(WASM_BUILD)
