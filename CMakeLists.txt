@@ -30,7 +30,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         -Wno-unused-parameter
     )
 elseif(MSVC)
-    add_compile_options(/W4 /WX)
+    add_compile_options(/W4 /WX /wd4100)
 endif()
 
 # clang-tidy integration
