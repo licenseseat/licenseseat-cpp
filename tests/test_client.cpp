@@ -911,6 +911,11 @@ TEST_F(ClientTest, RestoreLicenseRevalidatesWhenNetworkReturns) {
     }
 
     EXPECT_EQ(client.get_client_status(), ClientStatus::Active);
+    int timer_attempts = 0;
+    while (timer_attempts++ < 20 &&
+           (!client.is_auto_validating() || !client.is_heartbeat_running())) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     EXPECT_TRUE(client.is_auto_validating());
     EXPECT_TRUE(client.is_heartbeat_running());
 
