@@ -575,7 +575,12 @@ TEST_F(ClientTest, SyncOfflineAssetsCanFetchLegacyTokenWhenExplicitlyEnabled) {
 
     client.sync_offline_assets();
 
-    for (int i = 0; i < 50 && offline_token_requests.load() == 0; ++i) {
+    FileStorage storage(storage_dir.string());
+    for (int i = 0;
+         i < 100 &&
+         (offline_token_requests.load() == 0 || signing_key_requests.load() == 0 ||
+          !storage.get_offline_token().has_value());
+         ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
@@ -584,7 +589,6 @@ TEST_F(ClientTest, SyncOfflineAssetsCanFetchLegacyTokenWhenExplicitlyEnabled) {
     EXPECT_EQ(offline_fetch_events.load(), 1);
     EXPECT_EQ(signing_key_requests.load(), 1);
 
-    FileStorage storage(storage_dir.string());
     auto cached_token = storage.get_offline_token();
     ASSERT_TRUE(cached_token.has_value());
     EXPECT_EQ(cached_token->token.fingerprint, config_.device_id);
@@ -1433,21 +1437,24 @@ TEST_F(ClientTest, DestructorWaitsForAsyncOperations) {
 }
 
 TEST_F(ClientTest, MultipleAsyncOpsDoNotCrash) {
-    Client client(config_);
     std::atomic<int> completed{0};
 
-    // Launch many concurrent async operations
-    for (int i = 0; i < 10; i++) {
-        client.validate_async("KEY-" + std::to_string(i),
-                              [&](Result<ValidationResult> /*result*/) { completed++; });
-        client.activate_async("KEY-" + std::to_string(i),
-                              [&](Result<Activation> /*result*/) { completed++; });
-    }
+    {
+        Client client(config_);
 
-    // Wait for completion
-    int attempts = 0;
-    while (completed < 20 && attempts++ < 200) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // Launch many concurrent async operations
+        for (int i = 0; i < 10; i++) {
+            client.validate_async("KEY-" + std::to_string(i),
+                                  [&](Result<ValidationResult> /*result*/) { completed++; });
+            client.activate_async("KEY-" + std::to_string(i),
+                                  [&](Result<Activation> /*result*/) { completed++; });
+        }
+
+        // Give the operations a chance to complete before destructor-driven draining.
+        int attempts = 0;
+        while (completed < 20 && attempts++ < 200) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
     }
 
     EXPECT_EQ(completed, 20);
