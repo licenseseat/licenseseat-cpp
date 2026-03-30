@@ -327,6 +327,7 @@ jobs:
 
             ### Single-Header (Recommended for plugins/games)
             Download `licenseseat_single.hpp`.
+            Link against OpenSSL when using machine-file verification or HTTPS endpoints.
 
             ```cpp
             // In ONE .cpp file:

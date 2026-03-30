@@ -536,7 +536,7 @@ The SDK collects anonymous platform telemetry to help developers understand thei
 | Field               | Type   | Example                  | Description                                            |
 | ------------------- | ------ | ------------------------ | ------------------------------------------------------ |
 | `sdk_name`          | string | `"cpp"`                  | Always `"cpp"` for this SDK                            |
-| `sdk_version`       | string | `"0.4.1"`               | SDK version                                            |
+| `sdk_version`       | string | `"0.5.1"`               | SDK version                                            |
 | `os_name`           | string | `"macOS"`                | Operating system (`"macOS"`, `"Windows"`, `"Linux"`)   |
 | `os_version`        | string | `"15.3"`                 | OS version string                                      |
 | `platform`          | string | `"native"`               | Always `"native"` for this SDK                         |
