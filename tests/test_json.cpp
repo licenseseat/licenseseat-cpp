@@ -442,7 +442,7 @@ TEST(JsonMachineFileTest, ParseMachineFilePayloadWithLicense) {
           {"lic", "KEY-123"},
           {"license_exp", 1760000000},
           {"kid", "kid-v1"},
-          {"sdk_version", "cpp-0.4.1"}}},
+          {"sdk_version", "cpp-0.5.1"}}},
         {"data",
          {{"type", "machines"},
           {"id", "42"},
