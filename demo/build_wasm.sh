@@ -76,6 +76,11 @@ emcmake cmake \
 # Build
 emmake make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
+# Patch for embedded use: stub out the GLFW title setter so it doesn't hijack document.title
+# The Emscripten GLFW shim assumes the WASM app owns the page, but we embed this in a larger site.
+sed -i.bak 's/_emscripten_set_window_title=title=>document\.title=UTF8ToString(title)/_emscripten_set_window_title=()=>{}/' "$BUILD_DIR/synthdemo.js"
+rm -f "$BUILD_DIR/synthdemo.js.bak"
+
 echo ""
 echo "============================================"
 echo "Build complete!"
@@ -83,7 +88,7 @@ echo "============================================"
 echo ""
 echo "Output files:"
 echo "  $BUILD_DIR/synthdemo.html"
-echo "  $BUILD_DIR/synthdemo.js"
+echo "  $BUILD_DIR/synthdemo.js  (patched for embedded use)"
 echo "  $BUILD_DIR/synthdemo.wasm"
 echo ""
 echo "To test locally (pick one):"
