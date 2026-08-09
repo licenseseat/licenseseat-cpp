@@ -1,5 +1,7 @@
 #pragma once
 
+#include "licenseseat.hpp"
+
 /**
  * @file events.hpp
  * @brief Event bus and callback system for LicenseSeat SDK
@@ -10,6 +12,7 @@
 #include <algorithm>
 #include <any>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -23,26 +26,8 @@ using EventData = std::any;
 /// Event handler callback type
 using EventHandler = std::function<void(const EventData&)>;
 
-/// Internal subscription handle for EventBus (separate from Client's Subscription)
-class EventSubscription {
-  public:
-    EventSubscription() = default;
-    explicit EventSubscription(std::function<void()> unsubscribe) : unsubscribe_(std::move(unsubscribe)) {}
-
-    /// Cancel this subscription
-    void cancel() {
-        if (unsubscribe_) {
-            unsubscribe_();
-            unsubscribe_ = nullptr;
-        }
-    }
-
-    /// Check if subscription is active
-    [[nodiscard]] bool is_active() const { return unsubscribe_ != nullptr; }
-
-  private:
-    std::function<void()> unsubscribe_;
-};
+/// Backward-compatible name for the public client subscription handle.
+using EventSubscription = Subscription;
 
 /**
  * @brief Event bus for SDK-wide event handling
@@ -76,8 +61,20 @@ class EventSubscription {
  * - "sdk:reset" - SDK state was reset
  */
 class EventBus {
+  private:
+    struct HandlerEntry {
+        uint64_t id;
+        EventHandler handler;
+    };
+
+    struct State {
+        std::unordered_map<std::string, std::vector<HandlerEntry>> handlers;
+        std::mutex mutex;
+        uint64_t next_id = 0;
+    };
+
   public:
-    EventBus() = default;
+    EventBus() : state_(std::make_shared<State>()) {}
     ~EventBus() = default;
 
     // Non-copyable
@@ -96,12 +93,17 @@ class EventBus {
      * @return Subscription handle to unsubscribe
      */
     EventSubscription on(const std::string& event, EventHandler handler) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        const auto state = state_;
+        std::lock_guard<std::mutex> lock(state->mutex);
 
-        auto id = next_id_++;
-        handlers_[event].push_back({id, std::move(handler)});
+        auto id = state->next_id++;
+        state->handlers[event].push_back({id, std::move(handler)});
 
-        return EventSubscription([this, event, id]() { this->remove_handler(event, id); });
+        return EventSubscription([weak_state = std::weak_ptr<State>(state), event, id]() {
+            if (const auto live_state = weak_state.lock()) {
+                remove_handler(*live_state, event, id);
+            }
+        });
     }
 
     /**
@@ -114,9 +116,10 @@ class EventBus {
         std::vector<EventHandler> handlers_copy;
 
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = handlers_.find(event);
-            if (it != handlers_.end()) {
+            const auto state = state_;
+            std::lock_guard<std::mutex> lock(state->mutex);
+            auto it = state->handlers.find(event);
+            if (it != state->handlers.end()) {
                 for (const auto& [id, handler] : it->second) {
                     handlers_copy.push_back(handler);
                 }
@@ -139,28 +142,25 @@ class EventBus {
      * @param event Event name
      */
     void clear(const std::string& event) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        handlers_.erase(event);
+        const auto state = state_;
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->handlers.erase(event);
     }
 
     /**
      * @brief Remove all handlers for all events
      */
     void clear_all() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        handlers_.clear();
+        const auto state = state_;
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->handlers.clear();
     }
 
   private:
-    struct HandlerEntry {
-        uint64_t id;
-        EventHandler handler;
-    };
-
-    void remove_handler(const std::string& event, uint64_t id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = handlers_.find(event);
-        if (it != handlers_.end()) {
+    static void remove_handler(State& state, const std::string& event, uint64_t id) {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        auto it = state.handlers.find(event);
+        if (it != state.handlers.end()) {
             auto& vec = it->second;
             vec.erase(std::remove_if(vec.begin(), vec.end(),
                                      [id](const HandlerEntry& e) { return e.id == id; }),
@@ -168,9 +168,7 @@ class EventBus {
         }
     }
 
-    std::unordered_map<std::string, std::vector<HandlerEntry>> handlers_;
-    std::mutex mutex_;
-    uint64_t next_id_ = 0;
+    std::shared_ptr<State> state_;
 };
 
 // Common event names as constants (matches Swift SDK EventBus)
@@ -230,6 +228,6 @@ constexpr const char* HEARTBEAT_ERROR = "heartbeat:error";
 // SDK events
 constexpr const char* SDK_RESET = "sdk:reset";
 constexpr const char* SDK_ERROR = "sdk:error";
-}  // namespace events
+} // namespace events
 
-}  // namespace licenseseat
+} // namespace licenseseat

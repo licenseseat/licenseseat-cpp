@@ -1,27 +1,25 @@
-#include <gtest/gtest.h>
-#include <licenseseat/crypto.hpp>
-#include <licenseseat/device.hpp>
-#include <licenseseat/json.hpp>
-#include <licenseseat/licenseseat.hpp>
-#include <licenseseat/storage.hpp>
-#include <licenseseat/events.hpp>
-
-#include <httplib.h>
 #include "PicoSHA2/picosha2.h"
-
-extern "C" {
-#include "ed25519/ed25519.h"
-}
-
-#include <nlohmann/json.hpp>
-#include <openssl/evp.h>
+#include "test_signing.hpp"
 
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <ctime>
 #include <filesystem>
+#include <future>
+#include <gtest/gtest.h>
+#include <httplib.h>
+#include <licenseseat/crypto.hpp>
+#include <licenseseat/device.hpp>
+#include <licenseseat/events.hpp>
+#include <licenseseat/json.hpp>
+#include <licenseseat/licenseseat.hpp>
+#include <licenseseat/storage.hpp>
+#include <limits>
 #include <memory>
+#include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 #include <thread>
 
 namespace licenseseat {
@@ -33,29 +31,30 @@ std::vector<uint8_t> sha256_test_bytes(const std::string& input) {
     return hash;
 }
 
+std::string wrap_machine_file_certificate(const std::string& encoded) {
+    std::string certificate = "-----BEGIN MACHINE FILE-----\n";
+    for (std::size_t offset = 0; offset < encoded.size(); offset += 64) {
+        certificate += encoded.substr(offset, 64);
+        certificate += '\n';
+    }
+    certificate += "-----END MACHINE FILE-----";
+    return certificate;
+}
+
 std::string build_machine_file_certificate(const std::string& license_key,
                                            const std::string& fingerprint,
                                            const nlohmann::json& payload_json,
                                            std::string* public_key_b64_out) {
-    const std::array<unsigned char, 32> seed = {
-        0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-        0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
-        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22};
+    const std::array<unsigned char, 32> seed = {0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+                                                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+                                                0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
+                                                0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22};
 
     std::array<unsigned char, 32> public_key{};
-    std::array<unsigned char, 64> private_key{};
-    ed25519_create_keypair(public_key.data(), private_key.data(), seed.data());
-
-    if (public_key_b64_out != nullptr) {
-        *public_key_b64_out = crypto::base64_encode(
-            std::vector<uint8_t>(public_key.begin(), public_key.end()));
-    }
 
     const auto key = sha256_test_bytes(license_key + fingerprint);
-    const std::array<unsigned char, 12> nonce = {
-        0x01, 0x03, 0x05, 0x07, 0x09, 0x0b,
-        0x0d, 0x0f, 0x11, 0x13, 0x15, 0x17};
+    const std::array<unsigned char, 12> nonce = {0x01, 0x03, 0x05, 0x07, 0x09, 0x0b,
+                                                 0x0d, 0x0f, 0x11, 0x13, 0x15, 0x17};
 
     using EvpCtxPtr = std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>;
     EvpCtxPtr ctx(EVP_CIPHER_CTX_new(), &EVP_CIPHER_CTX_free);
@@ -69,8 +68,8 @@ std::string build_machine_file_certificate(const std::string& license_key,
     int ciphertext_len = 0;
 
     if (EVP_EncryptInit_ex(ctx.get(), EVP_aes_256_gcm(), nullptr, nullptr, nullptr) != 1 ||
-        EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN,
-                            static_cast<int>(nonce.size()), nullptr) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()),
+                            nullptr) != 1 ||
         EVP_EncryptInit_ex(ctx.get(), nullptr, nullptr, key.data(), nonce.data()) != 1 ||
         EVP_EncryptUpdate(ctx.get(), ciphertext.data(), &len,
                           reinterpret_cast<const unsigned char*>(plaintext.data()),
@@ -85,55 +84,54 @@ std::string build_machine_file_certificate(const std::string& license_key,
     ciphertext.resize(static_cast<size_t>(ciphertext_len));
 
     std::array<unsigned char, 16> tag{};
-    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG,
-                            static_cast<int>(tag.size()), tag.data()) != 1) {
+    if (EVP_CIPHER_CTX_ctrl(ctx.get(), EVP_CTRL_GCM_GET_TAG, static_cast<int>(tag.size()),
+                            tag.data()) != 1) {
         return "";
     }
 
     const auto enc = crypto::base64url_encode(ciphertext) + "." +
                      crypto::base64url_encode(std::vector<uint8_t>(nonce.begin(), nonce.end())) +
-                     "." +
-                     crypto::base64url_encode(std::vector<uint8_t>(tag.begin(), tag.end()));
+                     "." + crypto::base64url_encode(std::vector<uint8_t>(tag.begin(), tag.end()));
 
     std::array<unsigned char, 64> signature{};
     const auto message = std::string("machine/") + enc;
-    ed25519_sign(signature.data(),
-                 reinterpret_cast<const unsigned char*>(message.data()),
-                 message.size(),
-                 public_key.data(),
-                 private_key.data());
+    if (!test_signing::sign_ed25519(seed, message, public_key, signature))
+        return "";
+    if (public_key_b64_out != nullptr) {
+        *public_key_b64_out =
+            crypto::base64_encode(std::vector<uint8_t>(public_key.begin(), public_key.end()));
+    }
 
     nlohmann::json envelope = {
         {"enc", enc},
-        {"sig", crypto::base64url_encode(
-                    std::vector<uint8_t>(signature.begin(), signature.end()))},
+        {"sig", crypto::base64url_encode(std::vector<uint8_t>(signature.begin(), signature.end()))},
         {"alg", "aes-256-gcm+ed25519"},
         {"kid", "test-kid"}};
 
     const auto envelope_dump = envelope.dump();
-    const auto encoded = crypto::base64_encode(
-        std::vector<uint8_t>(envelope_dump.begin(), envelope_dump.end()));
+    const auto encoded =
+        crypto::base64_encode(std::vector<uint8_t>(envelope_dump.begin(), envelope_dump.end()));
 
-    return "-----BEGIN MACHINE FILE-----\n" + encoded + "\n-----END MACHINE FILE-----";
+    return wrap_machine_file_certificate(encoded);
 }
 
-MachineFile build_test_machine_file(const std::string& license_key,
-                                    const std::string& fingerprint,
+MachineFile build_test_machine_file(const std::string& license_key, const std::string& fingerprint,
                                     std::string* public_key_b64_out) {
     const auto now = std::time(nullptr);
+    const auto license_expiry = now + 86400 * 30;
 
     nlohmann::json payload = {
         {"meta",
          {{"schema_version", 2},
-          {"issued", "2026-03-25T10:00:00Z"},
+          {"issued", json::format_timestamp(json::parse_unix_timestamp(now))},
           {"iat", now},
-          {"expiry", "2026-04-24T10:00:00Z"},
+          {"expiry", json::format_timestamp(json::parse_unix_timestamp(now + 86400))},
           {"exp", now + 86400},
           {"nbf", now},
           {"ttl", 86400},
           {"grace_period", 3600},
           {"lic", license_key},
-          {"license_exp", now + 86400 * 30},
+          {"license_exp", license_expiry},
           {"kid", "test-kid"}}},
         {"data",
          {{"type", "machines"},
@@ -143,7 +141,10 @@ MachineFile build_test_machine_file(const std::string& license_key,
             {"name", "Studio Mac"},
             {"platform", "darwin"},
             {"created", "2026-03-24T10:00:00Z"},
-            {"metadata", {{"device_name", "Studio Mac"}}}}}}},
+            {"metadata", {{"device_name", "Studio Mac"}}}}},
+          {"relationships",
+           {{"license", {{"data", {{"type", "licenses"}, {"id", license_key}}}}},
+            {"product", {{"data", {{"type", "products"}, {"id", "test_product"}}}}}}}}},
         {"included",
          nlohmann::json::array(
              {{{"type", "licenses"},
@@ -153,6 +154,7 @@ MachineFile build_test_machine_file(const std::string& license_key,
                  {"status", "active"},
                  {"mode", "hardware_locked"},
                  {"plan_key", "pro"},
+                 {"ends_at", json::format_timestamp(json::parse_unix_timestamp(license_expiry))},
                  {"product_slug", "test_product"}}}}})}};
 
     MachineFile machine_file;
@@ -166,45 +168,37 @@ MachineFile build_test_machine_file(const std::string& license_key,
 OfflineToken build_test_offline_token(const std::string& license_key,
                                       const std::string& fingerprint,
                                       std::string* public_key_b64_out) {
-    const std::array<unsigned char, 32> seed = {
-        0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-        0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
-        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22};
+    const std::array<unsigned char, 32> seed = {0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+                                                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+                                                0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
+                                                0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22};
 
     std::array<unsigned char, 32> public_key{};
-    std::array<unsigned char, 64> private_key{};
-    ed25519_create_keypair(public_key.data(), private_key.data(), seed.data());
-
-    if (public_key_b64_out != nullptr) {
-        *public_key_b64_out = crypto::base64_encode(
-            std::vector<uint8_t>(public_key.begin(), public_key.end()));
-    }
 
     const auto now = std::time(nullptr);
-    nlohmann::json canonical_json = {
-        {"schema_version", 1},
-        {"license_key", license_key},
-        {"product_slug", "test_product"},
-        {"plan_key", "pro"},
-        {"mode", "hardware_locked"},
-        {"seat_limit", 1},
-        {"fingerprint", fingerprint},
-        {"iat", now},
-        {"exp", now + 86400},
-        {"nbf", now},
-        {"license_expires_at", now + 86400 * 30},
-        {"kid", "test-kid"},
-        {"entitlements", nlohmann::json::array()},
-        {"metadata", nlohmann::json::object()}};
+    nlohmann::json canonical_json = {{"schema_version", 1},
+                                     {"license_key", license_key},
+                                     {"product_slug", "test_product"},
+                                     {"plan_key", "pro"},
+                                     {"mode", "hardware_locked"},
+                                     {"seat_limit", 1},
+                                     {"fingerprint", fingerprint},
+                                     {"iat", now},
+                                     {"exp", now + 86400},
+                                     {"nbf", now},
+                                     {"license_expires_at", now + 86400 * 30},
+                                     {"kid", "test-kid"},
+                                     {"entitlements", nlohmann::json::array()},
+                                     {"metadata", nlohmann::json::object()}};
     const auto canonical = canonical_json.dump();
 
     std::array<unsigned char, 64> signature{};
-    ed25519_sign(signature.data(),
-                 reinterpret_cast<const unsigned char*>(canonical.data()),
-                 canonical.size(),
-                 public_key.data(),
-                 private_key.data());
+    if (!test_signing::sign_ed25519(seed, canonical, public_key, signature))
+        return {};
+    if (public_key_b64_out != nullptr) {
+        *public_key_b64_out =
+            crypto::base64_encode(std::vector<uint8_t>(public_key.begin(), public_key.end()));
+    }
 
     OfflineToken offline;
     offline.token.schema_version = 1;
@@ -222,8 +216,8 @@ OfflineToken build_test_offline_token(const std::string& license_key,
     offline.token.kid = "test-kid";
     offline.signature.algorithm = "Ed25519";
     offline.signature.key_id = "test-kid";
-    offline.signature.value = crypto::base64url_encode(
-        std::vector<uint8_t>(signature.begin(), signature.end()));
+    offline.signature.value =
+        crypto::base64url_encode(std::vector<uint8_t>(signature.begin(), signature.end()));
     offline.canonical = canonical;
     return offline;
 }
@@ -241,18 +235,10 @@ CachedLicense build_cached_license(const std::string& license_key, const std::st
     validation.message = "cached";
     cached.validation = validation;
 
-    cached.license_data = License(
-        license_key,
-        LicenseStatus::Active,
-        LicenseMode::HardwareLocked,
-        "pro",
-        1,
-        1,
-        std::nullopt,
-        std::chrono::system_clock::now() + std::chrono::hours(24 * 30),
-        {},
-        {},
-        Product{"test_product", "Test Product"});
+    cached.license_data =
+        License(license_key, LicenseStatus::Active, LicenseMode::HardwareLocked, "pro", 1, 1,
+                std::nullopt, std::chrono::system_clock::now() + std::chrono::hours(24 * 30), {},
+                {}, Product{"test_product", "Test Product"});
 
     return cached;
 }
@@ -265,8 +251,13 @@ class ClientTest : public ::testing::Test {
         config_.device_id = "test-device-001";
         // Use a non-existent URL so network calls fail fast
         config_.api_url = "http://localhost:1";
+        config_.allow_insecure_http = true;
         config_.timeout_seconds = 1;
         config_.max_retries = 0;
+        // Tests that exercise offline behavior opt in explicitly. Production
+        // defaults remain fail-closed.
+        config_.offline_fallback_mode = OfflineFallbackMode::NetworkOnly;
+        config_.max_offline_days = 30;
     }
 
     Config config_;
@@ -287,6 +278,7 @@ TEST_F(ClientTest, GeneratesDeviceIdIfNotProvided) {
     config.api_key = "key";
     config.product_slug = "product";
     config.api_url = "http://localhost:1";
+    config.allow_insecure_http = true;
     // No device_id set
 
     Client client(config);
@@ -327,19 +319,19 @@ TEST_F(ClientTest, ValidateHttpErrorAfterSuccessfulValidationMarksClientInvalid)
     httplib::Server server;
     std::atomic<bool> return_not_found{false};
 
-    server.Post("/api/v1/products/test_product/licenses/VALID-KEY/validate",
-                [&](const httplib::Request&, httplib::Response& res) {
-                    if (return_not_found.load()) {
-                        res.status = 404;
-                        res.set_content("<html>not found</html>", "text/html");
-                        return;
-                    }
+    server.Post("/api/v1/products/test_product/licenses/validate", [&](const httplib::Request&,
+                                                                       httplib::Response& res) {
+        if (return_not_found.load()) {
+            res.status = 404;
+            res.set_content("<html>not found</html>", "text/html");
+            return;
+        }
 
-                    res.status = 200;
-                    res.set_content(
-                        R"({"valid":true,"code":"license_valid","message":"ok","license":{"key":"VALID-KEY","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
-                        "application/json");
-                });
+        res.status = 200;
+        res.set_content(
+            R"({"object":"validation_result","valid":true,"code":"license_valid","message":"ok","license":{"key":"VALID-KEY","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
+            "application/json");
+    });
 
     auto port = server.bind_to_any_port("127.0.0.1");
     ASSERT_GT(port, 0);
@@ -370,6 +362,37 @@ TEST_F(ClientTest, ValidateHttpErrorAfterSuccessfulValidationMarksClientInvalid)
     }
 }
 
+TEST_F(ClientTest, ValidateForbiddenEmitsAuthenticationFailureEvent) {
+    httplib::Server server;
+    server.Post("/api/v1/products/test_product/licenses/validate",
+                [](const httplib::Request&, httplib::Response& res) {
+                    res.status = 403;
+                    res.set_content(
+                        R"({"errors":[{"code":"FORBIDDEN","title":"Forbidden","detail":"invalid API credential scope"}]})",
+                        "application/json");
+                });
+
+    const auto port = server.bind_to_any_port("127.0.0.1");
+    ASSERT_GT(port, 0);
+    std::thread server_thread([&server]() { server.listen_after_bind(); });
+
+    config_.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
+    Client client(config_);
+    std::atomic<int> auth_failure_events{0};
+    auto subscription = client.on(events::VALIDATION_AUTH_FAILED,
+                                  [&](const std::any&) { auth_failure_events++; });
+
+    const auto result = client.validate("VALID-KEY");
+
+    EXPECT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::PermissionDenied);
+    EXPECT_EQ(auth_failure_events.load(), 1);
+
+    server.stop();
+    if (server_thread.joinable())
+        server_thread.join();
+}
+
 // ==================== Activation Input Validation ====================
 
 TEST_F(ClientTest, ActivateWithEmptyKeyFails) {
@@ -389,27 +412,100 @@ TEST_F(ClientTest, ActivateReturnsNetworkErrorWhenNoServer) {
     EXPECT_EQ(result.error_code(), ErrorCode::NetworkError);
 }
 
+TEST_F(ClientTest, RejectsMalformedUtf8IdentifiersBeforeNetwork) {
+    const std::string invalid_utf8{static_cast<char>(0xc3), static_cast<char>(0x28)};
+
+    Client client(config_);
+    auto invalid_key = client.activate(invalid_utf8);
+    EXPECT_TRUE(invalid_key.is_error());
+    EXPECT_EQ(invalid_key.error_code(), ErrorCode::InvalidLicenseKey);
+
+    auto invalid_device = client.activate("VALID-KEY", invalid_utf8);
+    EXPECT_TRUE(invalid_device.is_error());
+    EXPECT_EQ(invalid_device.error_code(), ErrorCode::MissingParameter);
+
+    Config invalid_product_config = config_;
+    invalid_product_config.product_slug = invalid_utf8;
+    Client invalid_product(invalid_product_config);
+    auto invalid_product_result = invalid_product.activate("VALID-KEY");
+    EXPECT_TRUE(invalid_product_result.is_error());
+    EXPECT_EQ(invalid_product_result.error_code(), ErrorCode::MissingParameter);
+}
+
+TEST_F(ClientTest, RejectsUnsafeActivationTextAndMetadataWithoutThrowing) {
+    const std::string invalid_utf8{static_cast<char>(0xc3), static_cast<char>(0x28)};
+    const Metadata metadata{{"unsafe", invalid_utf8}};
+    Client client(config_);
+
+    EXPECT_NO_THROW({
+        const auto result = client.activate("VALID-KEY", "test-device", invalid_utf8);
+        EXPECT_TRUE(result.is_error());
+        EXPECT_EQ(result.error_code(), ErrorCode::InvalidParameter);
+    });
+
+    EXPECT_NO_THROW({
+        const auto result = client.activate("VALID-KEY", "test-device", "", metadata);
+        EXPECT_TRUE(result.is_error());
+        EXPECT_EQ(result.error_code(), ErrorCode::InvalidParameter);
+    });
+}
+
+TEST_F(ClientTest, RejectsOversizedActivationMetadata) {
+    Client client(config_);
+
+    Metadata too_many_entries;
+    for (int index = 0; index < 101; ++index)
+        too_many_entries.emplace("key-" + std::to_string(index), "value");
+    auto too_many = client.activate("VALID-KEY", "test-device", "", too_many_entries);
+    EXPECT_TRUE(too_many.is_error());
+    EXPECT_EQ(too_many.error_code(), ErrorCode::InvalidParameter);
+
+    const Metadata oversized_value{{"key", std::string(16 * 1024 + 1, 'x')}};
+    auto large_value = client.activate("VALID-KEY", "test-device", "", oversized_value);
+    EXPECT_TRUE(large_value.is_error());
+    EXPECT_EQ(large_value.error_code(), ErrorCode::InvalidParameter);
+
+    Metadata oversized_aggregate;
+    for (int index = 0; index < 33; ++index)
+        oversized_aggregate.emplace("aggregate-key-" + std::to_string(index),
+                                    std::string(16 * 1024, 'x'));
+    auto large_aggregate = client.activate("VALID-KEY", "test-device", "", oversized_aggregate);
+    EXPECT_TRUE(large_aggregate.is_error());
+    EXPECT_EQ(large_aggregate.error_code(), ErrorCode::InvalidParameter);
+}
+
+TEST_F(ClientTest, AcceptsBoundedUnicodeActivationText) {
+    Client client(config_);
+    const Metadata metadata{{"region", "Lisboa"}, {"owner", "Jos\xC3\xA9"}};
+
+    const auto result =
+        client.activate("VALID-KEY", "test-device", "Esta\xC3\xA7\xC3\xA3o", metadata);
+
+    EXPECT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::NetworkError);
+}
+
 TEST_F(ClientTest, SyncOfflineAssetsDoesNotFetchLegacyTokenByDefault) {
     httplib::Server server;
     std::atomic<int> machine_file_requests{0};
     std::atomic<int> offline_token_requests{0};
 
-    server.Post("/api/v1/products/test_product/licenses/VALID-KEY/validate",
-                [&](const httplib::Request&, httplib::Response& res) {
-                    res.status = 200;
-                    res.set_content(
-                        R"({"valid":true,"code":"license_valid","message":"ok","license":{"key":"VALID-KEY","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
-                        "application/json");
-                });
-    server.Post("/api/v1/products/test_product/licenses/VALID-KEY/machine-file",
-                [&](const httplib::Request&, httplib::Response& res) {
-                    machine_file_requests++;
-                    res.status = 403;
-                    res.set_content(
-                        R"({"errors":[{"code":"FORBIDDEN","title":"Forbidden","detail":"missing machine-file scope"}]})",
-                        "application/json");
-                });
-    server.Post("/api/v1/products/test_product/licenses/VALID-KEY/offline_token",
+    server.Post("/api/v1/products/test_product/licenses/validate", [&](const httplib::Request&,
+                                                                       httplib::Response& res) {
+        res.status = 200;
+        res.set_content(
+            R"({"object":"validation_result","valid":true,"code":"license_valid","message":"ok","license":{"key":"VALID-KEY","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
+            "application/json");
+    });
+    server.Post("/api/v1/products/test_product/licenses/machine-file", [&](const httplib::Request&,
+                                                                           httplib::Response& res) {
+        machine_file_requests++;
+        res.status = 403;
+        res.set_content(
+            R"({"errors":[{"code":"FORBIDDEN","title":"Forbidden","detail":"missing machine-file scope"}]})",
+            "application/json");
+    });
+    server.Post("/api/v1/products/test_product/licenses/offline-token",
                 [&](const httplib::Request&, httplib::Response& res) {
                     offline_token_requests++;
                     res.status = 200;
@@ -457,6 +553,41 @@ TEST_F(ClientTest, SyncOfflineAssetsDoesNotFetchLegacyTokenByDefault) {
     std::filesystem::remove_all(storage_dir, ec);
 }
 
+TEST_F(ClientTest, ZeroDayOfflinePolicyDoesNotFetchArtifacts) {
+    httplib::Server server;
+    std::atomic<int> machine_file_requests{0};
+
+    server.Post("/api/v1/products/test_product/licenses/validate",
+                [](const httplib::Request&, httplib::Response& res) {
+                    res.status = 200;
+                    res.set_content(
+                        R"({"object":"validation_result","valid":true,"code":"license_valid","message":"ok","license":{"key":"VALID-KEY","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
+                        "application/json");
+                });
+    server.Post("/api/v1/products/test_product/licenses/machine-file",
+                [&](const httplib::Request&, httplib::Response& res) {
+                    machine_file_requests++;
+                    res.status = 500;
+                });
+
+    const auto port = server.bind_to_any_port("127.0.0.1");
+    ASSERT_GT(port, 0);
+    std::thread server_thread([&server]() { server.listen_after_bind(); });
+
+    config_.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
+    config_.max_offline_days = 0;
+    Client client(config_);
+    ASSERT_TRUE(client.validate("VALID-KEY").is_ok());
+
+    client.sync_offline_assets();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(machine_file_requests.load(), 0);
+
+    server.stop();
+    if (server_thread.joinable())
+        server_thread.join();
+}
+
 TEST_F(ClientTest, CheckoutMachineFileSendsFingerprintComponentsForAutoGeneratedFingerprint) {
     if (device::generate_device_id().empty()) {
         GTEST_SKIP() << "No stable local fingerprint available on this runner";
@@ -467,30 +598,35 @@ TEST_F(ClientTest, CheckoutMachineFileSendsFingerprintComponentsForAutoGenerated
 
     config_.device_id.clear();
 
-    server.Post("/api/v1/products/test_product/licenses/VALID-KEY/machine-file",
-                [&](const httplib::Request& req, httplib::Response& res) {
-                    const auto body = nlohmann::json::parse(req.body);
-                    saw_components = body.contains("fingerprint_components") &&
-                                     body["fingerprint_components"].is_object() &&
-                                     body["fingerprint_components"].contains("schema_version") &&
-                                     body["fingerprint_components"].contains("platform");
+    server.Post(
+        "/api/v1/products/test_product/licenses/machine-file",
+        [&](const httplib::Request& req, httplib::Response& res) {
+            const auto body = nlohmann::json::parse(req.body);
+            saw_components = body.contains("fingerprint_components") &&
+                             body["fingerprint_components"].is_object() &&
+                             body["fingerprint_components"].contains("schema_version") &&
+                             body["fingerprint_components"].contains("platform");
 
-                    const auto fingerprint = body.value("fingerprint", std::string{});
-                    const auto certificate = build_test_machine_file("VALID-KEY", fingerprint, nullptr);
+            const auto fingerprint = body.value("fingerprint", std::string{});
+            std::string public_key;
+            const auto certificate = build_test_machine_file("VALID-KEY", fingerprint, &public_key);
 
-                    nlohmann::json response = {
-                        {"data",
-                         {{"attributes",
-                           {{"certificate", certificate.certificate},
-                            {"algorithm", certificate.algorithm},
-                            {"ttl", 2592000}}},
-                          {"relationships",
-                           {{"license", {{"data", {{"id", "VALID-KEY"}}}}},
-                            {"machine", {{"data", {{"id", fingerprint}}}}}}}}}};
+            nlohmann::json response = {
+                {"data",
+                 {{"type", "machine-files"},
+                  {"attributes",
+                   {{"certificate", certificate.certificate},
+                    {"algorithm", certificate.algorithm},
+                    {"ttl", 2592000},
+                    {"issued", "2026-08-01T00:00:00Z"},
+                    {"expiry", "2026-08-31T00:00:00Z"}}},
+                  {"relationships",
+                   {{"license", {{"data", {{"type", "licenses"}, {"id", "VALID-KEY"}}}}},
+                    {"machine", {{"data", {{"type", "machines"}, {"id", fingerprint}}}}}}}}}};
 
-                    res.status = 201;
-                    res.set_content(response.dump(), "application/json");
-                });
+            res.status = 201;
+            res.set_content(response.dump(), "application/json");
+        });
 
     auto port = server.bind_to_any_port("127.0.0.1");
     ASSERT_GT(port, 0);
@@ -498,7 +634,9 @@ TEST_F(ClientTest, CheckoutMachineFileSendsFingerprintComponentsForAutoGenerated
     std::thread server_thread([&server]() { server.listen_after_bind(); });
 
     config_.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
-    config_.signing_public_key = "cached-key";
+    std::string checkout_public_key;
+    (void)build_test_machine_file("VALID-KEY", device::generate_device_id(), &checkout_public_key);
+    config_.signing_public_key = checkout_public_key;
 
     Client client(config_);
     auto result = client.checkout_machine_file("VALID-KEY");
@@ -521,34 +659,40 @@ TEST_F(ClientTest, SyncOfflineAssetsCanFetchLegacyTokenWhenExplicitlyEnabled) {
     std::string public_key_b64;
     auto offline_token = build_test_offline_token("VALID-KEY", config_.device_id, &public_key_b64);
 
-    server.Post("/api/v1/products/test_product/licenses/VALID-KEY/validate",
-                [&](const httplib::Request&, httplib::Response& res) {
-                    res.status = 200;
-                    res.set_content(
-                        R"({"valid":true,"code":"license_valid","message":"ok","license":{"key":"VALID-KEY","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
-                        "application/json");
-                });
-    server.Post("/api/v1/products/test_product/licenses/VALID-KEY/machine-file",
-                [&](const httplib::Request&, httplib::Response& res) {
-                    machine_file_requests++;
-                    res.status = 403;
-                    res.set_content(
-                        R"({"errors":[{"code":"FORBIDDEN","title":"Forbidden","detail":"missing machine-file scope"}]})",
-                        "application/json");
-                });
-    server.Post("/api/v1/products/test_product/licenses/VALID-KEY/offline_token",
+    server.Post("/api/v1/products/test_product/licenses/validate", [&](const httplib::Request&,
+                                                                       httplib::Response& res) {
+        res.status = 200;
+        res.set_content(
+            R"({"object":"validation_result","valid":true,"code":"license_valid","message":"ok","license":{"key":"VALID-KEY","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
+            "application/json");
+    });
+    server.Post("/api/v1/products/test_product/licenses/machine-file", [&](const httplib::Request&,
+                                                                           httplib::Response& res) {
+        machine_file_requests++;
+        res.status = 403;
+        res.set_content(
+            R"({"errors":[{"code":"FORBIDDEN","title":"Forbidden","detail":"missing machine-file scope"}]})",
+            "application/json");
+    });
+    server.Post("/api/v1/products/test_product/licenses/offline-token",
                 [&](const httplib::Request&, httplib::Response& res) {
                     offline_token_requests++;
                     res.status = 200;
-                    res.set_content(json::offline_token_to_json(offline_token),
-                                    "application/json");
+                    res.set_content(json::offline_token_to_json(offline_token), "application/json");
                 });
-    server.Get("/api/v1/signing_keys/test-kid", [&](const httplib::Request&, httplib::Response& res) {
-        signing_key_requests++;
-        res.status = 200;
-        res.set_content(nlohmann::json{{"public_key", public_key_b64}}.dump(),
-                        "application/json");
-    });
+    server.Get("/api/v1/signing_keys/test-kid",
+               [&](const httplib::Request&, httplib::Response& res) {
+                   signing_key_requests++;
+                   res.status = 200;
+                   res.set_content(nlohmann::json{{"object", "signing_key"},
+                                                  {"key_id", "test-kid"},
+                                                  {"algorithm", "Ed25519"},
+                                                  {"public_key", public_key_b64},
+                                                  {"created_at", nullptr},
+                                                  {"status", "active"}}
+                                       .dump(),
+                                   "application/json");
+               });
 
     auto port = server.bind_to_any_port("127.0.0.1");
     ASSERT_GT(port, 0);
@@ -577,9 +721,8 @@ TEST_F(ClientTest, SyncOfflineAssetsCanFetchLegacyTokenWhenExplicitlyEnabled) {
 
     FileStorage storage(storage_dir.string());
     for (int i = 0;
-         i < 100 &&
-         (offline_token_requests.load() == 0 || signing_key_requests.load() == 0 ||
-          !storage.get_offline_token().has_value());
+         i < 100 && (offline_token_requests.load() == 0 || signing_key_requests.load() == 0 ||
+                     !storage.get_offline_token().has_value());
          ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -665,7 +808,7 @@ TEST_F(ClientTest, VerifyExpiredOfflineTokenFails) {
     offline.token.license_key = "KEY-123";
     offline.token.iat = std::time(nullptr) - (365 * 24 * 60 * 60);
     offline.token.nbf = offline.token.iat;
-    offline.token.exp = std::time(nullptr) - (24 * 60 * 60);  // Expired
+    offline.token.exp = std::time(nullptr) - (24 * 60 * 60); // Expired
 
     auto result = client.verify_offline_token(offline);
 
@@ -676,18 +819,10 @@ TEST_F(ClientTest, VerifyExpiredOfflineTokenFails) {
 TEST_F(ClientTest, VerifyOfflineTokenWithInvalidSignature) {
     Client client(config_);
 
-    OfflineToken offline;
-    offline.token.license_key = "KEY-123";
-    offline.token.kid = "key-v1";
-    offline.token.iat = std::time(nullptr);
-    offline.token.nbf = offline.token.iat;
-    offline.token.exp = std::time(nullptr) + (365 * 24 * 60 * 60);
-    offline.signature.key_id = "key-v1";
-    offline.signature.value = "invalid-signature";  // Not a valid signature
-    offline.canonical = R"({"test":"data"})";
+    std::string public_key;
+    auto offline = build_test_offline_token("KEY-123", config_.device_id, &public_key);
+    offline.signature.value = "invalid-signature"; // Not a valid signature
 
-    // Valid Ed25519 public key (32 bytes base64)
-    const std::string public_key = "PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=";
     auto result = client.verify_offline_token(offline, public_key);
 
     // Invalid signature should fail verification
@@ -718,7 +853,7 @@ TEST_F(ClientTest, VerifyOfflineTokenNotYetValidFails) {
     offline.token.license_key = "KEY-123";
     offline.token.kid = "key-v1";
     offline.token.iat = std::time(nullptr);
-    offline.token.nbf = std::time(nullptr) + (24 * 60 * 60);  // Not valid until tomorrow
+    offline.token.nbf = std::time(nullptr) + (24 * 60 * 60); // Not valid until tomorrow
     offline.token.exp = std::time(nullptr) + (365 * 24 * 60 * 60);
 
     auto result = client.verify_offline_token(offline);
@@ -751,7 +886,9 @@ TEST_F(ClientTest, VerifyMachineFileWithoutPublicKeyFails) {
     MachineFile machine_file;
     machine_file.license_key = "KEY-123";
     machine_file.fingerprint = config_.device_id;
-    machine_file.certificate = "-----BEGIN MACHINE FILE-----\nZXlKa2FXUWlPaUpyYVdRaUxDSmxiR01pT2lKaGJHY2lmUT09\n-----END MACHINE FILE-----";
+    machine_file.certificate =
+        "-----BEGIN MACHINE FILE-----\nZXlKa2FXUWlPaUpyYVdRaUxDSmxiR01pT2lKaGJHY2lmUT09\n-----END "
+        "MACHINE FILE-----";
 
     auto result = client.verify_machine_file(machine_file);
 
@@ -765,8 +902,7 @@ TEST_F(ClientTest, VerifyMachineFileUsesLocalDeviceFingerprintNotEmbeddedFingerp
     const std::string embedded_fingerprint = "embedded-device-001";
 
     std::string public_key_b64;
-    auto machine_file =
-        build_test_machine_file(license_key, embedded_fingerprint, &public_key_b64);
+    auto machine_file = build_test_machine_file(license_key, embedded_fingerprint, &public_key_b64);
     config_.signing_public_key = public_key_b64;
 
     Client client(config_);
@@ -815,8 +951,7 @@ TEST_F(ClientTest, RestoreLicenseRejectsCopiedOfflineTokenCacheOnDifferentDevice
     const std::string copied_device = "other-device-001";
 
     std::string public_key_b64;
-    auto offline_token =
-        build_test_offline_token(license_key, original_device, &public_key_b64);
+    auto offline_token = build_test_offline_token(license_key, original_device, &public_key_b64);
 
     const auto storage_dir =
         std::filesystem::temp_directory_path() /
@@ -837,6 +972,65 @@ TEST_F(ClientTest, RestoreLicenseRejectsCopiedOfflineTokenCacheOnDifferentDevice
     EXPECT_FALSE(result.success);
     EXPECT_EQ(result.status, ClientStatus::OfflineInvalid);
     EXPECT_FALSE(result.license.has_value());
+
+    std::error_code ec;
+    std::filesystem::remove_all(storage_dir, ec);
+}
+
+TEST_F(ClientTest, InvalidOfflinePolicyCannotAuthorizeCachedArtifacts) {
+    const std::string license_key = "KEY-123";
+    std::string public_key_b64;
+    auto machine_file = build_test_machine_file(license_key, config_.device_id, &public_key_b64);
+    const auto storage_dir =
+        std::filesystem::temp_directory_path() /
+        ("licenseseat-invalid-offline-policy-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    FileStorage storage(storage_dir.string());
+    ASSERT_TRUE(storage.set_license(build_cached_license(license_key, config_.device_id)));
+    ASSERT_TRUE(storage.set_machine_file(machine_file));
+
+    config_.storage_path = storage_dir.string();
+    config_.signing_public_key = public_key_b64;
+    config_.network_recheck_interval = 0.0;
+
+    config_.max_offline_days = -1;
+    {
+        Client client(config_);
+        const auto result = client.restore_license();
+        EXPECT_FALSE(result.success);
+        EXPECT_EQ(result.status, ClientStatus::OfflineInvalid);
+        EXPECT_NE(result.message.find("invalid_configuration"), std::string::npos);
+    }
+
+    config_.max_offline_days = 0;
+    {
+        Client client(config_);
+        const auto result = client.restore_license();
+        EXPECT_FALSE(result.success);
+        EXPECT_EQ(result.status, ClientStatus::OfflineInvalid);
+        EXPECT_NE(result.message.find("offline_disabled"), std::string::npos);
+    }
+
+    config_.max_offline_days = 30;
+    config_.offline_fallback_mode = OfflineFallbackMode::Disabled;
+    {
+        Client client(config_);
+        const auto result = client.restore_license();
+        EXPECT_FALSE(result.success);
+        EXPECT_EQ(result.status, ClientStatus::OfflineInvalid);
+        EXPECT_NE(result.message.find("offline_disabled"), std::string::npos);
+    }
+
+    config_.offline_fallback_mode = OfflineFallbackMode::NetworkOnly;
+    config_.max_offline_days = 30;
+    config_.max_clock_skew_ms = std::numeric_limits<double>::quiet_NaN();
+    {
+        Client client(config_);
+        const auto result = client.restore_license();
+        EXPECT_FALSE(result.success);
+        EXPECT_EQ(result.status, ClientStatus::OfflineInvalid);
+        EXPECT_NE(result.message.find("invalid_configuration"), std::string::npos);
+    }
 
     std::error_code ec;
     std::filesystem::remove_all(storage_dir, ec);
@@ -872,27 +1066,25 @@ TEST_F(ClientTest, RestoreLicenseRevalidatesWhenNetworkReturns) {
         res.set_content(R"({"status":"ok"})", "application/json");
     });
 
-    server.Post("/api/v1/products/test_product/licenses/KEY-123/validate",
-                [&](const httplib::Request&, httplib::Response& res) {
-                    res.status = 200;
-                    res.set_content(
-                        R"({"valid":true,"code":"license_valid","message":"ok","license":{"key":"KEY-123","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
-                        "application/json");
-                });
+    server.Post("/api/v1/products/test_product/licenses/validate", [&](const httplib::Request&,
+                                                                       httplib::Response& res) {
+        res.status = 200;
+        res.set_content(
+            R"({"object":"validation_result","valid":true,"code":"license_valid","message":"ok","license":{"key":"KEY-123","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
+            "application/json");
+    });
 
-    server.Post("/api/v1/products/test_product/licenses/KEY-123/heartbeat",
-                [&](const httplib::Request&, httplib::Response& res) {
-                    res.status = 200;
-                    res.set_content(R"({"object":"heartbeat","received_at":"2026-03-26T02:07:56Z"})",
-                                    "application/json");
-                });
+    server.Post("/api/v1/products/test_product/licenses/heartbeat", [&](const httplib::Request&,
+                                                                        httplib::Response& res) {
+        res.status = 200;
+        res.set_content(R"({"object":"heartbeat","received_at":"2026-03-26T02:07:56Z"})",
+                        "application/json");
+    });
 
     auto port = server.bind_to_any_port("127.0.0.1");
     ASSERT_GT(port, 0);
 
-    std::thread server_thread([&server]() {
-        server.listen_after_bind();
-    });
+    std::thread server_thread([&server]() { server.listen_after_bind(); });
 
     config_.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
     config_.storage_path = storage_dir.string();
@@ -950,13 +1142,12 @@ TEST_F(ClientTest, RepeatedOfflineFallbackValidationEmitsNetworkOfflineOnce) {
     ASSERT_TRUE(storage.set_offline_token(offline_token));
 
     httplib::Server server;
-    server.Post("/api/v1/products/test_product/licenses/KEY-123/validate",
-                [&](const httplib::Request&, httplib::Response& res) {
-                    res.status = 503;
-                    res.set_content(
-                        R"({"error":{"code":"temporarily_unavailable","message":"offline"}})",
+    server.Post("/api/v1/products/test_product/licenses/validate", [&](const httplib::Request&,
+                                                                       httplib::Response& res) {
+        res.status = 503;
+        res.set_content(R"({"error":{"code":"temporarily_unavailable","message":"offline"}})",
                         "application/json");
-                });
+    });
 
     auto port = server.bind_to_any_port("127.0.0.1");
     ASSERT_GT(port, 0);
@@ -967,6 +1158,15 @@ TEST_F(ClientTest, RepeatedOfflineFallbackValidationEmitsNetworkOfflineOnce) {
     config_.storage_path = storage_dir.string();
     config_.signing_public_key = public_key_b64;
     config_.network_recheck_interval = 0.0;
+
+    // A transport failure, rather than an authoritative HTTP error, is the
+    // only condition eligible for offline fallback.
+    for (int i = 0; i < 100 && !server.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    server.stop();
+    if (server_thread.joinable())
+        server_thread.join();
 
     Client client(config_);
 
@@ -998,6 +1198,55 @@ TEST_F(ClientTest, RepeatedOfflineFallbackValidationEmitsNetworkOfflineOnce) {
     std::filesystem::remove_all(storage_dir, ec);
 }
 
+TEST_F(ClientTest, AuthoritativeServerErrorNeverFallsBackToCachedLicense) {
+    const std::string license_key = "KEY-123";
+    const std::string device_id = config_.device_id;
+    std::string public_key_b64;
+    const auto offline_token = build_test_offline_token(license_key, device_id, &public_key_b64);
+    const auto storage_dir =
+        std::filesystem::temp_directory_path() /
+        ("licenseseat-authoritative-error-test-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+
+    FileStorage storage(storage_dir.string());
+    ASSERT_TRUE(storage.set_license(build_cached_license(license_key, device_id)));
+    ASSERT_TRUE(storage.set_offline_token(offline_token));
+
+    httplib::Server server;
+    server.Post("/api/v1/products/test_product/licenses/validate", [](const httplib::Request&,
+                                                                      httplib::Response& res) {
+        res.status = 503;
+        res.set_content(R"({"error":{"code":"new_outage_code","message":"unavailable"}})",
+                        "application/json");
+    });
+    const auto port = server.bind_to_any_port("127.0.0.1");
+    ASSERT_GT(port, 0);
+    std::thread server_thread([&server]() { server.listen_after_bind(); });
+
+    config_.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
+    config_.storage_path = storage_dir.string();
+    config_.signing_public_key = public_key_b64;
+    config_.network_recheck_interval = 0.0;
+    Client client(config_);
+
+    std::atomic<int> offline_success_events{0};
+    client.on(events::VALIDATION_OFFLINE_SUCCESS,
+              [&](const std::any&) { ++offline_success_events; });
+    const auto result = client.validate(license_key);
+
+    EXPECT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::ServerError);
+    EXPECT_EQ(client.get_client_status(), ClientStatus::Invalid);
+    EXPECT_TRUE(client.is_online());
+    EXPECT_EQ(offline_success_events.load(), 0);
+
+    server.stop();
+    if (server_thread.joinable())
+        server_thread.join();
+    std::error_code ec;
+    std::filesystem::remove_all(storage_dir, ec);
+}
+
 TEST_F(ClientTest, CachedMachineFileValidationDoesNotEmitReadyRepeatedly) {
     const std::string license_key = "KEY-123";
     const std::string device_id = config_.device_id;
@@ -1015,13 +1264,12 @@ TEST_F(ClientTest, CachedMachineFileValidationDoesNotEmitReadyRepeatedly) {
     ASSERT_TRUE(storage.set_machine_file(machine_file));
 
     httplib::Server server;
-    server.Post("/api/v1/products/test_product/licenses/KEY-123/validate",
-                [&](const httplib::Request&, httplib::Response& res) {
-                    res.status = 503;
-                    res.set_content(
-                        R"({"error":{"code":"temporarily_unavailable","message":"offline"}})",
+    server.Post("/api/v1/products/test_product/licenses/validate", [&](const httplib::Request&,
+                                                                       httplib::Response& res) {
+        res.status = 503;
+        res.set_content(R"({"error":{"code":"temporarily_unavailable","message":"offline"}})",
                         "application/json");
-                });
+    });
 
     auto port = server.bind_to_any_port("127.0.0.1");
     ASSERT_GT(port, 0);
@@ -1032,6 +1280,13 @@ TEST_F(ClientTest, CachedMachineFileValidationDoesNotEmitReadyRepeatedly) {
     config_.storage_path = storage_dir.string();
     config_.signing_public_key = public_key_b64;
     config_.network_recheck_interval = 0.0;
+
+    for (int i = 0; i < 100 && !server.is_running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    server.stop();
+    if (server_thread.joinable())
+        server_thread.join();
 
     Client client(config_);
 
@@ -1095,6 +1350,208 @@ TEST_F(ClientTest, GenerateDownloadTokenWithEmptyVersionFails) {
     EXPECT_EQ(result.error_code(), ErrorCode::MissingParameter);
 }
 
+TEST_F(ClientTest, ReleaseAndDownloadResponsesAreBoundToTheRequest) {
+    httplib::Server server;
+    std::atomic<bool> public_request_had_auth{false};
+    std::atomic<bool> download_request_had_auth{false};
+    std::atomic<bool> download_body_was_bound{false};
+    const auto published_at =
+        json::format_timestamp(std::chrono::system_clock::now() - std::chrono::hours(1));
+    const auto token_expiry =
+        json::format_timestamp(std::chrono::system_clock::now() + std::chrono::minutes(5));
+
+    server.Get("/api/v1/products/test_product/releases/latest",
+               [&](const httplib::Request& req, httplib::Response& res) {
+                   public_request_had_auth = req.has_header("Authorization");
+                   EXPECT_EQ(req.get_param_value("channel"), "stable");
+                   EXPECT_EQ(req.get_param_value("platform"), "macos");
+                   res.set_content(nlohmann::json({{"object", "release"},
+                                                   {"version", "1.2.3"},
+                                                   {"channel", "stable"},
+                                                   {"platform", "macos"},
+                                                   {"product_slug", "test_product"},
+                                                   {"published_at", published_at}})
+                                       .dump(),
+                                   "application/json");
+               });
+    server.Get("/api/v1/products/test_product/releases", [&](const httplib::Request& req,
+                                                             httplib::Response& res) {
+        public_request_had_auth = public_request_had_auth.load() || req.has_header("Authorization");
+        nlohmann::json release = {{"object", "release"},
+                                  {"version", "1.2.3"},
+                                  {"channel", "stable"},
+                                  {"platform", "macos"},
+                                  {"product_slug", "test_product"},
+                                  {"published_at", published_at}};
+        res.set_content(nlohmann::json({{"object", "list"},
+                                        {"data", nlohmann::json::array({release})},
+                                        {"has_more", false}})
+                            .dump(),
+                        "application/json");
+    });
+    server.Post("/api/v1/products/test_product/releases/1.2.3/download_token",
+                [&](const httplib::Request& req, httplib::Response& res) {
+                    download_request_had_auth =
+                        req.get_header_value("Authorization") == "Bearer test_api_key";
+                    const auto body = nlohmann::json::parse(req.body);
+                    download_body_was_bound =
+                        body.value("license_key", std::string{}) == "LICENSE-KEY" &&
+                        body.value("platform", std::string{}) == "macos";
+                    res.set_content(nlohmann::json({{"object", "download_token"},
+                                                    {"token", "opaque-token"},
+                                                    {"expires_at", token_expiry}})
+                                        .dump(),
+                                    "application/json");
+                });
+
+    const auto port = server.bind_to_any_port("127.0.0.1");
+    ASSERT_GT(port, 0);
+    std::thread server_thread([&server]() { server.listen_after_bind(); });
+    config_.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
+    config_.max_retries = 0;
+    Client client(config_);
+
+    const auto latest = client.get_latest_release("", "stable", "macos");
+    ASSERT_TRUE(latest.is_ok()) << latest.error_message();
+    EXPECT_EQ(latest.value().version, "1.2.3");
+
+    const auto releases = client.list_releases("", "stable", "macos");
+    ASSERT_TRUE(releases.is_ok()) << releases.error_message();
+    ASSERT_EQ(releases.value().size(), 1U);
+
+    const auto token = client.generate_download_token("1.2.3", "LICENSE-KEY", "", "macos");
+    ASSERT_TRUE(token.is_ok()) << token.error_message();
+    EXPECT_EQ(token.value().token, "opaque-token");
+    EXPECT_FALSE(public_request_had_auth.load());
+    EXPECT_TRUE(download_request_had_auth.load());
+    EXPECT_TRUE(download_body_was_bound.load());
+
+    server.stop();
+    if (server_thread.joinable())
+        server_thread.join();
+}
+
+TEST_F(ClientTest, ReleaseDiscoveryRejectsUntrustedItemIdentityAndSchema) {
+    httplib::Server server;
+    std::string latest_body;
+    std::string list_body;
+    server.Get("/api/v1/products/test_product/releases/latest",
+               [&](const httplib::Request&, httplib::Response& res) {
+                   res.set_content(latest_body, "application/json");
+               });
+    server.Get("/api/v1/products/test_product/releases",
+               [&](const httplib::Request&, httplib::Response& res) {
+                   res.set_content(list_body, "application/json");
+               });
+    const auto port = server.bind_to_any_port("127.0.0.1");
+    ASSERT_GT(port, 0);
+    std::thread server_thread([&server]() { server.listen_after_bind(); });
+    config_.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
+    config_.max_retries = 0;
+    Client client(config_);
+    const auto published_at =
+        json::format_timestamp(std::chrono::system_clock::now() - std::chrono::hours(1));
+
+    latest_body = nlohmann::json({{"object", "release"},
+                                  {"version", "1.2.3"},
+                                  {"channel", "stable"},
+                                  {"platform", "macos"},
+                                  {"product_slug", "other_product"},
+                                  {"published_at", published_at}})
+                      .dump();
+    auto latest = client.get_latest_release("", "stable", "macos");
+    ASSERT_TRUE(latest.is_error());
+    EXPECT_EQ(latest.error_code(), ErrorCode::ParseError);
+
+    latest_body = nlohmann::json({{"object", "release"},
+                                  {"version", "1.2.3"},
+                                  {"channel", "beta"},
+                                  {"platform", "macos"},
+                                  {"product_slug", "test_product"},
+                                  {"published_at", published_at}})
+                      .dump();
+    latest = client.get_latest_release("", "stable", "macos");
+    ASSERT_TRUE(latest.is_error());
+    EXPECT_EQ(latest.error_code(), ErrorCode::ParseError);
+
+    nlohmann::json release = {{"version", "1.2.3"},
+                              {"channel", "stable"},
+                              {"platform", "macos"},
+                              {"product_slug", "test_product"},
+                              {"published_at", published_at}};
+    list_body =
+        nlohmann::json({{"object", "list"}, {"data", nlohmann::json::array({release})}}).dump();
+    auto releases = client.list_releases("", "stable", "macos");
+    ASSERT_TRUE(releases.is_error());
+    EXPECT_EQ(releases.error_code(), ErrorCode::ParseError);
+
+    release["object"] = "release";
+    release["published_at"] = "not-a-time";
+    list_body =
+        nlohmann::json({{"object", "list"}, {"data", nlohmann::json::array({release})}}).dump();
+    releases = client.list_releases("", "stable", "macos");
+    ASSERT_TRUE(releases.is_error());
+    EXPECT_EQ(releases.error_code(), ErrorCode::ParseError);
+
+    server.stop();
+    if (server_thread.joinable())
+        server_thread.join();
+}
+
+TEST_F(ClientTest, DownloadTokenRejectsMalformedOrUnboundedAuthority) {
+    httplib::Server server;
+    std::string response_body;
+    server.Post("/api/v1/products/test_product/releases/1.2.3/download_token",
+                [&](const httplib::Request&, httplib::Response& res) {
+                    res.set_content(response_body, "application/json");
+                });
+    const auto port = server.bind_to_any_port("127.0.0.1");
+    ASSERT_GT(port, 0);
+    std::thread server_thread([&server]() { server.listen_after_bind(); });
+    config_.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
+    config_.max_retries = 0;
+    Client client(config_);
+
+    const auto invoke = [&]() {
+        return client.generate_download_token("1.2.3", "LICENSE-KEY", "", "macos");
+    };
+    response_body =
+        nlohmann::json({{"object", "download_token"},
+                        {"token", "token"},
+                        {"expires_at", json::format_timestamp(std::chrono::system_clock::now() -
+                                                              std::chrono::seconds(1))}})
+            .dump();
+    EXPECT_EQ(invoke().error_code(), ErrorCode::ParseError);
+
+    response_body =
+        nlohmann::json({{"object", "download_token"},
+                        {"token", "token"},
+                        {"expires_at", json::format_timestamp(std::chrono::system_clock::now() +
+                                                              std::chrono::hours(25))}})
+            .dump();
+    EXPECT_EQ(invoke().error_code(), ErrorCode::ParseError);
+
+    response_body =
+        nlohmann::json({{"object", "download_token"},
+                        {"token", std::string(16 * 1024 + 1, 'x')},
+                        {"expires_at", json::format_timestamp(std::chrono::system_clock::now() +
+                                                              std::chrono::minutes(5))}})
+            .dump();
+    EXPECT_EQ(invoke().error_code(), ErrorCode::ParseError);
+
+    response_body =
+        nlohmann::json({{"object", "download_token"},
+                        {"token", "unsafe\ntoken"},
+                        {"expires_at", json::format_timestamp(std::chrono::system_clock::now() +
+                                                              std::chrono::minutes(5))}})
+            .dump();
+    EXPECT_EQ(invoke().error_code(), ErrorCode::ParseError);
+
+    server.stop();
+    if (server_thread.joinable())
+        server_thread.join();
+}
+
 // ==================== Health Check ====================
 
 TEST_F(ClientTest, HealthReturnsNetworkErrorWhenNoServer) {
@@ -1141,7 +1598,7 @@ TEST_F(ClientTest, SubscriptionCanBeCancelled) {
     sub.cancel();
 
     client.emit("test:event");
-    EXPECT_EQ(call_count, 1);  // Should not increase
+    EXPECT_EQ(call_count, 1); // Should not increase
 }
 
 TEST_F(ClientTest, EventsReceiveData) {
@@ -1215,7 +1672,7 @@ TEST_F(ClientTest, StartAutoValidationTwiceDoesNotCrash) {
     Client client(config_);
 
     client.start_auto_validation("TEST-KEY");
-    client.start_auto_validation("TEST-KEY-2");  // Should not crash
+    client.start_auto_validation("TEST-KEY-2"); // Should not crash
 
     EXPECT_TRUE(client.is_auto_validating());
 
@@ -1230,6 +1687,61 @@ TEST_F(ClientTest, StopAutoValidationWhenNotRunningDoesNotCrash) {
     client.stop_auto_validation();
 
     EXPECT_FALSE(client.is_auto_validating());
+}
+
+TEST_F(ClientTest, InvalidAutoValidationIntervalsFailClosed) {
+    for (double interval :
+         {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), -1.0,
+          367.0 * 24.0 * 60.0 * 60.0}) {
+        auto config = config_;
+        config.auto_validate_interval = interval;
+        Client client(config);
+        client.start_auto_validation("TEST-KEY");
+        EXPECT_FALSE(client.is_auto_validating());
+    }
+}
+
+TEST_F(ClientTest, AutoValidationHandlerCanStopItsOwnWorker) {
+    config_.auto_validate_interval = 60.0;
+    Client client(config_);
+    std::atomic<bool> handler_returned{false};
+    auto subscription = client.on(events::AUTOVALIDATION_CYCLE, [&](const std::any&) {
+        client.stop_auto_validation();
+        handler_returned = true;
+    });
+
+    client.start_auto_validation("TEST-KEY");
+    for (int i = 0; i < 100 && !handler_returned.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_TRUE(handler_returned.load());
+    EXPECT_FALSE(client.is_auto_validating());
+    client.stop_auto_validation(); // Reap the completed worker from another thread.
+}
+
+TEST_F(ClientTest, ConcurrentTimerLifecycleCallsAreSerialized) {
+    config_.auto_validate_interval = 60.0;
+    config_.heartbeat_interval = 60;
+    Client client(config_);
+    std::vector<std::thread> callers;
+    for (int worker = 0; worker < 4; ++worker) {
+        callers.emplace_back([&, worker]() {
+            for (int iteration = 0; iteration < 20; ++iteration) {
+                client.start_auto_validation("AUTO-" + std::to_string(worker));
+                client.start_heartbeat("HEARTBEAT-" + std::to_string(worker));
+                client.stop_auto_validation();
+                client.stop_heartbeat();
+            }
+        });
+    }
+    for (auto& caller : callers)
+        caller.join();
+
+    client.stop_auto_validation();
+    client.stop_heartbeat();
+    EXPECT_FALSE(client.is_auto_validating());
+    EXPECT_FALSE(client.is_heartbeat_running());
 }
 
 // ==================== Heartbeat ====================
@@ -1254,7 +1766,7 @@ TEST_F(ClientTest, StartHeartbeatTwiceDoesNotCrash) {
     Client client(config_);
 
     client.start_heartbeat("TEST-KEY");
-    client.start_heartbeat("TEST-KEY-2");  // Should not crash
+    client.start_heartbeat("TEST-KEY-2"); // Should not crash
 
     EXPECT_TRUE(client.is_heartbeat_running());
 
@@ -1269,6 +1781,19 @@ TEST_F(ClientTest, StopHeartbeatWhenNotRunningDoesNotCrash) {
     client.stop_heartbeat();
 
     EXPECT_FALSE(client.is_heartbeat_running());
+}
+
+TEST_F(ClientTest, InvalidHeartbeatInputsFailClosed) {
+    auto config = config_;
+    config.heartbeat_interval = 367 * 24 * 60 * 60;
+    Client client(config);
+    client.start_heartbeat("TEST-KEY");
+    EXPECT_FALSE(client.is_heartbeat_running());
+
+    config.heartbeat_interval = 60;
+    Client empty_key_client(config);
+    empty_key_client.start_heartbeat("");
+    EXPECT_FALSE(empty_key_client.is_heartbeat_running());
 }
 
 // ==================== Reset ====================
@@ -1302,14 +1827,12 @@ TEST_F(ClientTest, ValidateAsyncCallsCallback) {
     std::atomic<bool> callback_called{false};
     ErrorCode received_error = ErrorCode::Success;
 
-    client.validate_async(
-        "TEST-KEY",
-        [&](Result<ValidationResult> result) {
-            callback_called = true;
-            if (result.is_error()) {
-                received_error = result.error_code();
-            }
-        });
+    client.validate_async("TEST-KEY", [&](Result<ValidationResult> result) {
+        callback_called = true;
+        if (result.is_error()) {
+            received_error = result.error_code();
+        }
+    });
 
     // Wait for callback (should fail with network error)
     int attempts = 0;
@@ -1325,7 +1848,8 @@ TEST_F(ClientTest, ActivateAsyncCallsCallback) {
     Client client(config_);
     std::atomic<bool> callback_called{false};
 
-    client.activate_async("TEST-KEY", [&](Result<Activation> /*result*/) { callback_called = true; });
+    client.activate_async("TEST-KEY",
+                          [&](Result<Activation> /*result*/) { callback_called = true; });
 
     int attempts = 0;
     while (!callback_called && attempts++ < 100) {
@@ -1339,8 +1863,8 @@ TEST_F(ClientTest, DeactivateAsyncCallsCallback) {
     Client client(config_);
     std::atomic<bool> callback_called{false};
 
-    client.deactivate_async("TEST-KEY", [&](Result<Deactivation> /*result*/) { callback_called = true; },
-                            "device-123");
+    client.deactivate_async(
+        "TEST-KEY", [&](Result<Deactivation> /*result*/) { callback_called = true; }, "device-123");
 
     int attempts = 0;
     while (!callback_called && attempts++ < 100) {
@@ -1422,9 +1946,7 @@ TEST_F(ClientTest, DestructorWaitsForAsyncOperations) {
         // Start multiple async operations
         for (int i = 0; i < 5; i++) {
             client.validate_async("TEST-KEY-" + std::to_string(i),
-                                  [&](Result<ValidationResult> /*result*/) {
-                                      callback_count++;
-                                  });
+                                  [&](Result<ValidationResult> /*result*/) { callback_count++; });
         }
         // Client destructor should wait for all callbacks to complete
     }
@@ -1434,6 +1956,48 @@ TEST_F(ClientTest, DestructorWaitsForAsyncOperations) {
 
     // All callbacks should have been called before destructor completed
     EXPECT_EQ(callback_count, 5);
+}
+
+TEST_F(ClientTest, AsyncCallbackCanDestroyItsClient) {
+    httplib::Server server;
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool release_response = false;
+    server.Post("/api/v1/products/test_product/licenses/validate", [&](const httplib::Request&,
+                                                                       httplib::Response& res) {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        gate_cv.wait(lock, [&]() { return release_response; });
+        res.set_content(
+            R"({"object":"validation_result","valid":true,"code":"license_valid","message":"ok","license":{"key":"VALID-KEY","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
+            "application/json");
+    });
+    const auto port = server.bind_to_any_port("127.0.0.1");
+    ASSERT_GT(port, 0);
+    std::thread server_thread([&server]() { server.listen_after_bind(); });
+
+    auto config = config_;
+    config.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
+    auto holder =
+        std::make_shared<std::unique_ptr<Client>>(std::make_unique<Client>(std::move(config)));
+    auto destroyed = std::make_shared<std::promise<void>>();
+    auto destroyed_future = destroyed->get_future();
+
+    (*holder)->validate_async("VALID-KEY", [holder, destroyed](Result<ValidationResult>) {
+        holder->reset();
+        destroyed->set_value();
+    });
+    {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        release_response = true;
+    }
+    gate_cv.notify_all();
+
+    const auto status = destroyed_future.wait_for(std::chrono::seconds(3));
+    EXPECT_EQ(status, std::future_status::ready);
+
+    server.stop();
+    if (server_thread.joinable())
+        server_thread.join();
 }
 
 TEST_F(ClientTest, MultipleAsyncOpsDoNotCrash) {
@@ -1491,9 +2055,8 @@ TEST_F(ClientTest, GetClientStatusDoesNotBlockDuringAsyncOps) {
 
     // Start an async validation (will fail due to no server)
     std::atomic<bool> callback_called{false};
-    client.validate_async("TEST-KEY", [&](Result<ValidationResult> /*result*/) {
-        callback_called = true;
-    });
+    client.validate_async("TEST-KEY",
+                          [&](Result<ValidationResult> /*result*/) { callback_called = true; });
 
     // This should return quickly, not block waiting for the async op
     auto start = std::chrono::steady_clock::now();
@@ -1517,9 +2080,8 @@ TEST_F(ClientTest, IsOnlineDoesNotBlockDuringAsyncOps) {
 
     // Start an async validation
     std::atomic<bool> callback_called{false};
-    client.validate_async("TEST-KEY", [&](Result<ValidationResult> /*result*/) {
-        callback_called = true;
-    });
+    client.validate_async("TEST-KEY",
+                          [&](Result<ValidationResult> /*result*/) { callback_called = true; });
 
     // This should return quickly
     auto start = std::chrono::steady_clock::now();
@@ -1528,7 +2090,7 @@ TEST_F(ClientTest, IsOnlineDoesNotBlockDuringAsyncOps) {
 
     // Should complete in under 10ms
     EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 10);
-    (void)online;  // Value doesn't matter for this test
+    (void)online; // Value doesn't matter for this test
 
     // Wait for async to complete
     int attempts = 0;
@@ -1547,6 +2109,58 @@ TEST_F(ClientTest, DestructorSafeWithRunningTimers) {
     }
     // If we get here without crashing or hanging, test passes
     SUCCEED();
+}
+
+TEST_F(ClientTest, TimerEventHandlerCanDestroyItsClient) {
+    httplib::Server server;
+    server.Post("/api/v1/products/test_product/licenses/validate", [](const httplib::Request&,
+                                                                      httplib::Response& res) {
+        res.set_content(
+            R"({"object":"validation_result","valid":true,"code":"license_valid","message":"ok","license":{"key":"VALID-KEY","status":"active","mode":"hardware_locked","plan_key":"pro","seat_limit":1,"active_seats":1,"product":{"slug":"test_product","name":"Test Product"}}})",
+            "application/json");
+    });
+    server.Post("/api/v1/products/test_product/licenses/heartbeat", [](const httplib::Request&,
+                                                                       httplib::Response& res) {
+        res.set_content(R"({"object":"heartbeat","received_at":"2026-08-09T12:00:00Z"})",
+                        "application/json");
+    });
+    const auto port = server.bind_to_any_port("127.0.0.1");
+    ASSERT_GT(port, 0);
+    std::thread server_thread([&server]() { server.listen_after_bind(); });
+
+    auto config = config_;
+    config.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
+    config.auto_validate_interval = 0.01;
+    config.heartbeat_interval = 0;
+    auto holder =
+        std::make_shared<std::unique_ptr<Client>>(std::make_unique<Client>(std::move(config)));
+    auto destroyed = std::make_shared<std::promise<void>>();
+    auto destroyed_future = destroyed->get_future();
+    auto subscription =
+        (*holder)->on(events::VALIDATION_SUCCESS, [holder, destroyed](const std::any&) {
+            holder->reset();
+            destroyed->set_value();
+        });
+
+    (*holder)->start_auto_validation("VALID-KEY");
+    const auto status = destroyed_future.wait_for(std::chrono::seconds(3));
+    EXPECT_EQ(status, std::future_status::ready);
+
+    subscription.cancel();
+    server.stop();
+    if (server_thread.joinable())
+        server_thread.join();
+}
+
+TEST_F(ClientTest, SynchronousEventHandlerCanDestroyItsClient) {
+    auto holder = std::make_shared<std::unique_ptr<Client>>(std::make_unique<Client>(config_));
+    auto subscription =
+        (*holder)->on("test:self-destruct", [holder](const std::any&) { holder->reset(); });
+
+    (*holder)->emit("test:self-destruct");
+
+    EXPECT_EQ(holder->get(), nullptr);
+    subscription.cancel();
 }
 
 TEST_F(ClientTest, ResetSafeWithRunningTimers) {
@@ -1585,9 +2199,7 @@ TEST_F(ClientTest, NetworkOfflineEventEmittedOnHealthFailure) {
     Client client(config_);
     bool offline_event_received = false;
 
-    client.on("network:offline", [&](const std::any& /*data*/) {
-        offline_event_received = true;
-    });
+    client.on("network:offline", [&](const std::any& /*data*/) { offline_event_received = true; });
 
     // Force a health check failure
     auto result = client.health();
@@ -1600,9 +2212,7 @@ TEST_F(ClientTest, ValidationFailedEventEmittedOnNetworkError) {
     Client client(config_);
     bool error_event_received = false;
 
-    client.on("validation:error", [&](const std::any& /*data*/) {
-        error_event_received = true;
-    });
+    client.on("validation:error", [&](const std::any& /*data*/) { error_event_received = true; });
 
     // Validation will fail with network error
     auto result = client.validate("TEST-KEY");
@@ -1623,9 +2233,8 @@ TEST_F(ClientTest, CanSubscribeToLicenseRevokedEvent) {
     Client client(config_);
     bool event_received = false;
 
-    auto sub = client.on("license:revoked", [&](const std::any& /*data*/) {
-        event_received = true;
-    });
+    auto sub =
+        client.on("license:revoked", [&](const std::any& /*data*/) { event_received = true; });
 
     // Manually emit to verify subscription works
     client.emit("license:revoked");
@@ -1633,5 +2242,5 @@ TEST_F(ClientTest, CanSubscribeToLicenseRevokedEvent) {
     EXPECT_TRUE(event_received);
 }
 
-}  // namespace
-}  // namespace licenseseat
+} // namespace
+} // namespace licenseseat

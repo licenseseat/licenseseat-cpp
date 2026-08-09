@@ -19,18 +19,20 @@
  * - Multiple instances in same memory space
  */
 
+#include <atomic>
+#include <chrono>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
-#include <licenseseat/licenseseat.hpp>
 #include <licenseseat/crypto.hpp>
 #include <licenseseat/device.hpp>
 #include <licenseseat/events.hpp>
-
+#include <licenseseat/licenseseat.hpp>
+#include <memory>
+#include <sstream>
 #include <thread>
 #include <vector>
-#include <atomic>
-#include <memory>
-#include <chrono>
-#include <ctime>
 
 namespace licenseseat {
 namespace special_packaging {
@@ -42,11 +44,20 @@ Config make_test_config(const std::string& suffix = "") {
     config.api_key = "test-key" + suffix;
     config.product_slug = "test-product";
     config.device_id = "test-device" + suffix;
-    config.api_url = "http://localhost:1";  // Non-existent URL for fast failure
+    config.api_url = "http://localhost:1"; // Non-existent URL for fast failure
+    config.allow_insecure_http = true;
     config.timeout_seconds = 1;
     config.max_retries = 0;
-    config.auto_validate_interval = 0.1;  // Short interval for faster tests
+    config.auto_validate_interval = 0.1; // Short interval for faster tests
     return config;
+}
+
+std::string read_repository_file(const std::filesystem::path& relative_path) {
+    const auto repository_root = std::filesystem::path(__FILE__).parent_path().parent_path();
+    std::ifstream stream(repository_root / relative_path, std::ios::binary);
+    std::ostringstream contents;
+    contents << stream.rdbuf();
+    return contents.str();
 }
 
 // ==================== Multiple Client Instances ====================
@@ -128,7 +139,8 @@ TEST(ThreadSafetyTest, ConcurrentClientCreation) {
         threads.emplace_back([&, t]() {
             for (int i = 0; i < CLIENTS_PER_THREAD; ++i) {
                 try {
-                    auto config = make_test_config("-t" + std::to_string(t) + "-i" + std::to_string(i));
+                    auto config =
+                        make_test_config("-t" + std::to_string(t) + "-i" + std::to_string(i));
                     Client client(config);
                     if (!client.get_status().valid) {
                         ++success_count;
@@ -182,9 +194,7 @@ TEST(ThreadSafetyTest, ConcurrentDeviceIdGeneration) {
     std::vector<std::thread> threads;
 
     for (int i = 0; i < 100; ++i) {
-        threads.emplace_back([&, i]() {
-            device_ids[i] = device::generate_device_id();
-        });
+        threads.emplace_back([&, i]() { device_ids[i] = device::generate_device_id(); });
     }
 
     for (auto& t : threads) {
@@ -288,10 +298,8 @@ TEST(ShutdownTest, ClientWithActiveSubscriptionsDestructorSafe) {
         Client client(config);
 
         // Subscribe to events using on() method
-        auto sub1 = client.on(events::VALIDATION_SUCCESS,
-                              [](const std::any&) {});
-        auto sub2 = client.on(events::VALIDATION_FAILED,
-                              [](const std::any&) {});
+        auto sub1 = client.on(events::VALIDATION_SUCCESS, [](const std::any&) {});
+        auto sub2 = client.on(events::VALIDATION_FAILED, [](const std::any&) {});
 
         // Don't unsubscribe - destructor should handle cleanup
     }
@@ -309,7 +317,6 @@ TEST(ShutdownTest, RapidCreateDestroyDoesNotLeak) {
 }
 
 // ==================== Crypto Consistency Tests ====================
-// Ensure minimal and OpenSSL modes produce identical results
 
 TEST(CryptoConsistencyTest, Base64RoundTripAllByteValues) {
     // Test all possible byte values
@@ -351,36 +358,58 @@ TEST(CryptoVectorTest, Ed25519RFC8032TestVector1) {
     // Secret key: 9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
     // Public key: d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
     // Message: (empty)
-    // Signature: e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b
+    // Signature:
+    // e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b
 
     const std::string public_key_b64 = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
     const std::string signature_b64url =
-        "5VZDAMNgrHKQhuLMgG6CioSHfx646F2XTYc-BlIkkRVV-4ghWQozusxh45cBz5tGvSW_XwWVu-JGVRQUOOehAAs";
+        "5VZDAMNgrHKQhuLMgG6CioSHfx645dl02HPgZSJJAVVfuIIVkKM7rMYeOXAc-bRr0lv18FlbviRlUUFDjnoQCw";
     const std::string message = "";
 
     auto result = crypto::verify_ed25519_signature(message, signature_b64url, public_key_b64);
 
-    // This should verify successfully with a correct implementation
-    // Note: If this fails, it might be due to base64 encoding differences
-    // The test is here to ensure consistency between OpenSSL and minimal modes
-    EXPECT_TRUE(result.is_ok() || result.error_code() == ErrorCode::InvalidSignature);
+    ASSERT_TRUE(result.is_ok()) << result.error_message();
+    EXPECT_TRUE(result.value());
 }
 
-// ==================== No External Symbol Pollution ====================
-// Verify we don't export problematic symbols (compile-time test)
-
-TEST(SymbolIsolationTest, NoOpenSSLSymbolsInMinimalMode) {
-    // This is a compile-time test more than a runtime test
-    // If we accidentally include OpenSSL headers, this would fail to compile
-    // in minimal mode
-
-    // Just verify our crypto functions work
+TEST(SymbolIsolationTest, OpenSslBackedCryptoApiIsUsable) {
     std::vector<uint8_t> data = {1, 2, 3, 4};
     auto encoded = crypto::base64_encode(data);
     EXPECT_FALSE(encoded.empty());
 
     auto device_id = device::generate_device_id();
     EXPECT_FALSE(device_id.empty());
+}
+
+TEST(IntegrationSourceGuardTest, JuceAdaptersUseManagedCoreWithoutDetachedOwners) {
+    const auto wrapper = read_repository_file("integrations/juce/Source/LicenseSeatJuce.h");
+    const auto compatibility =
+        read_repository_file("integrations/juce/Source/LicenseSeatJuceStandalone.h");
+
+    ASSERT_FALSE(wrapper.empty());
+    ASSERT_FALSE(compatibility.empty());
+    EXPECT_NE(wrapper.find("licenseseat::Client"), std::string::npos);
+    EXPECT_NE(compatibility.find("licenseseat::Client"), std::string::npos);
+    EXPECT_EQ(wrapper.find(".detach()"), std::string::npos);
+    EXPECT_EQ(compatibility.find(".detach()"), std::string::npos);
+    EXPECT_EQ(compatibility.find("readEntireStreamAsString"), std::string::npos);
+    EXPECT_EQ(compatibility.find("ed25519/ed25519.h"), std::string::npos);
+}
+
+TEST(IntegrationSourceGuardTest, UnrealRequestsKeepSecretsOutOfTargetsAndBindResponses) {
+    const auto repository_root = std::filesystem::path(__FILE__).parent_path().parent_path();
+    const auto source = read_repository_file(
+        "integrations/unreal/LicenseSeat/Source/LicenseSeat/Private/LicenseSeatSubsystem.cpp");
+
+    ASSERT_FALSE(source.empty());
+    EXPECT_EQ(source.find("Config.ProductSlug + TEXT(\"/licenses/\") +"), std::string::npos);
+    EXPECT_NE(source.find("SetStringField(TEXT(\"license_key\"), LicenseKey)"), std::string::npos);
+    EXPECT_NE(source.find("TWeakObjectPtr<ULicenseSeatSubsystem>"), std::string::npos);
+    EXPECT_NE(source.find("GetEffectiveURL() != Response->GetURL()"), std::string::npos);
+    EXPECT_NE(source.find("ExpectedLicenseKey"), std::string::npos);
+    EXPECT_FALSE(std::filesystem::exists(
+        repository_root /
+        "integrations/unreal/LicenseSeat/Source/LicenseSeat/Private/ThirdParty/ed25519/ed25519.h"));
 }
 
 // ==================== Binary Size Sanity Check ====================
@@ -405,7 +434,7 @@ TEST(BinarySizeTest, CryptoFunctionsAreUsable) {
     // Device ID (truncated SHA256)
     auto id = device::generate_device_id();
     EXPECT_FALSE(id.empty());
-    EXPECT_GE(id.length(), 32U);  // At least 32 chars (truncated hash)
+    EXPECT_GE(id.length(), 32U); // At least 32 chars (truncated hash)
 }
 
 // ==================== Event System Independence ====================
@@ -422,10 +451,8 @@ TEST(EventIsolationTest, EventsArePerInstance) {
     std::atomic<int> client2_events{0};
 
     // Subscribe to events on each client using on() method
-    auto sub1 = client1.on(events::VALIDATION_SUCCESS,
-                           [&](const std::any&) { ++client1_events; });
-    auto sub2 = client2.on(events::VALIDATION_SUCCESS,
-                           [&](const std::any&) { ++client2_events; });
+    auto sub1 = client1.on(events::VALIDATION_SUCCESS, [&](const std::any&) { ++client1_events; });
+    auto sub2 = client2.on(events::VALIDATION_SUCCESS, [&](const std::any&) { ++client2_events; });
 
     // Trigger an event on client1 (by calling validate which will fail)
     // The event handlers are per-client, so only client1's handler should fire
@@ -444,9 +471,10 @@ TEST(EventIsolationTest, EventsArePerInstance) {
 
 TEST(ConfigValidationTest, EmptyApiKeyHandled) {
     Config config;
-    config.api_key = "";  // Empty API key
+    config.api_key = ""; // Empty API key
     config.product_slug = "test";
     config.api_url = "http://localhost:1";
+    config.allow_insecure_http = true;
     config.timeout_seconds = 1;
     config.max_retries = 0;
 
@@ -458,8 +486,9 @@ TEST(ConfigValidationTest, EmptyApiKeyHandled) {
 TEST(ConfigValidationTest, EmptyProductSlugHandled) {
     Config config;
     config.api_key = "test-key";
-    config.product_slug = "";  // Empty product slug
+    config.product_slug = ""; // Empty product slug
     config.api_url = "http://localhost:1";
+    config.allow_insecure_http = true;
     config.timeout_seconds = 1;
     config.max_retries = 0;
 
@@ -486,7 +515,8 @@ TEST(ConfigValidationTest, ZeroTimeoutHandled) {
     config.api_key = "test-key";
     config.product_slug = "test";
     config.api_url = "http://localhost:1";
-    config.timeout_seconds = 0;  // Zero timeout
+    config.allow_insecure_http = true;
+    config.timeout_seconds = 0; // Zero timeout
     config.max_retries = 0;
 
     // Should not crash
@@ -504,9 +534,9 @@ TEST(OfflineTokenEdgeCasesTest, ExpiredTokenRejected) {
     OfflineToken offline;
     offline.token.license_key = "TEST-KEY";
     offline.token.product_slug = "test";
-    offline.token.iat = std::time(nullptr) - (365 * 24 * 60 * 60);  // 1 year ago
+    offline.token.iat = std::time(nullptr) - (365 * 24 * 60 * 60); // 1 year ago
     offline.token.nbf = offline.token.iat;
-    offline.token.exp = std::time(nullptr) - (1);  // 1 second ago
+    offline.token.exp = std::time(nullptr) - (1); // 1 second ago
 
     auto result = client.verify_offline_token(offline);
     EXPECT_TRUE(result.is_error());
@@ -520,9 +550,10 @@ TEST(OfflineTokenEdgeCasesTest, FutureTokenHandled) {
     OfflineToken offline;
     offline.token.license_key = "TEST-KEY";
     offline.token.product_slug = "test";
-    offline.token.iat = std::time(nullptr) + (365 * 24 * 60 * 60);  // 1 year in future
+    offline.token.iat = std::time(nullptr) + (365 * 24 * 60 * 60); // 1 year in future
     offline.token.nbf = offline.token.iat;
-    offline.token.exp = std::time(nullptr) + static_cast<int64_t>(2) * 365 * 24 * 60 * 60;  // 2 years in future
+    offline.token.exp =
+        std::time(nullptr) + static_cast<int64_t>(2) * 365 * 24 * 60 * 60; // 2 years in future
 
     // Should handle gracefully (may reject or accept based on implementation)
     auto result = client.verify_offline_token(offline);
@@ -557,7 +588,7 @@ TEST(LargeDataTest, LargeMetadataHandled) {
     // Activation with large metadata should not crash
     // activate(license_key, device_id, device_name, metadata)
     auto result = client.activate("TEST-KEY", "test-device", "", large_metadata);
-    EXPECT_TRUE(result.is_error());  // Will fail due to network, but shouldn't crash
+    EXPECT_TRUE(result.is_error()); // Will fail due to network, but shouldn't crash
 }
 
 // ==================== Platform Detection Tests ====================
@@ -566,8 +597,8 @@ TEST(PlatformTest, PlatformNameIsValid) {
     auto platform = device::get_platform_name();
 
     // Should be one of the known platforms
-    EXPECT_TRUE(platform == "macos" || platform == "linux" ||
-                platform == "windows" || platform == "unknown");
+    EXPECT_TRUE(platform == "macos" || platform == "linux" || platform == "windows" ||
+                platform == "unknown");
 }
 
 TEST(PlatformTest, HostnameIsReasonable) {
@@ -630,7 +661,7 @@ TEST(AutoValidationEdgeCasesTest, StartWithEmptyKeyDoesNotCrash) {
 
     // Start with empty key - should handle gracefully
     client.start_auto_validation("");
-    EXPECT_TRUE(client.is_auto_validating());
+    EXPECT_FALSE(client.is_auto_validating());
 
     client.stop_auto_validation();
     EXPECT_FALSE(client.is_auto_validating());
@@ -676,7 +707,7 @@ TEST(BinarySizeVerificationTest, AllCryptoFunctionsLinked) {
 TEST(BinarySizeVerificationTest, AllDeviceFunctionsLinked) {
     // Verify all device functions are available
     auto device_id = device::generate_device_id();
-    (void)device_id;  // May be empty in some environments
+    (void)device_id; // May be empty in some environments
 
     auto platform = device::get_platform_name();
     EXPECT_FALSE(platform.empty());
@@ -705,10 +736,10 @@ TEST(EntitlementTest, CheckMultipleEntitlements) {
 
     for (const auto& feature : features) {
         auto status = client.check_entitlement(feature);
-        EXPECT_FALSE(status.active);  // No license, so all should be inactive
+        EXPECT_FALSE(status.active); // No license, so all should be inactive
     }
 }
 
-}  // namespace
-}  // namespace special_packaging
-}  // namespace licenseseat
+} // namespace
+} // namespace special_packaging
+} // namespace licenseseat

@@ -3,9 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Subsystems/GameInstanceSubsystem.h"
-#include "LicenseSeatTypes.h"
 #include "LicenseSeatSubsystem.generated.h"
+#include "LicenseSeatTypes.h"
+#include "Subsystems/GameInstanceSubsystem.h"
 
 /**
  * LicenseSeat Game Instance Subsystem
@@ -15,7 +15,6 @@
  *
  * Features:
  * - Online license validation
- * - Offline license verification (Ed25519 signatures)
  * - Device-based activation
  * - Automatic re-validation
  * - Blueprint support
@@ -28,11 +27,10 @@
  * @endcode
  */
 UCLASS()
-class LICENSESEAT_API ULicenseSeatSubsystem : public UGameInstanceSubsystem
-{
+class LICENSESEAT_API ULicenseSeatSubsystem : public UGameInstanceSubsystem {
     GENERATED_BODY()
 
-public:
+  public:
     //~ USubsystem interface
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
     virtual void Deinitialize() override;
@@ -140,7 +138,7 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "LicenseSeat")
     FOnLicenseStatusChanged OnLicenseStatusChanged;
 
-private:
+  private:
     /** Configuration */
     FLicenseSeatConfig CurrentConfig;
 
@@ -156,6 +154,9 @@ private:
     /** License key for auto-validation */
     FString AutoValidationLicenseKey;
 
+    /** Stable fingerprint generated once per subsystem lifetime. */
+    FString CachedDeviceId;
+
     /** Generate device ID using platform-specific methods */
     FString GenerateDeviceId() const;
 
@@ -164,7 +165,8 @@ private:
                         TFunction<void(bool bSuccess, const FString& Response)> Callback);
 
     /** Parse validation response */
-    FLicenseValidationResult ParseValidationResponse(const FString& Response);
+    FLicenseValidationResult ParseValidationResponse(const FString& Response,
+                                                     const FString& ExpectedLicenseKey);
 
     /** Handle auto-validation timer */
     void OnAutoValidationTimer();

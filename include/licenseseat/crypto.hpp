@@ -4,8 +4,8 @@
  * @file crypto.hpp
  * @brief Cryptographic utilities for LicenseSeat SDK
  *
- * Provides Ed25519 signature verification and Base64/Base64URL encoding
- * using vendored libraries (orlp/ed25519 and PicoSHA2).
+ * Provides Ed25519 signature verification through OpenSSL EVP, together with
+ * strict Base64/Base64URL handling and machine-file cryptography.
  */
 
 #include "licenseseat.hpp"
@@ -65,11 +65,18 @@ namespace crypto {
  * @param public_key_b64 Base64-encoded Ed25519 public key
  * @return Result<MachineFilePayload> Decrypted machine-file payload on success
  */
-[[nodiscard]] Result<MachineFilePayload> verify_machine_file(
-    const MachineFile& machine_file,
-    const std::string& license_key,
-    const std::string& fingerprint,
-    const std::string& public_key_b64);
+[[nodiscard]] Result<MachineFilePayload> verify_machine_file(const MachineFile& machine_file,
+                                                             const std::string& license_key,
+                                                             const std::string& fingerprint,
+                                                             const std::string& public_key_b64);
 
-}  // namespace crypto
-}  // namespace licenseseat
+namespace internal {
+
+/// Parse a machine-file envelope using the same strict framing rules as
+/// verification and return its untrusted key identifier for key selection.
+[[nodiscard]] Result<std::string> extract_machine_file_key_id(const MachineFile& machine_file);
+
+} // namespace internal
+
+} // namespace crypto
+} // namespace licenseseat

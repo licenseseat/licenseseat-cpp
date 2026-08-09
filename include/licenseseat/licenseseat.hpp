@@ -164,7 +164,7 @@ enum class LicenseStatus {
     Expired,
     Revoked,
     Suspended,
-    Pending,  // Not yet started
+    Pending, // Not yet started
     Unknown
 };
 
@@ -233,9 +233,9 @@ enum class ClientStatus {
 
 /// License mode (how the license is enforced)
 enum class LicenseMode {
-    HardwareLocked,  // Tied to specific devices
-    Floating,        // Concurrent usage limited
-    Named,           // Tied to named users
+    HardwareLocked, // Tied to specific devices
+    Floating,       // Concurrent usage limited
+    Named,          // Tied to named users
     Unknown
 };
 
@@ -293,10 +293,10 @@ template <typename T> class Result {
     /// Check if the result is an error
     [[nodiscard]] bool is_error() const noexcept { return error_ != ErrorCode::Success; }
 
-    /// Get the value (undefined behavior if is_error())
-    [[nodiscard]] const T& value() const& { return *value_; }
-    [[nodiscard]] T& value() & { return *value_; }
-    [[nodiscard]] T&& value() && { return std::move(*value_); }
+    /// Get the value. Throws std::bad_optional_access if this is an error.
+    [[nodiscard]] const T& value() const& { return value_.value(); }
+    [[nodiscard]] T& value() & { return value_.value(); }
+    [[nodiscard]] T&& value() && { return std::move(value_).value(); }
 
     /// Get the error code
     [[nodiscard]] ErrorCode error_code() const noexcept { return error_; }
@@ -353,9 +353,9 @@ struct Product {
  * @brief Represents an entitlement attached to a license
  */
 struct Entitlement {
-    std::string key;                      // Feature/entitlement key (e.g., "updates")
-    std::optional<Timestamp> expires_at;  // Optional per-entitlement expiry
-    Metadata metadata;                    // Per-entitlement metadata
+    std::string key;                     // Feature/entitlement key (e.g., "updates")
+    std::optional<Timestamp> expires_at; // Optional per-entitlement expiry
+    Metadata metadata;                   // Per-entitlement metadata
 };
 
 /**
@@ -373,17 +373,10 @@ class License {
             std::optional<int> seat_limit, int active_seats, std::optional<Timestamp> starts_at,
             std::optional<Timestamp> expires_at, std::vector<Entitlement> active_entitlements,
             Metadata metadata, Product product)
-        : key_(std::move(key)),
-          status_(status),
-          mode_(mode),
-          plan_key_(std::move(plan_key)),
-          seat_limit_(seat_limit),
-          active_seats_(active_seats),
-          starts_at_(starts_at),
-          expires_at_(expires_at),
-          active_entitlements_(std::move(active_entitlements)),
-          metadata_(std::move(metadata)),
-          product_(std::move(product)) {}
+        : key_(std::move(key)), status_(status), mode_(mode), plan_key_(std::move(plan_key)),
+          seat_limit_(seat_limit), active_seats_(active_seats), starts_at_(starts_at),
+          expires_at_(expires_at), active_entitlements_(std::move(active_entitlements)),
+          metadata_(std::move(metadata)), product_(std::move(product)) {}
 
     /// Get the license key
     [[nodiscard]] const std::string& key() const noexcept { return key_; }
@@ -407,7 +400,9 @@ class License {
     [[nodiscard]] const std::optional<Timestamp>& starts_at() const noexcept { return starts_at_; }
 
     /// Get the license expiry date
-    [[nodiscard]] const std::optional<Timestamp>& expires_at() const noexcept { return expires_at_; }
+    [[nodiscard]] const std::optional<Timestamp>& expires_at() const noexcept {
+        return expires_at_;
+    }
 
     /// Get active entitlements for this license
     [[nodiscard]] const std::vector<Entitlement>& active_entitlements() const noexcept {
@@ -429,7 +424,7 @@ class License {
         if (starts_at_.has_value() && now < *starts_at_) {
             return false;
         }
-        if (expires_at_.has_value() && now > *expires_at_) {
+        if (expires_at_.has_value() && now >= *expires_at_) {
             return false;
         }
         return true;
@@ -440,7 +435,7 @@ class License {
         if (!expires_at_.has_value()) {
             return false;
         }
-        return std::chrono::system_clock::now() > *expires_at_;
+        return std::chrono::system_clock::now() >= *expires_at_;
     }
 
     /// Check if the license has started (is past its start date)
@@ -454,7 +449,7 @@ class License {
     /// Check if there are seats available for activation
     [[nodiscard]] bool has_available_seats() const noexcept {
         if (!seat_limit_.has_value() || *seat_limit_ <= 0) {
-            return true;  // Unlimited seats
+            return true; // Unlimited seats
         }
         return active_seats_ < *seat_limit_;
     }
@@ -462,7 +457,7 @@ class License {
     /// Get remaining seat count (-1 if unlimited)
     [[nodiscard]] int remaining_seats() const noexcept {
         if (!seat_limit_.has_value() || *seat_limit_ <= 0) {
-            return -1;  // Unlimited
+            return -1; // Unlimited
         }
         return *seat_limit_ - active_seats_;
     }
@@ -490,16 +485,12 @@ class Activation {
   public:
     Activation() = default;
 
-    Activation(int64_t id, std::string device_id, std::string device_name,
-               std::string license_key, Timestamp activated_at,
-               std::optional<Timestamp> deactivated_at, std::string ip_address, Metadata metadata)
-        : id_(id),
-          device_id_(std::move(device_id)),
-          device_name_(std::move(device_name)),
-          license_key_(std::move(license_key)),
-          activated_at_(activated_at),
-          deactivated_at_(deactivated_at),
-          ip_address_(std::move(ip_address)),
+    Activation(int64_t id, std::string device_id, std::string device_name, std::string license_key,
+               Timestamp activated_at, std::optional<Timestamp> deactivated_at,
+               std::string ip_address, Metadata metadata)
+        : id_(id), device_id_(std::move(device_id)), device_name_(std::move(device_name)),
+          license_key_(std::move(license_key)), activated_at_(activated_at),
+          deactivated_at_(deactivated_at), ip_address_(std::move(ip_address)),
           metadata_(std::move(metadata)) {}
 
     /// Get the activation ID
@@ -553,15 +544,15 @@ struct OfflineTokenPayload {
     std::string license_key;
     std::string product_slug;
     std::string plan_key;
-    std::string mode;                   // "hardware_locked", "floating", etc.
+    std::string mode; // "hardware_locked", "floating", etc.
     std::optional<int> seat_limit;
-    std::optional<std::string> fingerprint;  // Preferred field name
-    std::optional<std::string> device_id;  // Required for hardware_locked mode
-    int64_t iat = 0;                    // Issued at (Unix timestamp)
-    int64_t exp = 0;                    // Token expires at (Unix timestamp)
-    int64_t nbf = 0;                    // Not before (Unix timestamp)
-    std::optional<int64_t> license_expires_at;  // License expiry (Unix timestamp)
-    std::string kid;                    // Key ID for signature verification
+    std::optional<std::string> fingerprint;    // Preferred field name
+    std::optional<std::string> device_id;      // Required for hardware_locked mode
+    int64_t iat = 0;                           // Issued at (Unix timestamp)
+    int64_t exp = 0;                           // Token expires at (Unix timestamp)
+    int64_t nbf = 0;                           // Not before (Unix timestamp)
+    std::optional<int64_t> license_expires_at; // License expiry (Unix timestamp)
+    std::string kid;                           // Key ID for signature verification
     std::vector<Entitlement> entitlements;
     Metadata metadata;
 };
@@ -572,7 +563,7 @@ struct OfflineTokenPayload {
 struct OfflineTokenSignature {
     std::string algorithm = "Ed25519";
     std::string key_id;
-    std::string value;                  // Base64-encoded signature
+    std::string value; // Base64-encoded signature
 };
 
 /**
@@ -584,13 +575,14 @@ struct OfflineTokenSignature {
 struct OfflineToken {
     OfflineTokenPayload token;
     OfflineTokenSignature signature;
-    std::string canonical;              // Exact JSON string that was signed
+    std::string canonical;          // Exact JSON string that was signed
+    std::string visible_token_json; // Exact typed token object received from the API
 
     /// Check if the offline token has expired
     [[nodiscard]] bool is_expired() const noexcept {
         auto now = std::chrono::system_clock::now();
         auto exp_time = std::chrono::system_clock::from_time_t(token.exp);
-        return now > exp_time;
+        return now >= exp_time;
     }
 
     /// Check if the token is not yet valid (before nbf)
@@ -603,11 +595,11 @@ struct OfflineToken {
     /// Check if the underlying license has expired
     [[nodiscard]] bool is_license_expired() const noexcept {
         if (!token.license_expires_at.has_value()) {
-            return false;  // No expiry means never expires
+            return false; // No expiry means never expires
         }
         auto now = std::chrono::system_clock::now();
         auto exp_time = std::chrono::system_clock::from_time_t(*token.license_expires_at);
-        return now > exp_time;
+        return now >= exp_time;
     }
 
     /// Check if a specific entitlement is present and not expired
@@ -618,7 +610,7 @@ struct OfflineToken {
                 if (!ent.expires_at.has_value()) {
                     return true;
                 }
-                return now <= *ent.expires_at;
+                return now < *ent.expires_at;
             }
         }
         return false;
@@ -633,7 +625,7 @@ struct OfflineToken {
 struct MachineFile {
     std::string certificate;
     std::string algorithm = "aes-256-gcm+ed25519";
-    int64_t ttl = 0;                    // Seconds
+    int64_t ttl = 0; // Seconds
     std::optional<Timestamp> issued_at;
     std::optional<Timestamp> expires_at;
     std::string license_key;
@@ -658,6 +650,7 @@ struct MachineFilePayload {
     std::optional<std::string> sdk_version;
     std::string machine_id;
     std::string fingerprint;
+    std::string product_slug;
     Metadata fingerprint_components;
     std::string device_name;
     std::string platform;
@@ -681,8 +674,8 @@ struct MachineFileVerificationResult {
  */
 struct Release {
     std::string version;
-    std::string channel;        // stable, beta, alpha
-    std::string platform;       // macos, windows, linux
+    std::string channel;  // stable, beta, alpha
+    std::string platform; // macos, windows, linux
     std::string product_slug;
     std::optional<Timestamp> published_at;
 };
@@ -723,8 +716,9 @@ struct ValidationWarning {
  * @brief Offline fallback mode for network failures
  */
 enum class OfflineFallbackMode {
-    Always,      // Always try offline fallback on any error
-    NetworkOnly  // Only fallback on network/transport errors
+    Always,      // Deprecated alias for NetworkOnly; HTTP errors remain authoritative
+    NetworkOnly, // Only fallback on network/transport errors
+    Disabled     // Never use cached offline artifacts automatically
 };
 
 /**
@@ -760,8 +754,12 @@ struct Config {
     /// HTTP request timeout in seconds
     int timeout_seconds = 30;
 
-    /// Enable SSL certificate verification (disable only for testing!)
+    /// Enable SSL certificate verification. Disabling it is accepted only for
+    /// loopback development endpoints.
     bool verify_ssl = true;
+
+    /// Explicitly allow plaintext HTTP for localhost/loopback development only.
+    bool allow_insecure_http = false;
 
     /// Number of retry attempts for failed requests
     int max_retries = 3;
@@ -769,27 +767,31 @@ struct Config {
     /// Interval between retries in milliseconds
     int retry_interval_ms = 1000;
 
+    /// Maximum request and response body sizes accepted by the SDK.
+    std::size_t max_request_bytes = 1024 * 1024;
+    std::size_t max_response_bytes = 1024 * 1024;
+
     // ========== Auto-Validation Settings ==========
 
     /// Interval for automatic re-validation in seconds (0 to disable)
-    double auto_validate_interval = 3600.0;  // 1 hour (matches Swift SDK)
+    double auto_validate_interval = 3600.0; // 1 hour (matches Swift SDK)
 
     /// Interval for network status checks when offline (seconds)
     double network_recheck_interval = 30.0;
 
     // ========== Offline Fallback Settings ==========
 
-    /// Offline fallback mode
-    OfflineFallbackMode offline_fallback_mode = OfflineFallbackMode::NetworkOnly;
+    /// Offline fallback mode. Offline authority must be explicitly enabled.
+    OfflineFallbackMode offline_fallback_mode = OfflineFallbackMode::Disabled;
 
-    /// Maximum days to allow offline operation locally (0 = disabled/unlimited)
-    int max_offline_days = 0;  // Disabled by default (matches Swift SDK)
+    /// Maximum days to allow offline operation locally (0 = disabled)
+    int max_offline_days = 0;
 
     /// Maximum clock skew allowed in milliseconds (for tamper detection)
-    double max_clock_skew_ms = 300000.0;  // 5 minutes (matches Swift SDK)
+    double max_clock_skew_ms = 300000.0; // 5 minutes (matches Swift SDK)
 
     /// Interval for refreshing offline artifacts (seconds)
-    double offline_license_refresh_interval = 259200.0;  // 3 days (matches Swift SDK)
+    double offline_license_refresh_interval = 259200.0; // 3 days (matches Swift SDK)
 
     /// Enable legacy offline-token fetching as a fallback after machine-file sync fails
     /// Disabled by default; machine files are the preferred offline artifact.
@@ -798,7 +800,7 @@ struct Config {
     // ========== Heartbeat Settings ==========
 
     /// Interval for heartbeat in seconds (0 to disable separate heartbeat timer)
-    int heartbeat_interval = 300;  // 5 minutes
+    int heartbeat_interval = 300; // 5 minutes
 
     // ========== Telemetry Settings ==========
 
@@ -822,12 +824,12 @@ struct Config {
  */
 struct ValidationResult {
     bool valid = false;
-    std::string code;              // Machine-readable code (when invalid)
-    std::string message;           // Human-readable message (when invalid)
-    std::vector<ValidationWarning> warnings;  // Non-fatal advisories
-    bool offline = false;          // Whether this was an offline validation
+    std::string code;                        // Machine-readable code (when invalid)
+    std::string message;                     // Human-readable message (when invalid)
+    std::vector<ValidationWarning> warnings; // Non-fatal advisories
+    bool offline = false;                    // Whether this was an offline validation
     License license;
-    std::optional<Activation> activation;  // Present when device was validated
+    std::optional<Activation> activation; // Present when device was validated
 };
 
 /**
@@ -838,10 +840,10 @@ struct ValidationResult {
  * the restored license (if any), and a descriptive message.
  */
 struct RestoreResult {
-    bool success = false;          // Whether license was successfully restored
-    ClientStatus status = ClientStatus::Inactive;  // Current client status
-    std::optional<License> license;  // The restored license (if successful)
-    std::string message;           // Human-readable status message
+    bool success = false;                         // Whether license was successfully restored
+    ClientStatus status = ClientStatus::Inactive; // Current client status
+    std::optional<License> license;               // The restored license (if successful)
+    std::string message;                          // Human-readable status message
 };
 
 // Forward declarations for callback types
@@ -859,7 +861,7 @@ using RestoreCallback = std::function<void(RestoreResult)>;
  */
 struct EntitlementStatus {
     bool active = false;
-    std::string reason;  // "no_license", "not_found", "expired", etc.
+    std::string reason; // "no_license", "not_found", "expired", etc.
     std::optional<Timestamp> expires_at;
     std::optional<Entitlement> entitlement;
 };
@@ -916,27 +918,24 @@ class Client {
     /// Validate a license key
     /// @param license_key The license key to validate
     /// @param device_id Optional device ID (uses config if empty)
-    [[nodiscard]] Result<ValidationResult> validate(
-        const std::string& license_key,
-        const std::string& device_id = "");
+    [[nodiscard]] Result<ValidationResult> validate(const std::string& license_key,
+                                                    const std::string& device_id = "");
 
     /// Activate a license on this device
     /// @param license_key The license key to activate
     /// @param device_id Optional device ID (uses config if empty)
     /// @param device_name Optional human-readable device name
     /// @param metadata Optional metadata to attach to the activation
-    [[nodiscard]] Result<Activation> activate(
-        const std::string& license_key,
-        const std::string& device_id = "",
-        const std::string& device_name = "",
-        const Metadata& metadata = {});
+    [[nodiscard]] Result<Activation> activate(const std::string& license_key,
+                                              const std::string& device_id = "",
+                                              const std::string& device_name = "",
+                                              const Metadata& metadata = {});
 
     /// Deactivate a license on this device
     /// @param license_key The license key to deactivate
     /// @param device_id Device ID to deactivate (required)
-    [[nodiscard]] Result<Deactivation> deactivate(
-        const std::string& license_key,
-        const std::string& device_id);
+    [[nodiscard]] Result<Deactivation> deactivate(const std::string& license_key,
+                                                  const std::string& device_id);
 
     // ========== Asynchronous API ==========
 
@@ -944,10 +943,8 @@ class Client {
     /// @param license_key The license key to validate
     /// @param callback Called when validation completes
     /// @param device_id Optional device ID (uses config if empty)
-    void validate_async(
-        const std::string& license_key,
-        AsyncCallback callback,
-        const std::string& device_id = "");
+    void validate_async(const std::string& license_key, AsyncCallback callback,
+                        const std::string& device_id = "");
 
     /// Activate a license asynchronously
     /// @param license_key The license key to activate
@@ -955,39 +952,31 @@ class Client {
     /// @param device_id Optional device ID (uses config if empty)
     /// @param device_name Optional human-readable device name
     /// @param metadata Optional metadata to attach to the activation
-    void activate_async(
-        const std::string& license_key,
-        ActivationCallback callback,
-        const std::string& device_id = "",
-        const std::string& device_name = "",
-        const Metadata& metadata = {});
+    void activate_async(const std::string& license_key, ActivationCallback callback,
+                        const std::string& device_id = "", const std::string& device_name = "",
+                        const Metadata& metadata = {});
 
     /// Deactivate a license asynchronously
     /// @param license_key The license key to deactivate
     /// @param callback Called when deactivation completes
     /// @param device_id Device ID to deactivate (required)
-    void deactivate_async(
-        const std::string& license_key,
-        DeactivationCallback callback,
-        const std::string& device_id);
+    void deactivate_async(const std::string& license_key, DeactivationCallback callback,
+                          const std::string& device_id);
 
     // ========== Heartbeat ==========
 
     /// Send a heartbeat for a license
     /// @param license_key The license key
     /// @param device_id Optional device ID (uses config if empty)
-    [[nodiscard]] Result<HeartbeatResponse> heartbeat(
-        const std::string& license_key,
-        const std::string& device_id = "");
+    [[nodiscard]] Result<HeartbeatResponse> heartbeat(const std::string& license_key,
+                                                      const std::string& device_id = "");
 
     /// Send a heartbeat asynchronously
     /// @param license_key The license key
     /// @param callback Called when heartbeat completes
     /// @param device_id Optional device ID (uses config if empty)
-    void heartbeat_async(
-        const std::string& license_key,
-        HeartbeatCallback callback,
-        const std::string& device_id = "");
+    void heartbeat_async(const std::string& license_key, HeartbeatCallback callback,
+                         const std::string& device_id = "");
 
     // ========== Legacy Offline Tokens ==========
 
@@ -996,26 +985,23 @@ class Client {
     /// @param license_key The license key to generate offline token for
     /// @param device_id Optional device ID (required for hardware_locked licenses)
     /// @param ttl_days Token lifetime in days (default: 30, max: 90)
-    [[nodiscard]] Result<OfflineToken> generate_offline_token(
-        const std::string& license_key,
-        const std::string& device_id = "",
-        int ttl_days = 30);
+    [[nodiscard]] Result<OfflineToken> generate_offline_token(const std::string& license_key,
+                                                              const std::string& device_id = "",
+                                                              int ttl_days = 30);
 
     /// Generate a machine file from the server
     /// @param license_key The license key to generate a machine file for
     /// @param device_id Optional device fingerprint (uses config if empty)
     /// @param ttl_days Requested machine-file lifetime in days
-    [[nodiscard]] Result<MachineFile> checkout_machine_file(
-        const std::string& license_key,
-        const std::string& device_id = "",
-        int ttl_days = 0);
+    [[nodiscard]] Result<MachineFile> checkout_machine_file(const std::string& license_key,
+                                                            const std::string& device_id = "",
+                                                            int ttl_days = 0);
 
     /// Verify a legacy offline token locally (no network required)
     /// @param offline_token The offline token to verify
     /// @param public_key_b64 Base64-encoded Ed25519 public key (uses config if empty)
-    [[nodiscard]] Result<bool> verify_offline_token(
-        const OfflineToken& offline_token,
-        const std::string& public_key_b64 = "");
+    [[nodiscard]] Result<bool> verify_offline_token(const OfflineToken& offline_token,
+                                                    const std::string& public_key_b64 = "");
 
     /// Verify a machine file locally (no network required)
     /// @param machine_file The machine file to verify
@@ -1023,10 +1009,8 @@ class Client {
     /// @param license_key License key override (uses machine file payload/cache if empty)
     /// @param device_id Device fingerprint override (uses config if empty)
     [[nodiscard]] Result<MachineFileVerificationResult> verify_machine_file(
-        const MachineFile& machine_file,
-        const std::string& public_key_b64 = "",
-        const std::string& license_key = "",
-        const std::string& device_id = "");
+        const MachineFile& machine_file, const std::string& public_key_b64 = "",
+        const std::string& license_key = "", const std::string& device_id = "");
 
     /// Fetch a signing key for offline verification from the API
     /// @param key_id The key ID to fetch
@@ -1114,19 +1098,17 @@ class Client {
     /// @param product_slug Product slug (uses config if empty)
     /// @param channel Filter by channel (stable, beta, alpha)
     /// @param platform Filter by platform (macos, windows, linux)
-    [[nodiscard]] Result<Release> get_latest_release(
-        const std::string& product_slug = "",
-        const std::string& channel = "",
-        const std::string& platform = "");
+    [[nodiscard]] Result<Release> get_latest_release(const std::string& product_slug = "",
+                                                     const std::string& channel = "",
+                                                     const std::string& platform = "");
 
     /// List all releases for a product
     /// @param product_slug Product slug (uses config if empty)
     /// @param channel Filter by channel (stable, beta, alpha)
     /// @param platform Filter by platform (macos, windows, linux)
-    [[nodiscard]] Result<std::vector<Release>> list_releases(
-        const std::string& product_slug = "",
-        const std::string& channel = "",
-        const std::string& platform = "");
+    [[nodiscard]] Result<std::vector<Release>> list_releases(const std::string& product_slug = "",
+                                                             const std::string& channel = "",
+                                                             const std::string& platform = "");
 
     /// Generate a download token for a release
     /// @param version Release version string (e.g., "2.1.0")
@@ -1134,10 +1116,8 @@ class Client {
     /// @param product_slug Product slug (uses config if empty)
     /// @param platform Optional platform filter
     [[nodiscard]] Result<DownloadToken> generate_download_token(
-        const std::string& version,
-        const std::string& license_key,
-        const std::string& product_slug = "",
-        const std::string& platform = "");
+        const std::string& version, const std::string& license_key,
+        const std::string& product_slug = "", const std::string& platform = "");
 
     // ========== Health & Utility ==========
 
@@ -1158,7 +1138,7 @@ class Client {
 
   private:
     class Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
 };
 
 /**
@@ -1167,7 +1147,8 @@ class Client {
 class Subscription {
   public:
     Subscription() = default;
-    explicit Subscription(std::function<void()> unsubscribe) : unsubscribe_(std::move(unsubscribe)) {}
+    explicit Subscription(std::function<void()> unsubscribe)
+        : unsubscribe_(std::move(unsubscribe)) {}
 
     /// Cancel this subscription
     void cancel() {

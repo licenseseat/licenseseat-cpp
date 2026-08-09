@@ -9,41 +9,191 @@
 
 #include "licenseseat.hpp"
 
-#include <nlohmann/json.hpp>
-
+#include <cstdint>
 #include <ctime>
 #include <iomanip>
+#include <limits>
+#include <nlohmann/json.hpp>
 #include <sstream>
+#include <stdexcept>
+#include <unordered_set>
+#include <vector>
 
 namespace licenseseat {
 namespace json {
 
 using nlohmann::json;
 
+inline constexpr std::size_t MAX_JSON_BYTES = 1024 * 1024;
+inline constexpr int MAX_JSON_DEPTH = 32;
+inline constexpr std::size_t MAX_JSON_NODES = 10000;
+inline constexpr std::size_t MAX_JSON_ARRAY_ITEMS = 5000;
+inline constexpr std::size_t MAX_JSON_OBJECT_KEYS = 1000;
+inline constexpr std::size_t MAX_JSON_KEY_BYTES = 255;
+inline constexpr std::size_t MAX_JSON_STRING_BYTES = 256 * 1024;
+
+[[nodiscard]] inline bool has_unsafe_text(const std::string& value) {
+    for (unsigned char byte : value) {
+        if (byte <= 0x1f || byte == 0x7f)
+            return true;
+    }
+    return false;
+}
+
+/**
+ * Parse bounded JSON and reject duplicate object keys. nlohmann/json normally
+ * keeps the last duplicate key, which can let different components authorize
+ * different interpretations of the same signed or network payload.
+ */
+[[nodiscard]] inline json parse_strict(const std::string& input,
+                                       std::size_t max_bytes = MAX_JSON_BYTES) {
+    if (input.size() > max_bytes) {
+        throw std::invalid_argument("JSON exceeds the configured size limit");
+    }
+
+    std::vector<std::unordered_set<std::string>> object_keys;
+    std::size_t nodes = 0;
+    json::parser_callback_t callback = [&](int depth, json::parse_event_t event, json& parsed) {
+        if (depth > MAX_JSON_DEPTH) {
+            throw std::invalid_argument("JSON is too deeply nested");
+        }
+
+        if (event == json::parse_event_t::object_start) {
+            object_keys.emplace_back();
+        } else if (event == json::parse_event_t::key) {
+            const auto key = parsed.get<std::string>();
+            if (key.empty() || key.size() > MAX_JSON_KEY_BYTES || has_unsafe_text(key)) {
+                throw std::invalid_argument("JSON contains an invalid object key");
+            }
+            if (object_keys.empty()) {
+                throw std::invalid_argument("JSON parser entered an invalid object state");
+            }
+            auto& keys = object_keys.back();
+            if (!keys.insert(key).second) {
+                throw std::invalid_argument("JSON contains a duplicate object key");
+            }
+        } else if (event == json::parse_event_t::value) {
+            if (++nodes > MAX_JSON_NODES) {
+                throw std::invalid_argument("JSON contains too many values");
+            }
+            if (parsed.is_string() &&
+                parsed.get_ref<const std::string&>().size() > MAX_JSON_STRING_BYTES) {
+                throw std::invalid_argument("JSON contains an oversized string");
+            }
+        } else if (event == json::parse_event_t::array_end &&
+                   parsed.size() > MAX_JSON_ARRAY_ITEMS) {
+            throw std::invalid_argument("JSON contains an oversized array");
+        } else if (event == json::parse_event_t::object_end) {
+            if (parsed.size() > MAX_JSON_OBJECT_KEYS) {
+                throw std::invalid_argument("JSON contains an oversized object");
+            }
+            if (object_keys.empty()) {
+                throw std::invalid_argument("JSON parser entered an invalid object state");
+            }
+            object_keys.pop_back();
+        }
+        return true;
+    };
+
+    return json::parse(input, callback, true, false);
+}
+
 // ==================== Timestamp Helpers ====================
 
 /// Parse ISO 8601 timestamp string to Timestamp
 [[nodiscard]] inline std::optional<Timestamp> parse_timestamp(const std::string& str) {
-    if (str.empty()) {
+    if (str.size() < 20 || str.size() > 40)
+        return std::nullopt;
+
+    auto digits = [&](std::size_t offset, std::size_t count) -> std::optional<int> {
+        if (offset + count > str.size())
+            return std::nullopt;
+        int value = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const char c = str[offset + i];
+            if (c < '0' || c > '9')
+                return std::nullopt;
+            value = value * 10 + (c - '0');
+        }
+        return value;
+    };
+
+    if (str[4] != '-' || str[7] != '-' || str[10] != 'T' || str[13] != ':' || str[16] != ':') {
+        return std::nullopt;
+    }
+    const auto year = digits(0, 4);
+    const auto month = digits(5, 2);
+    const auto day = digits(8, 2);
+    const auto hour = digits(11, 2);
+    const auto minute = digits(14, 2);
+    const auto second = digits(17, 2);
+    if (!year || !month || !day || !hour || !minute || !second)
+        return std::nullopt;
+
+    const bool leap = (*year % 4 == 0 && *year % 100 != 0) || *year % 400 == 0;
+    const int month_days[] = {0, 31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (*year < 1000 || *month < 1 || *month > 12 || *day < 1 || *day > month_days[*month] ||
+        *hour > 23 || *minute > 59 || *second > 59) {
         return std::nullopt;
     }
 
-    // Parse ISO 8601 format: "2026-01-19T12:00:00Z"
-    std::tm tm = {};
-    std::istringstream ss(str);
-    ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
-
-    if (ss.fail()) {
-        return std::nullopt;
+    std::size_t position = 19;
+    int64_t fractional_nanoseconds = 0;
+    if (position < str.size() && str[position] == '.') {
+        ++position;
+        const std::size_t fraction_start = position;
+        int digits_seen = 0;
+        while (position < str.size() && str[position] >= '0' && str[position] <= '9') {
+            if (digits_seen < 9) {
+                fractional_nanoseconds = fractional_nanoseconds * 10 + (str[position] - '0');
+            }
+            ++digits_seen;
+            ++position;
+        }
+        if (position == fraction_start || digits_seen > 9)
+            return std::nullopt;
+        for (; digits_seen < 9; ++digits_seen)
+            fractional_nanoseconds *= 10;
     }
 
-    // Handle UTC timezone
-    auto time = std::mktime(&tm);
-    if (time == -1) {
+    int offset_seconds = 0;
+    if (position < str.size() && str[position] == 'Z') {
+        ++position;
+    } else if (position < str.size() && (str[position] == '+' || str[position] == '-')) {
+        const bool positive = str[position] == '+';
+        if (position + 6 != str.size() || str[position + 3] != ':')
+            return std::nullopt;
+        const auto offset_hour = digits(position + 1, 2);
+        const auto offset_minute = digits(position + 4, 2);
+        if (!offset_hour || !offset_minute || *offset_hour > 23 || *offset_minute > 59) {
+            return std::nullopt;
+        }
+        offset_seconds = (*offset_hour * 60 + *offset_minute) * 60;
+        if (!positive)
+            offset_seconds = -offset_seconds;
+        position += 6;
+    } else {
         return std::nullopt;
     }
+    if (position != str.size())
+        return std::nullopt;
 
-    return std::chrono::system_clock::from_time_t(time);
+    // Howard Hinnant's civil-date conversion, yielding days since 1970-01-01.
+    int y = *year;
+    const unsigned m = static_cast<unsigned>(*month);
+    const unsigned d = static_cast<unsigned>(*day);
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = static_cast<unsigned>(y - era * 400);
+    const unsigned adjusted_month = m > 2 ? m - 3 : m + 9;
+    const unsigned doy = (153 * adjusted_month + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const int64_t days_since_epoch = static_cast<int64_t>(era) * 146097 + doe - 719468;
+    const int64_t seconds_since_epoch =
+        days_since_epoch * 86400 + *hour * 3600 + *minute * 60 + *second - offset_seconds;
+    const auto duration = std::chrono::seconds(seconds_since_epoch) +
+                          std::chrono::nanoseconds(fractional_nanoseconds);
+    return Timestamp(std::chrono::duration_cast<Timestamp::duration>(duration));
 }
 
 /// Parse Unix timestamp (seconds) to Timestamp
@@ -107,9 +257,18 @@ using nlohmann::json;
     if (j.contains("expires_at") && !j["expires_at"].is_null()) {
         if (j["expires_at"].is_string()) {
             ent.expires_at = parse_timestamp(j["expires_at"].get<std::string>());
-        } else if (j["expires_at"].is_number()) {
+            if (!ent.expires_at.has_value()) {
+                throw std::invalid_argument("Entitlement expiry timestamp is invalid");
+            }
+        } else if (j["expires_at"].is_number_integer()) {
             // Offline tokens use unix timestamp
-            ent.expires_at = parse_unix_timestamp(j["expires_at"].get<int64_t>());
+            const auto timestamp = j["expires_at"].get<int64_t>();
+            if (timestamp <= 0 || timestamp > 253402300799LL) {
+                throw std::invalid_argument("Entitlement expiry timestamp is invalid");
+            }
+            ent.expires_at = parse_unix_timestamp(timestamp);
+        } else {
+            throw std::invalid_argument("Entitlement expiry timestamp is invalid");
         }
     }
 
@@ -185,12 +344,18 @@ using nlohmann::json;
     std::optional<Timestamp> starts_at;
     if (j.contains("starts_at") && !j["starts_at"].is_null()) {
         starts_at = parse_timestamp(j["starts_at"].get<std::string>());
+        if (!starts_at.has_value()) {
+            throw std::invalid_argument("License start timestamp is invalid");
+        }
     }
 
     // New API uses "expires_at" instead of "ends_at"
     std::optional<Timestamp> expires_at;
     if (j.contains("expires_at") && !j["expires_at"].is_null()) {
         expires_at = parse_timestamp(j["expires_at"].get<std::string>());
+        if (!expires_at.has_value()) {
+            throw std::invalid_argument("License expiry timestamp is invalid");
+        }
     }
 
     // Parse active_entitlements array
@@ -210,9 +375,9 @@ using nlohmann::json;
         product = parse_product(j["product"]);
     }
 
-    return License(std::move(key), status, mode, std::move(plan_key), seat_limit,
-                   active_seats, starts_at, expires_at, std::move(active_entitlements),
-                   std::move(metadata), std::move(product));
+    return License(std::move(key), status, mode, std::move(plan_key), seat_limit, active_seats,
+                   starts_at, expires_at, std::move(active_entitlements), std::move(metadata),
+                   std::move(product));
 }
 
 /// Serialize License to JSON
@@ -303,14 +468,17 @@ using nlohmann::json;
     Timestamp activated_at;
     if (j.contains("activated_at") && !j["activated_at"].is_null()) {
         auto ts = parse_timestamp(j["activated_at"].get<std::string>());
-        if (ts.has_value()) {
-            activated_at = *ts;
-        }
+        if (!ts.has_value())
+            throw std::invalid_argument("Activation timestamp is invalid");
+        activated_at = *ts;
     }
 
     std::optional<Timestamp> deactivated_at;
     if (j.contains("deactivated_at") && !j["deactivated_at"].is_null()) {
         deactivated_at = parse_timestamp(j["deactivated_at"].get<std::string>());
+        if (!deactivated_at.has_value()) {
+            throw std::invalid_argument("Deactivation timestamp is invalid");
+        }
     }
 
     std::string ip_address;
@@ -339,9 +507,9 @@ using nlohmann::json;
 
     if (j.contains("deactivated_at") && !j["deactivated_at"].is_null()) {
         auto ts = parse_timestamp(j["deactivated_at"].get<std::string>());
-        if (ts.has_value()) {
-            result.deactivated_at = *ts;
-        }
+        if (!ts.has_value())
+            throw std::invalid_argument("Deactivation timestamp is invalid");
+        result.deactivated_at = *ts;
     }
 
     return result;
@@ -442,6 +610,10 @@ using nlohmann::json;
     if (j.contains("fingerprint") && !j["fingerprint"].is_null()) {
         payload.fingerprint = j["fingerprint"].get<std::string>();
         payload.device_id = payload.fingerprint;
+        if (j.contains("device_id") && !j["device_id"].is_null() &&
+            j["device_id"].get<std::string>() != *payload.fingerprint) {
+            throw std::invalid_argument("Offline token fingerprint aliases disagree");
+        }
     } else if (j.contains("device_id") && !j["device_id"].is_null()) {
         payload.device_id = j["device_id"].get<std::string>();
         payload.fingerprint = payload.device_id;
@@ -505,6 +677,7 @@ using nlohmann::json;
 
     if (j.contains("token") && j["token"].is_object()) {
         offline.token = parse_offline_token_payload(j["token"]);
+        offline.visible_token_json = j["token"].dump();
     }
 
     if (j.contains("signature") && j["signature"].is_object()) {
@@ -524,6 +697,8 @@ using nlohmann::json;
     j["key"] = ent.key;
     if (ent.expires_at.has_value()) {
         j["expires_at"] = std::chrono::system_clock::to_time_t(*ent.expires_at);
+    } else {
+        j["expires_at"] = nullptr;
     }
     if (!ent.metadata.empty()) {
         j["metadata"] = metadata_to_json(ent.metadata);
@@ -531,44 +706,101 @@ using nlohmann::json;
     return j;
 }
 
+/// Reconstruct exactly the signed v1 token payload. Legacy aliases and outer
+/// response fields are intentionally excluded from this trust boundary.
+[[nodiscard]] inline json offline_token_payload_to_json(const OfflineTokenPayload& token) {
+    json payload;
+    payload["schema_version"] = token.schema_version;
+    payload["license_key"] = token.license_key;
+    payload["product_slug"] = token.product_slug;
+    payload["plan_key"] = token.plan_key;
+    payload["mode"] = token.mode;
+    if (token.seat_limit.has_value())
+        payload["seat_limit"] = *token.seat_limit;
+    if (token.fingerprint.has_value())
+        payload["fingerprint"] = *token.fingerprint;
+    payload["iat"] = token.iat;
+    payload["exp"] = token.exp;
+    payload["nbf"] = token.nbf;
+    if (token.license_expires_at.has_value()) {
+        payload["license_expires_at"] = *token.license_expires_at;
+    }
+    payload["kid"] = token.kid;
+    payload["entitlements"] = json::array();
+    for (const auto& entitlement : token.entitlements) {
+        payload["entitlements"].push_back(entitlement_to_json(entitlement));
+    }
+    payload["metadata"] = metadata_to_json(token.metadata);
+    return payload;
+}
+
+/// Compare the exposed C++ representation with a typed signed JSON payload.
+/// Metadata is normalized through the SDK's public string-map representation
+/// so non-string JSON values remain bound even though Metadata stores strings.
+[[nodiscard]] inline bool offline_token_payload_matches_json(const OfflineTokenPayload& token,
+                                                             const json& signed_payload) {
+    if (!signed_payload.is_object())
+        return false;
+    static const std::unordered_set<std::string> allowed = {
+        "schema_version",     "license_key", "product_slug", "plan_key", "mode",
+        "seat_limit",         "fingerprint", "iat",          "exp",      "nbf",
+        "license_expires_at", "kid",         "entitlements", "metadata"};
+    for (auto it = signed_payload.begin(); it != signed_payload.end(); ++it) {
+        if (allowed.count(it.key()) == 0)
+            return false;
+    }
+    static const std::vector<std::string> required = {
+        "schema_version", "license_key", "product_slug", "plan_key", "mode",
+        "fingerprint",    "iat",         "exp",          "nbf",      "kid",
+        "entitlements",   "metadata"};
+    for (const auto& key : required) {
+        if (!signed_payload.contains(key))
+            return false;
+    }
+
+    try {
+        const auto parsed = parse_offline_token_payload(signed_payload);
+        if (parsed.schema_version != token.schema_version ||
+            parsed.license_key != token.license_key || parsed.product_slug != token.product_slug ||
+            parsed.plan_key != token.plan_key || parsed.mode != token.mode ||
+            parsed.seat_limit != token.seat_limit || parsed.fingerprint != token.fingerprint ||
+            parsed.iat != token.iat || parsed.exp != token.exp || parsed.nbf != token.nbf ||
+            parsed.license_expires_at != token.license_expires_at || parsed.kid != token.kid ||
+            parsed.metadata != token.metadata ||
+            parsed.entitlements.size() != token.entitlements.size()) {
+            return false;
+        }
+        if (!signed_payload["entitlements"].is_array() || !signed_payload["metadata"].is_object()) {
+            return false;
+        }
+        for (std::size_t index = 0; index < token.entitlements.size(); ++index) {
+            const auto& raw = signed_payload["entitlements"][index];
+            if (!raw.is_object() || (raw.size() != 2 && raw.size() != 3) || !raw.contains("key") ||
+                !raw.contains("expires_at") || !raw["key"].is_string() ||
+                !(raw["expires_at"].is_null() || raw["expires_at"].is_number_integer()) ||
+                (raw.size() == 3 && (!raw.contains("metadata") || !raw["metadata"].is_object())) ||
+                parsed.entitlements[index].key != token.entitlements[index].key ||
+                parsed.entitlements[index].expires_at != token.entitlements[index].expires_at ||
+                parsed.entitlements[index].metadata != token.entitlements[index].metadata) {
+                return false;
+            }
+        }
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 /// Convert OfflineToken to JSON string for manual storage
 /// Use this when you need to save the offline token to your own storage system.
 [[nodiscard]] inline std::string offline_token_to_json(const OfflineToken& offline) {
     json j;
 
-    // Token payload
-    j["token"]["schema_version"] = offline.token.schema_version;
-    j["token"]["license_key"] = offline.token.license_key;
-    j["token"]["product_slug"] = offline.token.product_slug;
-    j["token"]["plan_key"] = offline.token.plan_key;
-    j["token"]["mode"] = offline.token.mode;
-    j["token"]["iat"] = offline.token.iat;
-    j["token"]["exp"] = offline.token.exp;
-    j["token"]["nbf"] = offline.token.nbf;
-    j["token"]["kid"] = offline.token.kid;
-
-    if (offline.token.seat_limit.has_value()) {
-        j["token"]["seat_limit"] = *offline.token.seat_limit;
-    }
-    if (offline.token.fingerprint.has_value()) {
-        j["token"]["fingerprint"] = *offline.token.fingerprint;
-    }
-    if (offline.token.device_id.has_value()) {
-        j["token"]["device_id"] = *offline.token.device_id;
-    }
-    if (offline.token.license_expires_at.has_value()) {
-        j["token"]["license_expires_at"] = *offline.token.license_expires_at;
-    }
-
-    // Entitlements
-    j["token"]["entitlements"] = json::array();
-    for (const auto& ent : offline.token.entitlements) {
-        j["token"]["entitlements"].push_back(entitlement_to_json(ent));
-    }
-
-    // Metadata
-    if (!offline.token.metadata.empty()) {
-        j["token"]["metadata"] = metadata_to_json(offline.token.metadata);
+    j["object"] = "offline_token";
+    if (!offline.visible_token_json.empty()) {
+        j["token"] = parse_strict(offline.visible_token_json);
+    } else {
+        j["token"] = offline_token_payload_to_json(offline.token);
     }
 
     // Signature
@@ -585,7 +817,12 @@ using nlohmann::json;
 /// Parse OfflineToken from JSON string (for manual storage)
 /// Use this when loading a previously saved offline token.
 [[nodiscard]] inline OfflineToken offline_token_from_json(const std::string& json_str) {
-    auto j = json::parse(json_str);
+    auto j = parse_strict(json_str);
+    if (!j.is_object() || j.size() != 4 || j.value("object", std::string{}) != "offline_token" ||
+        !j.contains("token") || !j["token"].is_object() || !j.contains("signature") ||
+        !j["signature"].is_object() || !j.contains("canonical") || !j["canonical"].is_string()) {
+        throw std::invalid_argument("Offline token has an invalid outer schema");
+    }
     return parse_offline_token(j);
 }
 
@@ -616,12 +853,10 @@ using nlohmann::json;
     if (data->contains("relationships") && (*data)["relationships"].is_object()) {
         const auto& relationships = (*data)["relationships"];
         if (relationships.contains("license") && relationships["license"].contains("data")) {
-            machine_file.license_key =
-                relationships["license"]["data"].value("id", std::string{});
+            machine_file.license_key = relationships["license"]["data"].value("id", std::string{});
         }
         if (relationships.contains("machine") && relationships["machine"].contains("data")) {
-            machine_file.fingerprint =
-                relationships["machine"]["data"].value("id", std::string{});
+            machine_file.fingerprint = relationships["machine"]["data"].value("id", std::string{});
         }
     }
 
@@ -630,7 +865,8 @@ using nlohmann::json;
 
 /// Parse license data embedded in a machine-file payload
 [[nodiscard]] inline License parse_machine_file_license(const json& j) {
-    const auto& attrs = j.contains("attributes") && j["attributes"].is_object() ? j["attributes"] : j;
+    const auto& attrs =
+        j.contains("attributes") && j["attributes"].is_object() ? j["attributes"] : j;
 
     std::string key = attrs.value("key", j.value("id", std::string{}));
     auto status = license_status_from_string(attrs.value("status", std::string{}));
@@ -645,11 +881,17 @@ using nlohmann::json;
     std::optional<Timestamp> starts_at;
     if (attrs.contains("starts_at") && !attrs["starts_at"].is_null()) {
         starts_at = parse_timestamp(attrs["starts_at"].get<std::string>());
+        if (!starts_at.has_value()) {
+            throw std::invalid_argument("Embedded license start timestamp is invalid");
+        }
     }
 
     std::optional<Timestamp> expires_at;
     if (attrs.contains("ends_at") && !attrs["ends_at"].is_null()) {
         expires_at = parse_timestamp(attrs["ends_at"].get<std::string>());
+        if (!expires_at.has_value()) {
+            throw std::invalid_argument("Embedded license expiry timestamp is invalid");
+        }
     }
 
     std::vector<Entitlement> entitlements;
@@ -715,6 +957,14 @@ using nlohmann::json;
             }
             if (attrs.contains("metadata") && attrs["metadata"].is_object()) {
                 payload.metadata = parse_metadata(attrs["metadata"]);
+            }
+        }
+        if (data.contains("relationships") && data["relationships"].is_object()) {
+            const auto& relationships = data["relationships"];
+            if (relationships.contains("product") && relationships["product"].is_object() &&
+                relationships["product"].contains("data") &&
+                relationships["product"]["data"].is_object()) {
+                payload.product_slug = relationships["product"]["data"].value("id", std::string{});
             }
         }
     }
@@ -822,7 +1072,8 @@ struct ApiError {
 
 /// Parse error response from JSON (new API format)
 /// New format: {"error": {"code": "...", "message": "...", "details": {...}}}
-/// Machine-file endpoints may also return: {"errors": [{"code": "...", "title": "...", "detail": "..."}]}
+/// Machine-file endpoints may also return: {"errors": [{"code": "...", "title": "...", "detail":
+/// "..."}]}
 [[nodiscard]] inline ApiError parse_error_response(const json& j) {
     ApiError err;
 
@@ -957,8 +1208,7 @@ struct ApiError {
 }
 
 /// Build JSON body for offline token request (new API format)
-[[nodiscard]] inline json build_offline_token_request(const std::string& device_id,
-                                                      int ttl_days) {
+[[nodiscard]] inline json build_offline_token_request(const std::string& device_id, int ttl_days) {
     json body = fingerprint_alias_payload(device_id);
     if (ttl_days > 0) {
         body["ttl_days"] = ttl_days;
@@ -967,8 +1217,7 @@ struct ApiError {
 }
 
 /// Build JSON body for machine-file request
-[[nodiscard]] inline json build_machine_file_request(const std::string& device_id,
-                                                     int ttl_days,
+[[nodiscard]] inline json build_machine_file_request(const std::string& device_id, int ttl_days,
                                                      const Metadata& fingerprint_components = {}) {
     json body = fingerprint_alias_payload(device_id);
     if (ttl_days > 0) {
@@ -992,5 +1241,5 @@ struct ApiError {
     return body;
 }
 
-}  // namespace json
-}  // namespace licenseseat
+} // namespace json
+} // namespace licenseseat

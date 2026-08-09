@@ -235,6 +235,7 @@ The single-header still requires two external header-only libraries plus OpenSSL
 - **[nlohmann/json](https://github.com/nlohmann/json)** – JSON parsing (single header)
 - **[cpp-httplib](https://github.com/yhirose/cpp-httplib)** – HTTP client (single header, optional for offline-only)
 - **OpenSSL** – required for HTTPS and machine-file AES-256-GCM verification in the full SDK path
+- **macOS Security.framework** – used by cpp-httplib to load trusted roots from the system Keychain
 
 The only zero-OpenSSL path in this repo is the dedicated JUCE standalone helper above. The full/amalgamated SDK now requires OpenSSL for machine files.
 
@@ -283,11 +284,14 @@ sudo cmake --install build
 **Bundled (no installation needed):**
 - nlohmann/json – JSON parsing
 - cpp-httplib – HTTP client
-- ed25519 – Cryptographic signatures
 - PicoSHA2 – SHA-256 hashing
 
 **External (the only thing you need to install):**
-- OpenSSL – for HTTPS and machine-file AES-256-GCM verification
+- OpenSSL – for HTTPS, Ed25519 verification, and machine-file AES-256-GCM
+
+On macOS, direct single-header consumers must also link `Security.framework` so
+HTTPS verification can use trusted roots from the system Keychain. The CMake
+target supplies this framework automatically.
 
 ```bash
 # Ubuntu/Debian
@@ -504,6 +508,7 @@ config.device_id = "";  // Legacy config name; auto-generates the device fingerp
 
 // Optional - Offline support
 config.signing_public_key = "base64-ed25519-public-key";  // Pre-configure for offline
+config.offline_fallback_mode = licenseseat::OfflineFallbackMode::NetworkOnly;
 config.max_offline_days = 30;
 
 // Optional - Caching
@@ -532,7 +537,8 @@ config.app_build = "142";         // Included in telemetry
 | `max_retries`            | int    | `3`                                | Retry attempts for failed requests                 |
 | `device_id`              | string | `""`                               | Device fingerprint (legacy config name, auto-generated if empty) |
 | `signing_public_key`     | string | `""`                               | Ed25519 public key for machine files and legacy offline tokens |
-| `max_offline_days`       | int    | `0`                                | Local offline restore limit in days (0 = disabled/unlimited) |
+| `offline_fallback_mode`  | enum   | `Disabled`                         | Explicitly enable transport-error fallback with `NetworkOnly` |
+| `max_offline_days`       | int    | `0`                                | Local offline restore limit in days (`0` disables offline authority) |
 | `storage_path`           | string | `""`                               | Path for license cache (empty = no persistence)    |
 | `auto_validate_interval` | double | `3600.0`                           | Seconds between auto-validation cycles             |
 | `telemetry_enabled`      | bool   | `true`                             | Enable anonymous telemetry collection              |
@@ -888,6 +894,7 @@ licenseseat::Config config;
 config.api_key = "your-api-key";
 config.product_slug = "your-product";
 config.signing_public_key = "MCowBQYDK2VwAyEA...";  // Your public key
+config.offline_fallback_mode = licenseseat::OfflineFallbackMode::NetworkOnly;
 config.max_offline_days = 30;
 
 licenseseat::Client client(config);
@@ -1220,7 +1227,6 @@ licenseseat-cpp/
 ├── include/licenseseat/     # Public headers
 ├── src/                     # Implementation
 ├── deps/                    # Vendored dependencies
-│   ├── ed25519/            # Ed25519 signatures
 │   ├── nlohmann/           # JSON parser
 │   ├── httplib/            # HTTP client
 │   └── PicoSHA2/           # SHA-256 (header-only)

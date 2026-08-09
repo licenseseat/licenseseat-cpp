@@ -3,7 +3,7 @@
     "Version": 1,
     "VersionName": "0.5.1",
     "FriendlyName": "LicenseSeat",
-    "Description": "License management SDK for games and applications. Validate licenses, manage activations, and handle offline scenarios.",
+    "Description": "Online license validation and activation for Unreal Engine applications.",
     "Category": "Licensing",
     "CreatedBy": "LicenseSeat",
     "CreatedByURL": "https://licenseseat.com",

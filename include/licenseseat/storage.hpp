@@ -97,7 +97,8 @@ class FileStorage : public StorageInterface {
      * @param storage_path Directory path for storage
      * @param prefix Optional prefix for file names
      */
-    explicit FileStorage(const std::string& storage_path, const std::string& prefix = "licenseseat");
+    explicit FileStorage(const std::string& storage_path,
+                         const std::string& prefix = "licenseseat");
 
     bool set_license(const CachedLicense& license) override;
     std::optional<CachedLicense> get_license() override;
@@ -132,6 +133,8 @@ class FileStorage : public StorageInterface {
 
     std::filesystem::path storage_path_;
     std::string prefix_;
+    // Serializes mutations on every platform and same-instance reads on
+    // Windows. POSIX reads use atomic file snapshots without holding it.
     mutable std::mutex mutex_;
 };
 
@@ -169,4 +172,4 @@ class MemoryStorage : public StorageInterface {
     mutable std::mutex mutex_;
 };
 
-}  // namespace licenseseat
+} // namespace licenseseat

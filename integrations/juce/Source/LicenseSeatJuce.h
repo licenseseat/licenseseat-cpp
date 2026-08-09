@@ -1,227 +1,215 @@
 /*
  * LicenseSeat JUCE Integration Helper
  *
- * A convenience wrapper for using LicenseSeat in JUCE audio plugins.
- * Thread-safe, async-first design for audio plugin requirements.
- *
- * Usage:
- *   LicenseSeatJuce license("your-api-key", "your-product");
- *   license.validateAsync("LICENSE-KEY", [](bool valid) { ... });
- *   if (license.isValid()) { // Allow full features }
+ * A lifetime-safe adapter around the hardened LicenseSeat C++ client. Network
+ * work runs on the core client's managed workers and user callbacks are
+ * marshalled to JUCE's message thread.
  */
 
 #pragma once
 
-#include <JuceHeader.h>
 #include "licenseseat/licenseseat.hpp"
-#include <memory>
+
+#include <JuceHeader.h>
 #include <atomic>
 #include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
 
-class LicenseSeatJuce
-{
-public:
+class LicenseSeatJuce {
+  private:
+    struct SharedState {
+        explicit SharedState(licenseseat::Config config) : client(std::move(config)) {}
+
+        licenseseat::Client client;
+        std::atomic<bool> valid{false};
+        std::atomic<bool> shuttingDown{false};
+        mutable std::mutex mutex;
+        std::string currentLicenseKey;
+    };
+
+  public:
     using ValidationCallback = std::function<void(bool valid, const juce::String& message)>;
     using ActivationCallback = std::function<void(bool success, const juce::String& message)>;
 
-    /**
-     * Create a license manager
-     * @param apiKey Your LicenseSeat API key
-     * @param productSlug Your product identifier
-     * @param apiUrl Optional custom API URL
-     */
-    LicenseSeatJuce(const juce::String& apiKey,
-                    const juce::String& productSlug,
-                    const juce::String& apiUrl = "https://licenseseat.com/api/v1")
-    {
+    LicenseSeatJuce(const juce::String& apiKey, const juce::String& productSlug,
+                    const juce::String& apiUrl = "https://licenseseat.com/api/v1") {
         licenseseat::Config config;
         config.api_key = apiKey.toStdString();
         config.product_slug = productSlug.toStdString();
         config.api_url = apiUrl.toStdString();
         config.timeout_seconds = 10;
         config.max_retries = 1;
-
-        client = std::make_unique<licenseseat::Client>(config);
+        state = std::make_shared<SharedState>(std::move(config));
     }
 
-    ~LicenseSeatJuce() = default;
+    ~LicenseSeatJuce() {
+        auto current = std::move(state);
+        if (current != nullptr)
+            current->shuttingDown.store(true, std::memory_order_release);
+    }
 
-    // Non-copyable
     LicenseSeatJuce(const LicenseSeatJuce&) = delete;
     LicenseSeatJuce& operator=(const LicenseSeatJuce&) = delete;
+    LicenseSeatJuce(LicenseSeatJuce&&) = delete;
+    LicenseSeatJuce& operator=(LicenseSeatJuce&&) = delete;
 
-    /**
-     * Check if license is currently valid (cached result)
-     * Safe to call from audio thread
-     */
-    bool isValid() const noexcept
-    {
-        return valid.load(std::memory_order_relaxed);
+    /** Lock-free cached status; safe to call from the audio thread. */
+    bool isValid() const noexcept {
+        const auto current = state;
+        return current != nullptr && current->valid.load(std::memory_order_acquire);
     }
 
-    /**
-     * Get the current license key
-     */
-    juce::String getLicenseKey() const
-    {
-        return juce::String(currentLicenseKey);
+    juce::String getLicenseKey() const {
+        const auto current = state;
+        if (current == nullptr)
+            return {};
+        const std::lock_guard<std::mutex> lock(current->mutex);
+        return juce::String(current->currentLicenseKey);
     }
 
-    /**
-     * Get the current device fingerprint
-     */
-    juce::String getDeviceId() const
-    {
-        return juce::String(client->fingerprint());
+    juce::String getDeviceId() const {
+        const auto current = state;
+        return current == nullptr ? juce::String{} : juce::String(current->client.fingerprint());
     }
 
-    /**
-     * Validate a license key asynchronously
-     * Callback will be invoked on the message thread
-     */
-    void validateAsync(const juce::String& licenseKey, ValidationCallback callback)
-    {
-        auto keyStr = licenseKey.toStdString();
+    void validateAsync(const juce::String& licenseKey, ValidationCallback callback) {
+        const auto current = state;
+        if (current == nullptr || current->shuttingDown.load(std::memory_order_acquire))
+            return;
+        const auto key = licenseKey.toStdString();
+        const std::weak_ptr<SharedState> weakState = current;
 
-        // Run in background thread
-        std::thread([this, keyStr, callback]()
-        {
-            auto result = client->validate(keyStr);
+        current->client.validate_async(
+            key, [current, weakState, key, callback = std::move(callback)](
+                     licenseseat::Result<licenseseat::ValidationResult> result) mutable {
+                const bool isValid = result.is_ok() && result.value().valid;
+                juce::String message;
+                if (result.is_error())
+                    message = juce::String(result.error_message());
+                else if (!result.value().valid)
+                    message = juce::String(result.value().message.empty() ? result.value().code
+                                                                          : result.value().message);
+                else
+                    message = "License validated successfully";
 
-            bool isValid = result.is_ok() && result.value().valid;
-            juce::String message;
-
-            if (result.is_error())
-            {
-                message = juce::String(result.error_message());
-            }
-            else if (!result.value().valid)
-            {
-                message = juce::String(result.value().reason);
-            }
-            else
-            {
-                message = "License validated successfully";
-                currentLicenseKey = keyStr;
-            }
-
-            valid.store(isValid, std::memory_order_relaxed);
-
-            // Callback on message thread
-            juce::MessageManager::callAsync([callback, isValid, message]()
-            {
-                if (callback)
-                    callback(isValid, message);
+                if (isValid) {
+                    const std::lock_guard<std::mutex> lock(current->mutex);
+                    current->currentLicenseKey = key;
+                }
+                current->valid.store(isValid, std::memory_order_release);
+                postValidationCallback(weakState, std::move(callback), isValid, message);
             });
-        }).detach();
     }
 
-    /**
-     * Activate a license key asynchronously
-     * Callback will be invoked on the message thread
-     */
-    void activateAsync(const juce::String& licenseKey, ActivationCallback callback)
-    {
-        auto keyStr = licenseKey.toStdString();
+    void activateAsync(const juce::String& licenseKey, ActivationCallback callback) {
+        const auto current = state;
+        if (current == nullptr || current->shuttingDown.load(std::memory_order_acquire))
+            return;
+        const auto key = licenseKey.toStdString();
+        const std::weak_ptr<SharedState> weakState = current;
 
-        std::thread([this, keyStr, callback]()
-        {
-            auto result = client->activate(keyStr);
+        current->client.activate_async(
+            key, [current, weakState, key, callback = std::move(callback)](
+                     licenseseat::Result<licenseseat::Activation> result) mutable {
+                if (result.is_error()) {
+                    postActivationCallback(weakState, std::move(callback), false,
+                                           juce::String(result.error_message()));
+                    return;
+                }
 
-            bool success = result.is_ok();
-            juce::String message;
-
-            if (result.is_error())
-            {
-                message = juce::String(result.error_message());
-            }
-            else
-            {
-                message = "Activation successful";
-                currentLicenseKey = keyStr;
-
-                // Also validate after activation
-                auto validateResult = client->validate(keyStr);
-                valid.store(validateResult.is_ok() && validateResult.value().valid,
-                           std::memory_order_relaxed);
-            }
-
-            juce::MessageManager::callAsync([callback, success, message]()
-            {
-                if (callback)
-                    callback(success, message);
-            });
-        }).detach();
-    }
-
-    /**
-     * Deactivate the current license asynchronously
-     */
-    void deactivateAsync(ActivationCallback callback)
-    {
-        if (currentLicenseKey.empty())
-        {
-            if (callback)
-            {
-                juce::MessageManager::callAsync([callback]()
                 {
-                    callback(false, "No license to deactivate");
-                });
-            }
+                    const std::lock_guard<std::mutex> lock(current->mutex);
+                    current->currentLicenseKey = key;
+                }
+                current->client.validate_async(
+                    key,
+                    [current, weakState, callback = std::move(callback)](
+                        licenseseat::Result<licenseseat::ValidationResult> validation) mutable {
+                        const bool valid = validation.is_ok() && validation.value().valid;
+                        current->valid.store(valid, std::memory_order_release);
+                        const juce::String message =
+                            valid
+                                ? juce::String("Activation successful")
+                                : juce::String(validation.is_error() ? validation.error_message()
+                                                                     : validation.value().message);
+                        postActivationCallback(weakState, std::move(callback), valid, message);
+                    });
+            });
+    }
+
+    void deactivateAsync(ActivationCallback callback) {
+        const auto current = state;
+        if (current == nullptr || current->shuttingDown.load(std::memory_order_acquire))
+            return;
+
+        std::string key;
+        {
+            const std::lock_guard<std::mutex> lock(current->mutex);
+            key = current->currentLicenseKey;
+        }
+        const std::weak_ptr<SharedState> weakState = current;
+        if (key.empty()) {
+            postActivationCallback(weakState, std::move(callback), false,
+                                   "No license to deactivate");
             return;
         }
 
-        auto keyStr = currentLicenseKey;
-
-        std::thread([this, keyStr, callback]()
-        {
-            auto result = client->deactivate(keyStr);
-
-            bool success = result.is_ok();
-            juce::String message;
-
-            if (result.is_error())
-            {
-                message = juce::String(result.error_message());
-            }
-            else
-            {
-                message = "Deactivation successful";
-                currentLicenseKey.clear();
-                valid.store(false, std::memory_order_relaxed);
-            }
-
-            juce::MessageManager::callAsync([callback, success, message]()
-            {
-                if (callback)
-                    callback(success, message);
-            });
-        }).detach();
+        const auto fingerprint = current->client.fingerprint();
+        current->client.deactivate_async(
+            key,
+            [current, weakState, callback = std::move(callback)](
+                licenseseat::Result<licenseseat::Deactivation> result) mutable {
+                const bool success = result.is_ok();
+                if (success) {
+                    const std::lock_guard<std::mutex> lock(current->mutex);
+                    current->currentLicenseKey.clear();
+                    current->valid.store(false, std::memory_order_release);
+                }
+                postActivationCallback(weakState, std::move(callback), success,
+                                       success ? juce::String("Deactivation successful")
+                                               : juce::String(result.error_message()));
+            },
+            fingerprint);
     }
 
-    /**
-     * Reset the license state
-     */
-    void reset()
-    {
-        client->reset();
-        valid.store(false, std::memory_order_relaxed);
-        currentLicenseKey.clear();
+    void reset() {
+        const auto current = state;
+        if (current == nullptr)
+            return;
+        current->client.reset();
+        current->valid.store(false, std::memory_order_release);
+        const std::lock_guard<std::mutex> lock(current->mutex);
+        current->currentLicenseKey.clear();
     }
 
-    /**
-     * Set offline public key for signature verification
-     */
-    void setOfflinePublicKey(const juce::String& publicKeyBase64)
-    {
-        // Note: This would need to be set in config before client creation
-        // For now, store for reference
-        offlinePublicKey = publicKeyBase64.toStdString();
+  private:
+    static void postValidationCallback(const std::weak_ptr<SharedState>& weakState,
+                                       ValidationCallback callback, bool valid,
+                                       juce::String message) {
+        if (!callback)
+            return;
+        juce::MessageManager::callAsync([weakState, callback = std::move(callback), valid,
+                                         message = std::move(message)]() mutable {
+            const auto current = weakState.lock();
+            if (current != nullptr && !current->shuttingDown.load(std::memory_order_acquire))
+                callback(valid, message);
+        });
     }
 
-private:
-    std::unique_ptr<licenseseat::Client> client;
-    std::atomic<bool> valid{false};
-    std::string currentLicenseKey;
-    std::string offlinePublicKey;
+    static void postActivationCallback(const std::weak_ptr<SharedState>& weakState,
+                                       ActivationCallback callback, bool success,
+                                       juce::String message) {
+        if (!callback)
+            return;
+        juce::MessageManager::callAsync([weakState, callback = std::move(callback), success,
+                                         message = std::move(message)]() mutable {
+            const auto current = weakState.lock();
+            if (current != nullptr && !current->shuttingDown.load(std::memory_order_acquire))
+                callback(success, message);
+        });
+    }
+
+    std::shared_ptr<SharedState> state;
 };

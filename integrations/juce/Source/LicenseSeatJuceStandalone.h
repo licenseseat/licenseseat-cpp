@@ -1,50 +1,29 @@
 /*
- * LicenseSeat JUCE Standalone Integration
+ * LicenseSeat JUCE Compatibility Adapter
  *
- * ZERO EXTERNAL DEPENDENCIES - Uses only JUCE's native HTTP and JSON.
- * No cpp-httplib, no OpenSSL, no nlohmann/json required.
+ * This adapter intentionally delegates protocol, HTTP, JSON, storage, and
+ * cryptographic decisions to the hardened LicenseSeat C++ client. The earlier
+ * JUCE-only implementation duplicated those security boundaries and could not
+ * safely enforce response limits, duplicate-key rejection, redirect policy,
+ * or object lifetime during detached network work.
  *
- * For offline verification, copy the ed25519 and PicoSHA2 deps to your project
- * and define LICENSESEAT_JUCE_OFFLINE_SUPPORT.
- *
- * Thread-safe, async-first design for audio plugin requirements.
- *
- * Usage:
- *   LicenseSeatJuceStandalone license("your-api-key", "your-product");
- *   license.validateAsync("LICENSE-KEY", [](bool valid, auto& msg) { ... });
- *   if (license.isValid()) { // Safe to call from audio thread }
+ * Existing JUCE-facing types are retained, but linking the LicenseSeat core
+ * library (and therefore OpenSSL) is now required.
  */
 
 #pragma once
+
+#include "licenseseat/licenseseat.hpp"
 
 #include <JuceHeader.h>
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <utility>
 
-#if defined(LICENSESEAT_JUCE_OFFLINE_SUPPORT)
-// Include vendored crypto for offline license verification
-JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE("-Wsign-conversion", "-Wconversion", "-Wshorten-64-to-32")
-extern "C" {
-#include "ed25519/ed25519.h"
-}
-#include "PicoSHA2/picosha2.h"
-JUCE_END_IGNORE_WARNINGS_GCC_LIKE
-#endif
-
-/**
- * Standalone JUCE license manager with ZERO external dependencies.
- * Uses juce::URL for HTTP and juce::JSON for parsing.
- */
-class LicenseSeatJuceStandalone
-{
-public:
-    //==========================================================================
-    // Types
-    //==========================================================================
-
-    struct ValidationResult
-    {
+class LicenseSeatJuceStandalone {
+  public:
+    struct ValidationResult {
         bool valid = false;
         juce::String reason;
         juce::String licensee;
@@ -53,8 +32,7 @@ public:
         juce::StringArray entitlements;
     };
 
-    struct ActivationResult
-    {
+    struct ActivationResult {
         bool success = false;
         juce::String message;
         juce::String activationId;
@@ -66,703 +44,349 @@ public:
     using ActivationCallback = std::function<void(const ActivationResult& result)>;
     using SimpleCallback = std::function<void(bool success, const juce::String& message)>;
 
-    //==========================================================================
-    // Configuration
-    //==========================================================================
-
-    struct Config
-    {
+    struct Config {
         juce::String apiKey;
         juce::String productSlug;
         juce::String apiUrl = "https://licenseseat.com/api/v1";
         int timeoutMs = 10000;
         int maxRetries = 1;
-
-        // Offline support (requires LICENSESEAT_JUCE_OFFLINE_SUPPORT)
         juce::String offlinePublicKeyBase64;
-        int maxOfflineDays = 30;
+        int maxOfflineDays = 0;
+        juce::String storagePath;
+        bool allowInsecureLoopback = false;
     };
 
-    //==========================================================================
-    // Constructor / Destructor
-    //==========================================================================
+  private:
+    struct SharedState {
+        explicit SharedState(const Config& config) : client(makeCoreConfig(config)) {}
 
-    explicit LicenseSeatJuceStandalone(const Config& config)
-        : cfg(config)
-    {
-        jassert(cfg.apiKey.isNotEmpty());
-        jassert(cfg.productSlug.isNotEmpty());
-
-        deviceId = generateDeviceId();
-    }
-
-    LicenseSeatJuceStandalone(const juce::String& apiKey,
-                              const juce::String& productSlug,
-                              const juce::String& apiUrl = "https://licenseseat.com/api/v1")
-    {
-        cfg.apiKey = apiKey;
-        cfg.productSlug = productSlug;
-        cfg.apiUrl = apiUrl;
-        deviceId = generateDeviceId();
-    }
-
-    ~LicenseSeatJuceStandalone() = default;
-
-    // Non-copyable, movable
-    LicenseSeatJuceStandalone(const LicenseSeatJuceStandalone&) = delete;
-    LicenseSeatJuceStandalone& operator=(const LicenseSeatJuceStandalone&) = delete;
-    LicenseSeatJuceStandalone(LicenseSeatJuceStandalone&&) = default;
-    LicenseSeatJuceStandalone& operator=(LicenseSeatJuceStandalone&&) = default;
-
-    //==========================================================================
-    // Thread-Safe Status (safe to call from audio thread)
-    //==========================================================================
-
-    /** Check if license is currently valid. Safe for audio thread. */
-    bool isValid() const noexcept
-    {
-        return validFlag.load(std::memory_order_relaxed);
-    }
-
-    /** Get the device fingerprint (legacy API name). */
-    juce::String getDeviceId() const
-    {
-        return deviceId;
-    }
-
-    /** Get the current license key. */
-    juce::String getLicenseKey() const
-    {
-        const juce::ScopedReadLock lock(stateLock);
-        return currentLicenseKey;
-    }
-
-    /** Get cached validation result. */
-    ValidationResult getCachedResult() const
-    {
-        const juce::ScopedReadLock lock(stateLock);
-        return cachedResult;
-    }
-
-    //==========================================================================
-    // Async API (recommended)
-    //==========================================================================
-
-    /**
-     * Validate a license key asynchronously.
-     * Callback is invoked on the message thread.
-     */
-    void validateAsync(const juce::String& licenseKey, ValidationCallback callback)
-    {
-        auto* task = new ValidationTask(*this, licenseKey, std::move(callback));
-        task->runThread();
-    }
-
-    /**
-     * Activate a license key asynchronously.
-     * Callback is invoked on the message thread.
-     */
-    void activateAsync(const juce::String& licenseKey, ActivationCallback callback)
-    {
-        auto* task = new ActivationTask(*this, licenseKey, std::move(callback));
-        task->runThread();
-    }
-
-    /**
-     * Deactivate the current license asynchronously.
-     */
-    void deactivateAsync(SimpleCallback callback)
-    {
-        juce::String key;
-        {
-            const juce::ScopedReadLock lock(stateLock);
-            key = currentLicenseKey;
+        static licenseseat::Config makeCoreConfig(const Config& source) {
+            licenseseat::Config result;
+            result.api_key = source.apiKey.toStdString();
+            result.product_slug = source.productSlug.toStdString();
+            result.api_url = source.apiUrl.toStdString();
+            result.device_id = generateDeviceId().toStdString();
+            result.timeout_seconds =
+                source.timeoutMs > 0 ? (source.timeoutMs + 999) / 1000 : source.timeoutMs;
+            result.max_retries = source.maxRetries;
+            result.signing_public_key = source.offlinePublicKeyBase64.toStdString();
+            result.max_offline_days = source.maxOfflineDays;
+            result.offline_fallback_mode =
+                source.maxOfflineDays > 0 ? licenseseat::OfflineFallbackMode::NetworkOnly
+                                          : licenseseat::OfflineFallbackMode::Disabled;
+            result.storage_path = source.storagePath.toStdString();
+            result.allow_insecure_http = source.allowInsecureLoopback;
+            return result;
         }
 
-        if (key.isEmpty())
+        licenseseat::Client client;
+        mutable juce::ReadWriteLock stateLock;
+        juce::String currentLicenseKey;
+        ValidationResult cachedResult;
+        std::atomic<bool> valid{false};
+        std::atomic<bool> shuttingDown{false};
+    };
+
+  public:
+    explicit LicenseSeatJuceStandalone(const Config& config)
+        : state(std::make_shared<SharedState>(config)) {}
+
+    LicenseSeatJuceStandalone(const juce::String& apiKey, const juce::String& productSlug,
+                              const juce::String& apiUrl = "https://licenseseat.com/api/v1") {
+        Config config;
+        config.apiKey = apiKey;
+        config.productSlug = productSlug;
+        config.apiUrl = apiUrl;
+        state = std::make_shared<SharedState>(config);
+    }
+
+    ~LicenseSeatJuceStandalone() {
+        auto current = std::move(state);
+        if (current != nullptr)
+            current->shuttingDown.store(true, std::memory_order_release);
+    }
+
+    LicenseSeatJuceStandalone(const LicenseSeatJuceStandalone&) = delete;
+    LicenseSeatJuceStandalone& operator=(const LicenseSeatJuceStandalone&) = delete;
+    LicenseSeatJuceStandalone(LicenseSeatJuceStandalone&&) = delete;
+    LicenseSeatJuceStandalone& operator=(LicenseSeatJuceStandalone&&) = delete;
+
+    bool isValid() const noexcept {
+        const auto current = state;
+        return current != nullptr && current->valid.load(std::memory_order_acquire);
+    }
+
+    juce::String getDeviceId() const {
+        const auto current = state;
+        return current == nullptr ? juce::String{} : juce::String(current->client.fingerprint());
+    }
+
+    juce::String getLicenseKey() const {
+        const auto current = state;
+        if (current == nullptr)
+            return {};
+        const juce::ScopedReadLock lock(current->stateLock);
+        return current->currentLicenseKey;
+    }
+
+    ValidationResult getCachedResult() const {
+        const auto current = state;
+        if (current == nullptr)
+            return {};
+        const juce::ScopedReadLock lock(current->stateLock);
+        return current->cachedResult;
+    }
+
+    void validateAsync(const juce::String& licenseKey, ValidationCallback callback) {
+        const auto current = state;
+        if (!canStart(current))
+            return;
+        const auto key = licenseKey.toStdString();
+        const std::weak_ptr<SharedState> weakState = current;
+        current->client.validate_async(
+            key, [current, weakState, key, callback = std::move(callback)](
+                     licenseseat::Result<licenseseat::ValidationResult> result) mutable {
+                auto converted = applyValidation(current, key, result);
+                postValidation(weakState, std::move(callback), std::move(converted));
+            });
+    }
+
+    void activateAsync(const juce::String& licenseKey, ActivationCallback callback) {
+        const auto current = state;
+        if (!canStart(current))
+            return;
+        const auto key = licenseKey.toStdString();
+        const std::weak_ptr<SharedState> weakState = current;
+        current->client.activate_async(
+            key, [current, weakState, key, callback = std::move(callback)](
+                     licenseseat::Result<licenseseat::Activation> activation) mutable {
+                if (activation.is_error()) {
+                    ActivationResult converted;
+                    converted.message = juce::String(activation.error_message());
+                    postActivation(weakState, std::move(callback), std::move(converted));
+                    return;
+                }
+
+                const auto activationId = activation.value().id();
+                current->client.validate_async(
+                    key,
+                    [current, weakState, activationId, callback = std::move(callback),
+                     key](licenseseat::Result<licenseseat::ValidationResult> validation) mutable {
+                        const auto convertedValidation = applyValidation(current, key, validation);
+                        ActivationResult converted;
+                        converted.success = convertedValidation.valid;
+                        converted.message = converted.success
+                                                ? juce::String("Activation successful")
+                                                : convertedValidation.reason;
+                        converted.activationId = juce::String(activationId);
+                        populateSeats(current, converted);
+                        postActivation(weakState, std::move(callback), std::move(converted));
+                    });
+            });
+    }
+
+    void deactivateAsync(SimpleCallback callback) {
+        const auto current = state;
+        if (!canStart(current))
+            return;
+        juce::String key;
         {
-            if (callback)
-            {
-                juce::MessageManager::callAsync([callback]()
-                {
-                    callback(false, "No license to deactivate");
-                });
-            }
+            const juce::ScopedReadLock lock(current->stateLock);
+            key = current->currentLicenseKey;
+        }
+        const std::weak_ptr<SharedState> weakState = current;
+        if (key.isEmpty()) {
+            postSimple(weakState, std::move(callback), false, "No license to deactivate");
             return;
         }
 
-        auto* task = new DeactivationTask(*this, key, std::move(callback));
-        task->runThread();
+        const auto fingerprint = current->client.fingerprint();
+        current->client.deactivate_async(
+            key.toStdString(),
+            [current, weakState, callback = std::move(callback)](
+                licenseseat::Result<licenseseat::Deactivation> result) mutable {
+                const bool success = result.is_ok();
+                if (success)
+                    clearState(current);
+                postSimple(weakState, std::move(callback), success,
+                           success ? juce::String("Deactivation successful")
+                                   : juce::String(result.error_message()));
+            },
+            fingerprint);
     }
 
-    /**
-     * Check entitlement asynchronously.
-     */
-    void checkEntitlementAsync(const juce::String& licenseKey,
-                                const juce::String& entitlementKey,
-                                SimpleCallback callback)
-    {
-        auto* task = new EntitlementTask(*this, licenseKey, entitlementKey, std::move(callback));
-        task->runThread();
+    void checkEntitlementAsync(const juce::String& licenseKey, const juce::String& entitlementKey,
+                               SimpleCallback callback) {
+        const auto current = state;
+        if (!canStart(current))
+            return;
+        const auto key = licenseKey.toStdString();
+        const auto entitlement = entitlementKey.toStdString();
+        const std::weak_ptr<SharedState> weakState = current;
+        current->client.validate_async(
+            key, [current, weakState, key, entitlement, callback = std::move(callback)](
+                     licenseseat::Result<licenseseat::ValidationResult> result) mutable {
+                const auto converted = applyValidation(current, key, result);
+                bool granted = false;
+                if (result.is_ok() && result.value().valid) {
+                    for (const auto& item : result.value().license.active_entitlements()) {
+                        if (item.key == entitlement) {
+                            granted = true;
+                            break;
+                        }
+                    }
+                }
+                postSimple(weakState, std::move(callback), granted,
+                           granted ? juce::String("Entitlement granted")
+                                   : (converted.reason.isNotEmpty()
+                                          ? converted.reason
+                                          : juce::String("Entitlement not available")));
+            });
     }
 
-    //==========================================================================
-    // Sync API (use sparingly - blocks calling thread!)
-    //==========================================================================
-
-    /** Validate synchronously. WARNING: Blocks! */
-    ValidationResult validate(const juce::String& licenseKey)
-    {
-        return performValidation(licenseKey);
+    ValidationResult validate(const juce::String& licenseKey) {
+        const auto current = state;
+        if (!canStart(current))
+            return {};
+        const auto key = licenseKey.toStdString();
+        return applyValidation(current, key, current->client.validate(key));
     }
 
-    /** Activate synchronously. WARNING: Blocks! */
-    ActivationResult activate(const juce::String& licenseKey)
-    {
-        return performActivation(licenseKey);
+    ActivationResult activate(const juce::String& licenseKey) {
+        const auto current = state;
+        ActivationResult converted;
+        if (!canStart(current))
+            return converted;
+        const auto key = licenseKey.toStdString();
+        const auto activation = current->client.activate(key);
+        if (activation.is_error()) {
+            converted.message = juce::String(activation.error_message());
+            return converted;
+        }
+
+        const auto validation = applyValidation(current, key, current->client.validate(key));
+        converted.success = validation.valid;
+        converted.message =
+            converted.success ? juce::String("Activation successful") : validation.reason;
+        converted.activationId = juce::String(activation.value().id());
+        populateSeats(current, converted);
+        return converted;
     }
 
-    //==========================================================================
-    // State Management
-    //==========================================================================
-
-    /** Reset all license state. */
-    void reset()
-    {
-        const juce::ScopedWriteLock lock(stateLock);
-        currentLicenseKey.clear();
-        cachedResult = ValidationResult();
-        validFlag.store(false, std::memory_order_relaxed);
+    void reset() {
+        const auto current = state;
+        if (current == nullptr)
+            return;
+        current->client.reset();
+        clearState(current);
     }
 
-private:
-    //==========================================================================
-    // Internal Implementation
-    //==========================================================================
+  private:
+    static bool canStart(const std::shared_ptr<SharedState>& current) {
+        return current != nullptr && !current->shuttingDown.load(std::memory_order_acquire);
+    }
 
-    Config cfg;
-    juce::String deviceId;
-
-    mutable juce::ReadWriteLock stateLock;
-    juce::String currentLicenseKey;
-    ValidationResult cachedResult;
-    std::atomic<bool> validFlag{false};
-
-    //--------------------------------------------------------------------------
-    // Device ID Generation
-    //--------------------------------------------------------------------------
-
-    static juce::String generateDeviceId()
-    {
-        // Use JUCE's machine identifiers for cross-platform device ID
+    static juce::String generateDeviceId() {
         juce::Array<juce::MACAddress> macs;
         juce::MACAddress::findAllAddresses(macs);
-
-        juce::String combined;
-
-        // Add machine-specific info
-        #if JUCE_MAC
-        // Use IOPlatformUUID on macOS
-        combined = juce::SystemStats::getComputerName() + "_mac_";
-        #elif JUCE_WINDOWS
-        combined = juce::SystemStats::getComputerName() + "_win_";
-        #else
-        combined = juce::SystemStats::getComputerName() + "_linux_";
-        #endif
-
-        // Add first MAC address if available
+        juce::String combined = juce::SystemStats::getComputerName();
+#if JUCE_MAC
+        combined += "_mac_";
+#elif JUCE_WINDOWS
+        combined += "_win_";
+#else
+        combined += "_linux_";
+#endif
         if (!macs.isEmpty())
             combined += macs[0].toString().removeCharacters(":-");
-
-        // Add unique device strings from JUCE
-        auto deviceStrings = juce::SystemStats::getDeviceIdentifiers();
-        for (const auto& s : deviceStrings)
-            combined += s;
-
-        // Hash to fixed-length ID
+        for (const auto& identifier : juce::SystemStats::getDeviceIdentifiers())
+            combined += identifier;
         return juce::SHA256(combined.toUTF8()).toHexString();
     }
 
-    //--------------------------------------------------------------------------
-    // HTTP Helpers
-    //--------------------------------------------------------------------------
-
-    juce::var httpPost(const juce::String& endpoint, const juce::var& body)
-    {
-        juce::String urlStr = cfg.apiUrl;
-        if (!urlStr.endsWithChar('/'))
-            urlStr += "/";
-        urlStr += endpoint;
-
-        juce::URL url(urlStr);
-
-        // Convert body to JSON string
-        juce::String jsonBody = juce::JSON::toString(body);
-
-        // Use POST data
-        url = url.withPOSTData(jsonBody);
-
-        // Build headers
-        juce::String headers;
-        headers += "Content-Type: application/json\r\n";
-        headers += "Authorization: Bearer " + cfg.apiKey + "\r\n";
-        headers += "X-Device-Id: " + deviceId + "\r\n";
-        headers += "User-Agent: LicenseSeat-JUCE/1.0\r\n";
-
-        // Create input stream options
-        juce::URL::InputStreamOptions options(juce::URL::ParameterHandling::inPostData);
-        options = options.withExtraHeaders(headers);
-        options = options.withConnectionTimeoutMs(cfg.timeoutMs);
-        options = options.withHttpRequestCmd("POST");
-
-        // Perform request
-        int statusCode = 0;
-        auto stream = url.createInputStream(options, nullptr, nullptr, &statusCode);
-
-        if (stream == nullptr)
-        {
-            auto* errorObj = new juce::DynamicObject();
-            errorObj->setProperty("error", "Network request failed");
-            return juce::var(errorObj);
-        }
-
-        juce::String response = stream->readEntireStreamAsString();
-
-        // Parse response
-        auto result = juce::JSON::parse(response);
-        if (result.isVoid())
-        {
-            // Create error response
-            auto* obj = new juce::DynamicObject();
-            obj->setProperty("error", "Failed to parse response");
-            obj->setProperty("status_code", statusCode);
-            return juce::var(obj);
-        }
-
-        return result;
-    }
-
-    juce::var httpDelete(const juce::String& endpoint, const juce::var& body)
-    {
-        juce::String urlStr = cfg.apiUrl;
-        if (!urlStr.endsWithChar('/'))
-            urlStr += "/";
-        urlStr += endpoint;
-
-        juce::URL url(urlStr);
-        juce::String jsonBody = juce::JSON::toString(body);
-        url = url.withPOSTData(jsonBody);
-
-        juce::String headers;
-        headers += "Content-Type: application/json\r\n";
-        headers += "Authorization: Bearer " + cfg.apiKey + "\r\n";
-        headers += "X-Device-Id: " + deviceId + "\r\n";
-        headers += "User-Agent: LicenseSeat-JUCE/1.0\r\n";
-
-        juce::URL::InputStreamOptions options(juce::URL::ParameterHandling::inPostData);
-        options = options.withExtraHeaders(headers);
-        options = options.withConnectionTimeoutMs(cfg.timeoutMs);
-        options = options.withHttpRequestCmd("DELETE");
-
-        int statusCode = 0;
-        auto stream = url.createInputStream(options, nullptr, nullptr, &statusCode);
-
-        if (stream == nullptr)
-        {
-            auto* obj = new juce::DynamicObject();
-            obj->setProperty("error", "Network request failed");
-            return juce::var(obj);
-        }
-
-        juce::String response = stream->readEntireStreamAsString();
-        auto result = juce::JSON::parse(response);
-
-        if (result.isVoid())
-        {
-            auto* obj = new juce::DynamicObject();
-            obj->setProperty("error", "Failed to parse response");
-            obj->setProperty("status_code", statusCode);
-            return juce::var(obj);
-        }
-
-        return result;
-    }
-
-    juce::String licenseEndpoint(const juce::String& licenseKey, const juce::String& action) const
-    {
-        return "products/" + cfg.productSlug + "/licenses/" + licenseKey + "/" + action;
-    }
-
-    static juce::String extractErrorMessage(const juce::var& response)
-    {
-        if (response.hasProperty("errors"))
-        {
-            auto errors = response["errors"];
-            if (auto* arr = errors.getArray(); arr != nullptr && !arr->isEmpty())
-            {
-                auto first = arr->getReference(0);
-                if (first.hasProperty("detail"))
-                    return first["detail"].toString();
-                if (first.hasProperty("message"))
-                    return first["message"].toString();
-                if (first.hasProperty("title"))
-                    return first["title"].toString();
+    static ValidationResult applyValidation(
+        const std::shared_ptr<SharedState>& current, const std::string& requestedKey,
+        const licenseseat::Result<licenseseat::ValidationResult>& source) {
+        ValidationResult converted;
+        if (source.is_error()) {
+            converted.reason = juce::String(source.error_message());
+        } else {
+            converted.valid = source.value().valid;
+            converted.reason = juce::String(
+                source.value().message.empty() ? source.value().code : source.value().message);
+            if (converted.valid) {
+                const auto& license = source.value().license;
+                converted.licensee = juce::String(license.key());
+                converted.licenseType = juce::String(license.plan_key());
+                for (const auto& entry : license.metadata())
+                    converted.metadata.set(juce::String(entry.first), juce::String(entry.second));
+                for (const auto& entitlement : license.active_entitlements())
+                    converted.entitlements.add(juce::String(entitlement.key));
             }
         }
 
-        if (response.hasProperty("error"))
         {
-            auto error = response["error"];
-            if (error.hasProperty("message"))
-                return error["message"].toString();
-            return error.toString();
+            const juce::ScopedWriteLock lock(current->stateLock);
+            current->cachedResult = converted;
+            if (converted.valid)
+                current->currentLicenseKey = juce::String(requestedKey);
+            else
+                current->currentLicenseKey.clear();
         }
-
-        if (response.hasProperty("message"))
-            return response["message"].toString();
-
-        return "Request failed";
+        current->valid.store(converted.valid, std::memory_order_release);
+        return converted;
     }
 
-    static bool varToBool(const juce::var& value)
-    {
-        if (value.isBool())
-            return static_cast<bool>(value);
-
-        auto text = value.toString().trim();
-        return text.equalsIgnoreCase("true") || text == "1";
+    static void populateSeats(const std::shared_ptr<SharedState>& current,
+                              ActivationResult& result) {
+        const auto license = current->client.current_license();
+        if (!license.has_value())
+            return;
+        result.seatsUsed = license->active_seats();
+        result.seatsTotal = license->seat_limit().value_or(0);
     }
 
-    juce::var buildFingerprintComponents() const
-    {
-        auto* components = new juce::DynamicObject();
-        components->setProperty("schema_version", "1");
-        components->setProperty("sdk", "juce-standalone");
-        components->setProperty("platform", juce::SystemStats::getOperatingSystemName());
-        components->setProperty("hostname", juce::SystemStats::getComputerName());
-        return juce::var(components);
+    static void clearState(const std::shared_ptr<SharedState>& current) {
+        {
+            const juce::ScopedWriteLock lock(current->stateLock);
+            current->currentLicenseKey.clear();
+            current->cachedResult = ValidationResult{};
+        }
+        current->valid.store(false, std::memory_order_release);
     }
 
-    juce::var buildDeviceBody(const juce::String& deviceName = {}) const
-    {
-        auto* body = new juce::DynamicObject();
-        body->setProperty("fingerprint", deviceId);
-        body->setProperty("device_id", deviceId);
-        body->setProperty("fingerprint_components", buildFingerprintComponents());
-
-        if (deviceName.isNotEmpty())
-            body->setProperty("device_name", deviceName);
-
-        return juce::var(body);
+    template <typename Callback, typename Invoke>
+    static void post(const std::weak_ptr<SharedState>& weakState, Callback callback,
+                     Invoke invoke) {
+        if (!callback)
+            return;
+        juce::MessageManager::callAsync(
+            [weakState, callback = std::move(callback), invoke = std::move(invoke)]() mutable {
+                const auto current = weakState.lock();
+                if (current != nullptr && !current->shuttingDown.load(std::memory_order_acquire))
+                    invoke(callback);
+            });
     }
 
-    //--------------------------------------------------------------------------
-    // Core Operations
-    //--------------------------------------------------------------------------
-
-    ValidationResult performValidation(const juce::String& licenseKey)
-    {
-        ValidationResult result;
-
-        auto response = httpPost(licenseEndpoint(licenseKey, "validate"), buildDeviceBody());
-
-        // Handle error
-        if (response.hasProperty("error") || response.hasProperty("errors"))
-        {
-            result.valid = false;
-            result.reason = extractErrorMessage(response);
-
-            // Update state
-            validFlag.store(false, std::memory_order_relaxed);
-            return result;
-        }
-
-        // Parse response
-        result.valid = varToBool(response["valid"]);
-        result.reason = response["message"].toString();
-
-        auto license = response["license"];
-        if (license.hasProperty("key"))
-            result.licensee = license["key"].toString();
-        if (license.hasProperty("plan_key"))
-            result.licenseType = license["plan_key"].toString();
-
-        // Parse metadata
-        if (license.hasProperty("metadata"))
-        {
-            auto meta = license["metadata"];
-            if (auto* obj = meta.getDynamicObject())
-            {
-                for (const auto& prop : obj->getProperties())
-                    result.metadata.set(prop.name.toString(), prop.value.toString());
-            }
-        }
-
-        // Parse entitlements
-        if (license.hasProperty("active_entitlements"))
-        {
-            auto ent = license["active_entitlements"];
-            if (auto* arr = ent.getArray())
-            {
-                for (const auto& item : *arr)
-                    result.entitlements.add(item["key"].toString());
-            }
-        }
-
-        // Update cached state
-        {
-            const juce::ScopedWriteLock lock(stateLock);
-            if (result.valid)
-                currentLicenseKey = licenseKey;
-            cachedResult = result;
-        }
-        validFlag.store(result.valid, std::memory_order_relaxed);
-
-        return result;
+    static void postValidation(const std::weak_ptr<SharedState>& weakState,
+                               ValidationCallback callback, ValidationResult result) {
+        post(weakState, std::move(callback),
+             [result = std::move(result)](ValidationCallback& cb) { cb(result); });
     }
 
-    ActivationResult performActivation(const juce::String& licenseKey)
-    {
-        ActivationResult result;
-
-        auto response = httpPost(
-            licenseEndpoint(licenseKey, "activate"),
-            buildDeviceBody(juce::SystemStats::getComputerName()));
-
-        if (response.hasProperty("error") || response.hasProperty("errors"))
-        {
-            result.success = false;
-            result.message = extractErrorMessage(response);
-            return result;
-        }
-
-        result.success = response.hasProperty("id");
-        result.message = result.success ? "Activation successful" : extractErrorMessage(response);
-        result.activationId = response["id"].toString();
-
-        auto license = response["license"];
-        if (license.hasProperty("active_seats"))
-            result.seatsUsed = static_cast<int>(license["active_seats"]);
-        if (license.hasProperty("seat_limit") && !license["seat_limit"].isVoid())
-            result.seatsTotal = static_cast<int>(license["seat_limit"]);
-
-        // Also validate after successful activation
-        if (result.success)
-        {
-            auto validationResult = performValidation(licenseKey);
-            if (!result.message.isNotEmpty())
-                result.message = validationResult.valid ? "Activation successful" : validationResult.reason;
-        }
-
-        return result;
+    static void postActivation(const std::weak_ptr<SharedState>& weakState,
+                               ActivationCallback callback, ActivationResult result) {
+        post(weakState, std::move(callback),
+             [result = std::move(result)](ActivationCallback& cb) { cb(result); });
     }
 
-    bool performDeactivation(const juce::String& licenseKey, juce::String& outMessage)
-    {
-        auto response = httpPost(licenseEndpoint(licenseKey, "deactivate"), buildDeviceBody());
-
-        if (response.hasProperty("error") || response.hasProperty("errors"))
-        {
-            outMessage = extractErrorMessage(response);
-            return false;
-        }
-
-        bool success = response.hasProperty("activation_id");
-
-        if (success)
-        {
-            const juce::ScopedWriteLock lock(stateLock);
-            currentLicenseKey.clear();
-            cachedResult = ValidationResult();
-            validFlag.store(false, std::memory_order_relaxed);
-            outMessage = "Deactivation successful";
-        }
-        else
-        {
-            outMessage = extractErrorMessage(response);
-        }
-
-        return success;
+    static void postSimple(const std::weak_ptr<SharedState>& weakState, SimpleCallback callback,
+                           bool success, juce::String message) {
+        post(weakState, std::move(callback),
+             [success, message = std::move(message)](SimpleCallback& cb) { cb(success, message); });
     }
 
-    bool performEntitlementCheck(const juce::String& licenseKey,
-                                  const juce::String& entitlementKey,
-                                  juce::String& outMessage)
-    {
-        auto validation = performValidation(licenseKey);
-        if (!validation.valid)
-        {
-            outMessage = validation.reason.isNotEmpty() ? validation.reason : "License not valid";
-            return false;
-        }
-
-        bool hasEntitlement = validation.entitlements.contains(entitlementKey);
-
-        outMessage = hasEntitlement ? "Entitlement granted" : "Entitlement not available";
-        return hasEntitlement;
-    }
-
-    //--------------------------------------------------------------------------
-    // Background Tasks
-    //--------------------------------------------------------------------------
-
-    class ValidationTask : public juce::ThreadPoolJob
-    {
-    public:
-        ValidationTask(LicenseSeatJuceStandalone& owner,
-                       juce::String key,
-                       ValidationCallback cb)
-            : ThreadPoolJob("LicenseSeat-Validate"),
-              parent(owner),
-              licenseKey(std::move(key)),
-              callback(std::move(cb))
-        {
-        }
-
-        void runThread()
-        {
-            // Run synchronously on a new thread
-            std::thread([this]()
-            {
-                auto result = parent.performValidation(licenseKey);
-                auto cb = std::move(callback);
-
-                juce::MessageManager::callAsync([result, cb]()
-                {
-                    if (cb)
-                        cb(result);
-                });
-
-                delete this;
-            }).detach();
-        }
-
-        JobStatus runJob() override { return jobHasFinished; }
-
-    private:
-        LicenseSeatJuceStandalone& parent;
-        juce::String licenseKey;
-        ValidationCallback callback;
-    };
-
-    class ActivationTask : public juce::ThreadPoolJob
-    {
-    public:
-        ActivationTask(LicenseSeatJuceStandalone& owner,
-                       juce::String key,
-                       ActivationCallback cb)
-            : ThreadPoolJob("LicenseSeat-Activate"),
-              parent(owner),
-              licenseKey(std::move(key)),
-              callback(std::move(cb))
-        {
-        }
-
-        void runThread()
-        {
-            std::thread([this]()
-            {
-                auto result = parent.performActivation(licenseKey);
-                auto cb = std::move(callback);
-
-                juce::MessageManager::callAsync([result, cb]()
-                {
-                    if (cb)
-                        cb(result);
-                });
-
-                delete this;
-            }).detach();
-        }
-
-        JobStatus runJob() override { return jobHasFinished; }
-
-    private:
-        LicenseSeatJuceStandalone& parent;
-        juce::String licenseKey;
-        ActivationCallback callback;
-    };
-
-    class DeactivationTask : public juce::ThreadPoolJob
-    {
-    public:
-        DeactivationTask(LicenseSeatJuceStandalone& owner,
-                         juce::String key,
-                         SimpleCallback cb)
-            : ThreadPoolJob("LicenseSeat-Deactivate"),
-              parent(owner),
-              licenseKey(std::move(key)),
-              callback(std::move(cb))
-        {
-        }
-
-        void runThread()
-        {
-            std::thread([this]()
-            {
-                juce::String message;
-                bool success = parent.performDeactivation(licenseKey, message);
-                auto cb = std::move(callback);
-
-                juce::MessageManager::callAsync([success, message, cb]()
-                {
-                    if (cb)
-                        cb(success, message);
-                });
-
-                delete this;
-            }).detach();
-        }
-
-        JobStatus runJob() override { return jobHasFinished; }
-
-    private:
-        LicenseSeatJuceStandalone& parent;
-        juce::String licenseKey;
-        SimpleCallback callback;
-    };
-
-    class EntitlementTask : public juce::ThreadPoolJob
-    {
-    public:
-        EntitlementTask(LicenseSeatJuceStandalone& owner,
-                        juce::String licKey,
-                        juce::String entKey,
-                        SimpleCallback cb)
-            : ThreadPoolJob("LicenseSeat-Entitlement"),
-              parent(owner),
-              licenseKey(std::move(licKey)),
-              entitlementKey(std::move(entKey)),
-              callback(std::move(cb))
-        {
-        }
-
-        void runThread()
-        {
-            std::thread([this]()
-            {
-                juce::String message;
-                bool success = parent.performEntitlementCheck(licenseKey, entitlementKey, message);
-                auto cb = std::move(callback);
-
-                juce::MessageManager::callAsync([success, message, cb]()
-                {
-                    if (cb)
-                        cb(success, message);
-                });
-
-                delete this;
-            }).detach();
-        }
-
-        JobStatus runJob() override { return jobHasFinished; }
-
-    private:
-        LicenseSeatJuceStandalone& parent;
-        juce::String licenseKey;
-        juce::String entitlementKey;
-        SimpleCallback callback;
-    };
+    std::shared_ptr<SharedState> state;
 
     JUCE_LEAK_DETECTOR(LicenseSeatJuceStandalone)
 };

@@ -519,6 +519,7 @@ void test_scenario_6_expiration() {
     config.product_slug = PRODUCT_SLUG;
     config.api_url = API_URL;
     config.storage_path = storage_path;
+    config.offline_fallback_mode = licenseseat::OfflineFallbackMode::NetworkOnly;
     config.max_offline_days = 30;  // 30-day grace period
 
     licenseseat::Client client(config);
@@ -795,6 +796,8 @@ void test_scenario_10_session_restore() {
         config.api_url = API_URL;
         config.storage_path = storage_path;
         config.device_id = "restore-test-device-" + std::to_string(std::time(nullptr));
+        config.offline_fallback_mode = licenseseat::OfflineFallbackMode::NetworkOnly;
+        config.max_offline_days = 30;
 
         licenseseat::Client client(config);
 
@@ -822,6 +825,8 @@ void test_scenario_10_session_restore() {
         config.product_slug = PRODUCT_SLUG;
         config.api_url = API_URL;
         config.storage_path = storage_path;
+        config.offline_fallback_mode = licenseseat::OfflineFallbackMode::NetworkOnly;
+        config.max_offline_days = 30;
 
         licenseseat::Client client(config);
 

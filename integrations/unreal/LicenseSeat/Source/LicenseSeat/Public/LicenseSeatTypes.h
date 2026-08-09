@@ -9,8 +9,7 @@
  * License status enumeration
  */
 UENUM(BlueprintType)
-enum class ELicenseStatus : uint8
-{
+enum class ELicenseStatus : uint8 {
     Unknown UMETA(DisplayName = "Unknown"),
     Active UMETA(DisplayName = "Active"),
     Expired UMETA(DisplayName = "Expired"),
@@ -23,8 +22,7 @@ enum class ELicenseStatus : uint8
  * License validation result
  */
 USTRUCT(BlueprintType)
-struct LICENSESEAT_API FLicenseValidationResult
-{
+struct LICENSESEAT_API FLicenseValidationResult {
     GENERATED_BODY()
 
     /** Whether the license is valid */
@@ -60,8 +58,7 @@ struct LICENSESEAT_API FLicenseValidationResult
  * License activation result
  */
 USTRUCT(BlueprintType)
-struct LICENSESEAT_API FLicenseActivationResult
-{
+struct LICENSESEAT_API FLicenseActivationResult {
     GENERATED_BODY()
 
     /** Whether activation succeeded */
@@ -85,8 +82,7 @@ struct LICENSESEAT_API FLicenseActivationResult
  * LicenseSeat configuration
  */
 USTRUCT(BlueprintType)
-struct LICENSESEAT_API FLicenseSeatConfig
-{
+struct LICENSESEAT_API FLicenseSeatConfig {
     GENERATED_BODY()
 
     /** API key for authentication */
@@ -101,17 +97,29 @@ struct LICENSESEAT_API FLicenseSeatConfig
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LicenseSeat")
     FString ApiUrl = TEXT("https://licenseseat.com/api/v1");
 
-    /** Ed25519 public key for offline verification (base64) */
+    /** Reserved for a future authenticated offline implementation. Online-only today. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LicenseSeat")
     FString OfflinePublicKey;
 
-    /** Maximum days to allow offline operation */
+    /** Reserved for future offline support; has no effect in the current plugin. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LicenseSeat")
     int32 MaxOfflineDays = 30;
 
     /** Auto-validation interval in seconds (0 to disable) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LicenseSeat")
     float AutoValidateInterval = 300.0f;
+
+    /** Request timeout in seconds (1-300). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LicenseSeat")
+    float RequestTimeoutSeconds = 30.0f;
+
+    /** Maximum accepted JSON response size in bytes. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LicenseSeat")
+    int32 MaxResponseBytes = 1024 * 1024;
+
+    /** Explicitly permit plaintext HTTP for localhost development only. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LicenseSeat")
+    bool bAllowInsecureLoopback = false;
 };
 
 /**
@@ -127,4 +135,5 @@ DECLARE_DYNAMIC_DELEGATE_OneParam(FOnActivationComplete, const FLicenseActivatio
 /**
  * Multicast delegate for license status changes
  */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLicenseStatusChanged, const FLicenseValidationResult&, NewStatus);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLicenseStatusChanged,
+                                            const FLicenseValidationResult&, NewStatus);

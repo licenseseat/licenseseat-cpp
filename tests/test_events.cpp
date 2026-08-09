@@ -1,7 +1,6 @@
+#include <atomic>
 #include <gtest/gtest.h>
 #include <licenseseat/events.hpp>
-
-#include <atomic>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,7 +43,19 @@ TEST_F(EventBusTest, SubscriptionCanBeCancelled) {
     sub.cancel();
 
     bus.emit("test:event");
-    EXPECT_EQ(call_count, 1);  // Should not increase after cancel
+    EXPECT_EQ(call_count, 1); // Should not increase after cancel
+}
+
+TEST(EventBusLifetimeTest, SubscriptionCanBeCancelledAfterBusIsDestroyed) {
+    EventSubscription subscription;
+    {
+        auto bus = std::make_unique<EventBus>();
+        subscription = bus->on("test:event", [](const EventData&) {});
+        EXPECT_TRUE(subscription.is_active());
+    }
+
+    EXPECT_NO_THROW(subscription.cancel());
+    EXPECT_FALSE(subscription.is_active());
 }
 
 TEST_F(EventBusTest, MultipleSubscribersReceiveEvents) {
@@ -208,5 +219,5 @@ TEST(EventConstantsTest, EventNamesAreDefined) {
     EXPECT_STREQ(events::SDK_ERROR, "sdk:error");
 }
 
-}  // namespace
-}  // namespace licenseseat
+} // namespace
+} // namespace licenseseat

@@ -6,16 +6,37 @@ on:
   pull_request:
     branches: [main, develop, 'pr/**']
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   BUILD_TYPE: Release
 
 jobs:
-  # =============================================================================
-  # Linux Builds
-  # =============================================================================
+  dependency-audit:
+    name: Vendored dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Verify exact sources and query OSV
+        run: python3 scripts/audit-vendored-dependencies.py --online
+
+      - name: Check patch integrity
+        run: git diff --check
+
   linux:
     name: Linux (${{ matrix.compiler }})
+    needs: dependency-audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -23,37 +44,18 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libssl-dev \
-            nlohmann-json3-dev \
-            libgtest-dev \
-            cmake \
-            ninja-build
-
-      - name: Install cpp-httplib
-        run: |
-          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
-          cd /tmp/cpp-httplib
-          sudo mkdir -p /usr/local/include
-          sudo cp -r httplib.h /usr/local/include/
-          sudo mkdir -p /usr/local/lib/cmake/httplib
-          cat << 'EOF' | sudo tee /usr/local/lib/cmake/httplib/httplibConfig.cmake
-          add_library(httplib::httplib INTERFACE IMPORTED)
-          set_target_properties(httplib::httplib PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
-          )
-          EOF
+          sudo apt-get install -y libssl-dev libgtest-dev cmake ninja-build
 
       - name: Configure
         env:
           CXX: ${{ matrix.compiler }}
         run: |
-          cmake -B build \
+          cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DLICENSESEAT_BUILD_TESTS=ON \
@@ -63,81 +65,60 @@ jobs:
         run: cmake --build build
 
       - name: Test
-        working-directory: build
-        run: ctest --output-on-failure
+        run: ctest --test-dir build --output-on-failure --parallel 2
 
-  # =============================================================================
-  # macOS Builds
-  # =============================================================================
   macos:
     name: macOS (${{ matrix.os }})
+    needs: dependency-audit
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [macos-15-intel, macos-15]
-        # macos-15-intel is x86_64, macos-15 is arm64
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install dependencies
-        run: |
-          brew install \
-            openssl@3 \
-            nlohmann-json \
-            cpp-httplib \
-            googletest \
-            ninja
+        run: brew install openssl@3 googletest ninja
 
       - name: Configure
         run: |
-          cmake -B build \
+          cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DLICENSESEAT_BUILD_TESTS=ON \
             -DLICENSESEAT_BUILD_EXAMPLES=ON \
-            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
 
       - name: Build
         run: cmake --build build
 
       - name: Test
-        working-directory: build
-        run: ctest --output-on-failure
+        run: ctest --test-dir build --output-on-failure --parallel 2
 
-  # =============================================================================
-  # Windows Builds
-  # =============================================================================
   windows:
     name: Windows (MSVC)
+    needs: dependency-audit
     runs-on: windows-2022
-
+    timeout-minutes: 45
     env:
-      # Disable vcpkg binary caching entirely (x-gha was removed in June 2025)
-      VCPKG_BINARY_SOURCES: "clear"
+      VCPKG_BINARY_SOURCES: clear
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
+      - name: Setup pinned vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
         with:
-          vcpkgGitCommitId: "b5d1a94fb7f88fd835e360fd23a45a09ceedbf48"
-
-      - name: Cache vcpkg installed packages
-        uses: actions/cache@v4
-        with:
-          path: build/vcpkg_installed
-          key: vcpkg-installed-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-installed-${{ runner.os }}-
+          vcpkgGitCommitId: ea1a7396b05637a53bf23c078647ecc0edee4b80
 
       - name: Configure
         run: |
-          cmake -B build `
+          cmake -S . -B build `
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
             -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
             -DVCPKG_MANIFEST_FEATURES=tests `
@@ -148,100 +129,69 @@ jobs:
         run: cmake --build build --config ${{ env.BUILD_TYPE }}
 
       - name: Test
-        working-directory: build
-        run: ctest --output-on-failure -C ${{ env.BUILD_TYPE }}
+        run: ctest --test-dir build --output-on-failure -C ${{ env.BUILD_TYPE }} --parallel 2
 
-  # =============================================================================
-  # Single-Header Amalgamation Test
-  # =============================================================================
   single-header:
-    name: Single-Header Test
+    name: Single-header distribution
+    needs: dependency-audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Install dependencies
+      - name: Install OpenSSL
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libssl-dev \
-            nlohmann-json3-dev
+          sudo apt-get install -y libssl-dev
 
-      - name: Install cpp-httplib
+      - name: Generate single header
         run: |
-          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
-          sudo cp /tmp/cpp-httplib/httplib.h /usr/local/include/
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          export SOURCE_DATE_EPOCH
+          python3 scripts/amalgamate.py > "${RUNNER_TEMP}/licenseseat_single.hpp"
 
-      - name: Generate single-header
-        run: python3 scripts/amalgamate.py > licenseseat_single.hpp
-
-      - name: Compile test program
+      - name: Compile and run smoke test
         run: |
-          cat > /tmp/test_single_header.cpp << 'EOF'
+          cat > "${RUNNER_TEMP}/test_single_header.cpp" <<'EOF'
           #define LICENSESEAT_IMPLEMENTATION
           #include "licenseseat_single.hpp"
 
-          #include <iostream>
           #include <cassert>
 
           int main() {
-              // Test 1: Base64 encoding/decoding
-              std::string input = "Hello, LicenseSeat!";
-              std::string encoded = licenseseat::crypto::base64_encode(
-                  std::vector<uint8_t>(input.begin(), input.end())
-              );
-              auto decoded = licenseseat::crypto::base64_decode(encoded);
-              std::string decoded_str(decoded.begin(), decoded.end());
-              assert(decoded_str == input && "Base64 round-trip failed");
-              std::cout << "Base64 encoding/decoding works" << std::endl;
-
-              // Test 2: Base64URL encoding/decoding
-              std::string url_encoded = licenseseat::crypto::base64url_encode(
-                  std::vector<uint8_t>(input.begin(), input.end())
-              );
-              auto url_decoded = licenseseat::crypto::base64url_decode(url_encoded);
-              std::string url_decoded_str(url_decoded.begin(), url_decoded.end());
-              assert(url_decoded_str == input && "Base64URL round-trip failed");
-              std::cout << "Base64URL encoding/decoding works" << std::endl;
-
-              // Test 3: Device ID generation
-              std::string device_id = licenseseat::device::generate_device_id();
-              assert(!device_id.empty() && "Device ID is empty");
-              assert(device_id.length() >= 16 && "Device ID too short");
-              std::cout << "Device ID generation works: " << device_id.substr(0, 16) << "..." << std::endl;
-
-              // Test 4: Platform detection
-              std::string platform = licenseseat::device::get_platform_name();
-              assert(platform == "linux" && "Expected Linux platform");
-              std::cout << "Platform detection works: " << platform << std::endl;
-
-              std::cout << "\nAll single-header tests passed!" << std::endl;
+              const std::string input = "Hello, LicenseSeat!";
+              const auto encoded = licenseseat::crypto::base64_encode(
+                  std::vector<uint8_t>(input.begin(), input.end()));
+              const auto decoded = licenseseat::crypto::base64_decode(encoded);
+              assert(std::string(decoded.begin(), decoded.end()) == input);
+              assert(!licenseseat::device::generate_device_id().empty());
               return 0;
           }
           EOF
           g++ -std=c++17 \
             -DCPPHTTPLIB_OPENSSL_SUPPORT \
-            -I. \
-            -I/usr/local/include \
-            -o /tmp/test_single_header /tmp/test_single_header.cpp \
-            -lssl \
-            -lcrypto
-          /tmp/test_single_header
+            -I"${RUNNER_TEMP}" \
+            -I"${GITHUB_WORKSPACE}/deps" \
+            "${RUNNER_TEMP}/test_single_header.cpp" \
+            -o "${RUNNER_TEMP}/test_single_header" \
+            -lssl -lcrypto -pthread
+          "${RUNNER_TEMP}/test_single_header"
 
-      - name: Upload amalgamated header
-        uses: actions/upload-artifact@v4
+      - name: Upload generated header
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: licenseseat-single-header
-          path: licenseseat_single.hpp
+          path: ${{ runner.temp }}/licenseseat_single.hpp
+          if-no-files-found: error
+          retention-days: 7
 
-  # =============================================================================
-  # Sanitizer Tests
-  # =============================================================================
   sanitizers:
-    name: Sanitizers (${{ matrix.sanitizer }})
+    name: Sanitizer (${{ matrix.sanitizer }})
+    needs: dependency-audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -250,49 +200,26 @@ jobs:
             flags: -fsanitize=address -fno-omit-frame-pointer
           - sanitizer: undefined
             flags: -fsanitize=undefined -fno-omit-frame-pointer
-          # TSan disabled: ShutdownTest stress tests cause 45+ min runtime
-          # TODO: Re-enable with reduced iterations or test exclusions
-          # - sanitizer: thread
-          #   flags: -fsanitize=thread
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libssl-dev \
-            nlohmann-json3-dev \
-            libgtest-dev \
-            cmake \
-            ninja-build \
-            clang
-
-      - name: Install cpp-httplib
-        run: |
-          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
-          cd /tmp/cpp-httplib
-          sudo mkdir -p /usr/local/include
-          sudo cp -r httplib.h /usr/local/include/
-          sudo mkdir -p /usr/local/lib/cmake/httplib
-          cat << 'EOF' | sudo tee /usr/local/lib/cmake/httplib/httplibConfig.cmake
-          add_library(httplib::httplib INTERFACE IMPORTED)
-          set_target_properties(httplib::httplib PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
-          )
-          EOF
+          sudo apt-get install -y libssl-dev libgtest-dev cmake ninja-build clang
 
       - name: Configure
         env:
-          CXX: clang++
           CC: clang
+          CXX: clang++
         run: |
-          cmake -B build \
+          cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DLICENSESEAT_BUILD_TESTS=ON \
+            -DLICENSESEAT_BUILD_EXAMPLES=OFF \
             -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
             -DCMAKE_C_FLAGS="${{ matrix.flags }}" \
             -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.flags }}"
@@ -301,9 +228,36 @@ jobs:
         run: cmake --build build
 
       - name: Test
-        working-directory: build
         env:
-          ASAN_OPTIONS: detect_leaks=1
-          UBSAN_OPTIONS: print_stacktrace=1
-          TSAN_OPTIONS: second_deadlock_stack=1
-        run: ctest --output-on-failure
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build --output-on-failure --parallel 2
+
+  static-analysis:
+    name: Clang static analyzer
+    needs: dependency-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev cmake ninja-build clang clang-tools
+
+      - name: Configure through analyzer compiler wrappers
+        run: |
+          scan-build cmake -S . -B build-analyzer \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLICENSESEAT_BUILD_TESTS=OFF \
+            -DLICENSESEAT_BUILD_EXAMPLES=OFF
+
+      - name: Analyze
+        run: |
+          scan-build --status-bugs \
+            -enable-checker unix.BlockInCriticalSection \
+            cmake --build build-analyzer
