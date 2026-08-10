@@ -1,18 +1,20 @@
 #include "licenseseat/telemetry.hpp"
 
 #include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <thread>
 
 // Platform detection
 #if defined(__APPLE__)
+#include <CoreGraphics/CGDirectDisplay.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
 #include <unistd.h>
-#include <CoreGraphics/CGDirectDisplay.h>
 #define LICENSESEAT_PLATFORM_MACOS 1
 #elif defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
@@ -28,9 +30,84 @@ namespace telemetry {
 
 namespace {
 
+constexpr std::size_t MAX_TELEMETRY_TEXT_BYTES = 256;
+
+std::string bounded_c_string(const char* value, std::size_t maximum = MAX_TELEMETRY_TEXT_BYTES) {
+    if (value == nullptr)
+        return "";
+    std::size_t length = 0;
+    while (length <= maximum && value[length] != '\0')
+        ++length;
+    if (length == 0 || length > maximum)
+        return "";
+    return std::string(value, length);
+}
+
+std::string bounded_environment(const char* name) {
+    return bounded_c_string(std::getenv(name));
+}
+
+bool is_safe_utf8(std::string_view value) {
+    if (value.empty() || value.size() > MAX_TELEMETRY_TEXT_BYTES)
+        return false;
+
+    std::size_t index = 0;
+    while (index < value.size()) {
+        const auto first = static_cast<unsigned char>(value[index]);
+        if (first <= 0x7f) {
+            if (first < 0x20 || first == 0x7f)
+                return false;
+            ++index;
+            continue;
+        }
+
+        std::size_t continuation_count = 0;
+        std::uint32_t code_point = 0;
+        std::uint32_t minimum = 0;
+        if (first >= 0xc2 && first <= 0xdf) {
+            continuation_count = 1;
+            code_point = first & 0x1f;
+            minimum = 0x80;
+        } else if (first >= 0xe0 && first <= 0xef) {
+            continuation_count = 2;
+            code_point = first & 0x0f;
+            minimum = 0x800;
+        } else if (first >= 0xf0 && first <= 0xf4) {
+            continuation_count = 3;
+            code_point = first & 0x07;
+            minimum = 0x10000;
+        } else {
+            return false;
+        }
+
+        if (continuation_count > value.size() - index - 1)
+            return false;
+        for (std::size_t offset = 1; offset <= continuation_count; ++offset) {
+            const auto continuation = static_cast<unsigned char>(value[index + offset]);
+            if ((continuation & 0xc0) != 0x80)
+                return false;
+            code_point = (code_point << 6) | (continuation & 0x3f);
+        }
+        if (code_point < minimum || code_point > 0x10ffff ||
+            (code_point >= 0xd800 && code_point <= 0xdfff) ||
+            (code_point >= 0x80 && code_point <= 0x9f)) {
+            return false;
+        }
+        index += continuation_count + 1;
+    }
+    return true;
+}
+
+void add_safe_string(nlohmann::json& object, const char* key, const std::string& value) {
+    if (is_safe_utf8(value))
+        object[key] = value;
+}
+
 #if defined(LICENSESEAT_PLATFORM_MACOS)
 
-std::string get_os_name() { return "macOS"; }
+std::string get_os_name() {
+    return "macOS";
+}
 
 std::string get_os_version() {
     // Use sysctl kern.osproductversion (available on macOS 10.13.4+)
@@ -40,14 +117,16 @@ std::string get_os_version() {
         return std::string(version);
     }
     // Fallback to uname
-    struct utsname info {};
+    struct utsname info{};
     if (uname(&info) == 0) {
         return std::string(info.release);
     }
     return "";
 }
 
-std::string get_platform() { return "native"; }
+std::string get_platform() {
+    return "native";
+}
 
 std::string get_device_model() {
     char model[128] = {0};
@@ -71,14 +150,12 @@ std::string get_timezone() {
         }
     }
     // Fallback to TZ env
-    const char* tz = std::getenv("TZ");
-    if (tz != nullptr && std::strlen(tz) > 0) {
-        return std::string(tz);
-    }
-    return "";
+    return bounded_environment("TZ");
 }
 
-std::string get_device_type() { return "desktop"; }
+std::string get_device_type() {
+    return "desktop";
+}
 
 int get_memory_gb() {
     int64_t memsize = 0;
@@ -101,17 +178,21 @@ std::string get_screen_resolution() {
 
 #elif defined(LICENSESEAT_PLATFORM_LINUX)
 
-std::string get_os_name() { return "Linux"; }
+std::string get_os_name() {
+    return "Linux";
+}
 
 std::string get_os_version() {
-    struct utsname info {};
+    struct utsname info{};
     if (uname(&info) == 0) {
         return std::string(info.release);
     }
     return "";
 }
 
-std::string get_platform() { return "native"; }
+std::string get_platform() {
+    return "native";
+}
 
 std::string get_device_model() {
     std::ifstream file("/sys/class/dmi/id/product_name");
@@ -138,16 +219,11 @@ std::string get_timezone() {
         }
     }
     // Fallback to TZ env
-    const char* tz = std::getenv("TZ");
-    if (tz != nullptr && std::strlen(tz) > 0) {
-        return std::string(tz);
-    }
-    return "";
+    return bounded_environment("TZ");
 }
 
 std::string get_device_type() {
-    const char* display = std::getenv("DISPLAY");
-    if (display == nullptr || std::strlen(display) == 0) {
+    if (bounded_environment("DISPLAY").empty()) {
         return "server";
     }
     return "desktop";
@@ -197,7 +273,9 @@ std::string get_screen_resolution() {
 
 #elif defined(LICENSESEAT_PLATFORM_WINDOWS)
 
-std::string get_os_name() { return "Windows"; }
+std::string get_os_name() {
+    return "Windows";
+}
 
 std::string get_os_version() {
     // Use RtlGetVersion via ntdll for accurate version
@@ -219,13 +297,15 @@ std::string get_os_version() {
     return "";
 }
 
-std::string get_platform() { return "native"; }
+std::string get_platform() {
+    return "native";
+}
 
 std::string get_device_model() {
     // Read from registry
     HKEY hKey;
-    LONG result = RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                                "HARDWARE\\DESCRIPTION\\System\\BIOS", 0, KEY_READ, &hKey);
+    LONG result = RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", 0,
+                                KEY_READ, &hKey);
     if (result != ERROR_SUCCESS) {
         return "";
     }
@@ -236,7 +316,7 @@ std::string get_device_model() {
                               reinterpret_cast<LPBYTE>(model), &size);
     RegCloseKey(hKey);
     if (result == ERROR_SUCCESS) {
-        return std::string(model);
+        return bounded_c_string(model, sizeof(model) - 1);
     }
     return "";
 }
@@ -249,14 +329,14 @@ std::string get_timezone() {
         char name[128] = {0};
         WideCharToMultiByte(CP_UTF8, 0, tz_info.StandardName, -1, name, sizeof(name), nullptr,
                             nullptr);
-        if (std::strlen(name) > 0) {
-            return std::string(name);
-        }
+        return bounded_c_string(name);
     }
     return "";
 }
 
-std::string get_device_type() { return "desktop"; }
+std::string get_device_type() {
+    return "desktop";
+}
 
 int get_memory_gb() {
     MEMORYSTATUSEX statex{};
@@ -279,28 +359,37 @@ std::string get_screen_resolution() {
 
 #else
 
-std::string get_os_name() { return ""; }
-std::string get_os_version() { return ""; }
-std::string get_platform() { return "native"; }
-std::string get_device_model() { return ""; }
-std::string get_timezone() { return ""; }
-std::string get_device_type() { return "unknown"; }
-int get_memory_gb() { return 0; }
-std::string get_screen_resolution() { return ""; }
+std::string get_os_name() {
+    return "";
+}
+std::string get_os_version() {
+    return "";
+}
+std::string get_platform() {
+    return "native";
+}
+std::string get_device_model() {
+    return "";
+}
+std::string get_timezone() {
+    return "";
+}
+std::string get_device_type() {
+    return "unknown";
+}
+int get_memory_gb() {
+    return 0;
+}
+std::string get_screen_resolution() {
+    return "";
+}
 
 #endif
 
 std::string get_locale() {
     // Try environment variables
-    const char* lang = std::getenv("LANG");
-    if (lang != nullptr && std::strlen(lang) > 0) {
-        return std::string(lang);
-    }
-    const char* lc_all = std::getenv("LC_ALL");
-    if (lc_all != nullptr && std::strlen(lc_all) > 0) {
-        return std::string(lc_all);
-    }
-    return "";
+    auto locale = bounded_environment("LC_ALL");
+    return locale.empty() ? bounded_environment("LANG") : locale;
 }
 
 std::string get_architecture() {
@@ -323,81 +412,62 @@ int get_cpu_cores() {
 }
 
 std::string get_language() {
-    const char* lang = std::getenv("LANG");
-    if (lang != nullptr && std::strlen(lang) >= 2) {
-        std::string full(lang);
+    const auto full = bounded_environment("LANG");
+    if (full.size() >= 2) {
         // Extract first 2 chars (the language code)
         auto code = full.substr(0, 2);
         // Validate it's alphabetic
-        if (std::isalpha(static_cast<unsigned char>(code[0])) &&
-            std::isalpha(static_cast<unsigned char>(code[1]))) {
+        const auto is_ascii_alpha = [](unsigned char character) {
+            return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z');
+        };
+        if (is_ascii_alpha(static_cast<unsigned char>(code[0])) &&
+            is_ascii_alpha(static_cast<unsigned char>(code[1]))) {
             return code;
         }
     }
     return "";
 }
 
-}  // namespace
+} // namespace
 
-nlohmann::json collect(const std::string& sdk_version,
-                       const std::string& app_version,
+nlohmann::json collect(const std::string& sdk_version, const std::string& app_version,
                        const std::string& app_build) {
     nlohmann::json telemetry = nlohmann::json::object();
 
     try {
         // Always include sdk identifiers
         telemetry["sdk_name"] = "cpp";
-        telemetry["sdk_version"] = sdk_version;
+        add_safe_string(telemetry, "sdk_version", sdk_version);
 
         // Only include non-empty values
         auto os_name = get_os_name();
-        if (!os_name.empty()) {
-            telemetry["os_name"] = os_name;
-        }
+        add_safe_string(telemetry, "os_name", os_name);
 
         auto os_version = get_os_version();
-        if (!os_version.empty()) {
-            telemetry["os_version"] = os_version;
-        }
+        add_safe_string(telemetry, "os_version", os_version);
 
         auto platform = get_platform();
-        if (!platform.empty()) {
-            telemetry["platform"] = platform;
-        }
+        add_safe_string(telemetry, "platform", platform);
 
         auto device_model = get_device_model();
-        if (!device_model.empty()) {
-            telemetry["device_model"] = device_model;
-        }
+        add_safe_string(telemetry, "device_model", device_model);
 
         auto locale = get_locale();
-        if (!locale.empty()) {
-            telemetry["locale"] = locale;
-        }
+        add_safe_string(telemetry, "locale", locale);
 
         auto timezone = get_timezone();
-        if (!timezone.empty()) {
-            telemetry["timezone"] = timezone;
-        }
+        add_safe_string(telemetry, "timezone", timezone);
 
         // User-provided fields
-        if (!app_version.empty()) {
-            telemetry["app_version"] = app_version;
-        }
+        add_safe_string(telemetry, "app_version", app_version);
 
-        if (!app_build.empty()) {
-            telemetry["app_build"] = app_build;
-        }
+        add_safe_string(telemetry, "app_build", app_build);
 
         auto device_type = get_device_type();
-        if (!device_type.empty()) {
-            telemetry["device_type"] = device_type;
-        }
+        add_safe_string(telemetry, "device_type", device_type);
 
         auto architecture = get_architecture();
-        if (!architecture.empty()) {
-            telemetry["architecture"] = architecture;
-        }
+        add_safe_string(telemetry, "architecture", architecture);
 
         auto cpu_cores = get_cpu_cores();
         if (cpu_cores > 0) {
@@ -410,14 +480,10 @@ nlohmann::json collect(const std::string& sdk_version,
         }
 
         auto language = get_language();
-        if (!language.empty()) {
-            telemetry["language"] = language;
-        }
+        add_safe_string(telemetry, "language", language);
 
         auto screen_resolution = get_screen_resolution();
-        if (!screen_resolution.empty()) {
-            telemetry["screen_resolution"] = screen_resolution;
-        }
+        add_safe_string(telemetry, "screen_resolution", screen_resolution);
     } catch (...) {
         // Never let telemetry crash the application
     }
@@ -425,5 +491,5 @@ nlohmann::json collect(const std::string& sdk_version,
     return telemetry;
 }
 
-}  // namespace telemetry
-}  // namespace licenseseat
+} // namespace telemetry
+} // namespace licenseseat

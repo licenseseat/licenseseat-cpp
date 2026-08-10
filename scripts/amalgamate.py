@@ -18,7 +18,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Project root
 ROOT = Path(__file__).parent.parent
@@ -45,28 +45,9 @@ SOURCES = [
     "src/client.cpp",
 ]
 
-# Vendored libraries to embed
+# Vendored header-only libraries to embed
 VENDORED = {
     "picosha2": "deps/PicoSHA2/picosha2.h",
-    "ed25519": [
-        "deps/ed25519/fixedint.h",
-        "deps/ed25519/sha512.h",
-        "deps/ed25519/fe.h",
-        "deps/ed25519/ge.h",
-        "deps/ed25519/sc.h",
-        "deps/ed25519/precomp_data.h",
-        "deps/ed25519/ed25519.h",
-        "deps/ed25519/fe.c",
-        "deps/ed25519/ge.c",
-        "deps/ed25519/sc.c",
-        "deps/ed25519/sha512.c",
-        "deps/ed25519/add_scalar.c",
-        "deps/ed25519/keypair.c",
-        "deps/ed25519/key_exchange.c",
-        "deps/ed25519/seed.c",
-        "deps/ed25519/sign.c",
-        "deps/ed25519/verify.c",
-    ],
 }
 
 # Includes to remove (will be embedded or provided by user)
@@ -90,7 +71,6 @@ REMOVE_INCLUDES = {
     '"storage.hpp"',
     '"telemetry.hpp"',
     # Vendored dependencies
-    '"ed25519/ed25519.h"',
     '"PicoSHA2/picosha2.h"',
 }
 
@@ -149,30 +129,6 @@ def strip_ifdef_openssl(content):
     return content
 
 
-def strip_duplicate_ed25519_helpers(content, filename):
-    """Remove duplicate helper functions from ed25519 sc.c.
-
-    The load_3 and load_4 functions are duplicated in both fe.c and sc.c.
-    We keep them in fe.c (processed first) and remove from sc.c.
-    """
-    if 'sc.c' not in filename:
-        return content
-
-    # Remove load_3 function
-    content = re.sub(
-        r'static\s+uint64_t\s+load_3\s*\([^)]*\)\s*\{[^}]+\}',
-        '// load_3 defined in fe.c',
-        content
-    )
-    # Remove load_4 function
-    content = re.sub(
-        r'static\s+uint64_t\s+load_4\s*\([^)]*\)\s*\{[^}]+\}',
-        '// load_4 defined in fe.c',
-        content
-    )
-    return content
-
-
 def wrap_extern_c(content, is_c_code=False):
     """Wrap C code in extern \"C\" for C++ compatibility."""
     if is_c_code:
@@ -181,23 +137,7 @@ def wrap_extern_c(content, is_c_code=False):
 
 
 def add_namespace_prefix_to_crypto(content):
-    """Add licenseseat_internal:: prefix to ed25519 and picosha2 calls."""
-    # Replace bare ed25519 function calls with namespaced versions
-    content = re.sub(
-        r'\bed25519_verify\s*\(',
-        'licenseseat_internal::ed25519_verify(',
-        content
-    )
-    content = re.sub(
-        r'\bed25519_sign\s*\(',
-        'licenseseat_internal::ed25519_sign(',
-        content
-    )
-    content = re.sub(
-        r'\bed25519_create_keypair\s*\(',
-        'licenseseat_internal::ed25519_create_keypair(',
-        content
-    )
+    """Add the internal namespace prefix to bundled PicoSHA2 calls."""
     # Replace picosha2 namespace with full path
     content = re.sub(
         r'\bpicosha2::',
@@ -214,6 +154,23 @@ def get_version():
     return match.group(1) if match else "unknown"
 
 
+def generated_at():
+    """Return a reproducible UTC generation time when SOURCE_DATE_EPOCH is set."""
+    epoch = os.environ.get("SOURCE_DATE_EPOCH")
+    if epoch is None:
+        moment = datetime.now(timezone.utc)
+    else:
+        try:
+            timestamp = int(epoch)
+            if timestamp < 0:
+                raise ValueError
+            moment = datetime.fromtimestamp(timestamp, timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            print("Error: SOURCE_DATE_EPOCH must be a valid non-negative Unix timestamp", file=sys.stderr)
+            raise SystemExit(1)
+    return moment.isoformat().replace("+00:00", "Z")
+
+
 def generate_header():
     """Generate the amalgamated header."""
     output = []
@@ -223,7 +180,7 @@ def generate_header():
     output.append(f'''/*
  * LicenseSeat C++ SDK - Single Header Distribution
  *
- * Generated: {datetime.now().isoformat()}
+ * Generated: {generated_at()}
  * Version: {version}
  *
  * This is an amalgamated single-header version of the LicenseSeat SDK.
@@ -252,18 +209,13 @@ def generate_header():
  * LICENSE:
  *   MIT License - see https://github.com/licenseseat/licenseseat-cpp
  *
- * This amalgamated build still requires OpenSSL for HTTPS and machine-file
- * AES-256-GCM verification. JUCE standalone is the zero-OpenSSL path.
+ * This amalgamated build requires OpenSSL for HTTPS, Ed25519 verification,
+ * and machine-file AES-256-GCM verification.
  * HTTPS support also requires cpp-httplib compiled with CPPHTTPLIB_OPENSSL_SUPPORT.
  */
 
 #ifndef LICENSESEAT_SINGLE_HPP
 #define LICENSESEAT_SINGLE_HPP
-
-// Ensure we're using minimal crypto (no OpenSSL)
-#ifndef LICENSESEAT_USE_OPENSSL
-#define LICENSESEAT_MINIMAL_CRYPTO 1
-#endif
 
 ''')
 
@@ -300,36 +252,18 @@ def generate_header():
     output.append(picosha_content)
     output.append("\n} // namespace licenseseat_internal\n\n")
 
-    output.append("// --- Vendored: orlp/ed25519 ---\n")
-    output.append("namespace licenseseat_internal {\n")
-    output.append('extern "C" {\n')
-
-    for ed_file in VENDORED["ed25519"]:
-        output.append(f"\n// --- {ed_file} ---\n")
-        content = read_file(ed_file)
-        content = strip_pragma_once(content)
-        # Remove internal includes between ed25519 files
-        content = re.sub(r'#include\s*"[^"]+\.h"', '// (internal include removed)', content)
-        # Remove duplicate helper functions from sc.c
-        content = strip_duplicate_ed25519_helpers(content, ed_file)
-        output.append(content)
-
-    output.append('\n} // extern "C"\n')
-    output.append("} // namespace licenseseat_internal\n\n")
-
     # Add source implementations
     for src_path in SOURCES:
         output.append(f"// --- {src_path} ---\n")
         content = read_file(src_path)
         content = strip_local_includes(content, REMOVE_INCLUDES)
-        # Remove the vendored include directives (already embedded above)
-        content = content.replace('#include "ed25519/ed25519.h"', '// ed25519 embedded above')
+        # Remove the vendored include directive (already embedded above)
         content = content.replace('#include "PicoSHA2/picosha2.h"', '// picosha2 embedded above')
         content = strip_ifdef_openssl(content)
 
-        # For crypto.cpp, add namespace prefixes for internal deps
-        if 'crypto.cpp' in src_path:
-            content = add_namespace_prefix_to_crypto(content)
+        # Prefix bundled dependency namespaces in every implementation that
+        # uses them (currently crypto.cpp and storage.cpp).
+        content = add_namespace_prefix_to_crypto(content)
 
         output.append(content)
         output.append("\n\n")

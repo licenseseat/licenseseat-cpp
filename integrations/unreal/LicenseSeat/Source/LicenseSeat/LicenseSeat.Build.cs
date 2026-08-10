@@ -31,14 +31,10 @@ public class LicenseSeat : ModuleRules
         // Third-party includes
         string ThirdPartyPath = Path.Combine(ModuleDirectory, "Private", "ThirdParty");
 
-        PrivateIncludePaths.AddRange(new string[]
-        {
-            ThirdPartyPath,
-            Path.Combine(ThirdPartyPath, "ed25519")
-        });
+        PrivateIncludePaths.Add(ThirdPartyPath);
 
-        // No external dependencies needed!
-        // - Ed25519 and SHA256 are vendored in ThirdParty
+        // No external dependencies needed for the current online-only plugin.
+        // SHA256 is vendored only for stable device fingerprinting.
         // - HTTP uses UE's HTTP module
         // - JSON uses UE's JSON utilities
 

@@ -5,6 +5,27 @@ namespace licenseseat {
 namespace json {
 namespace {
 
+// ==================== Strict Parser Tests ====================
+
+TEST(JsonStrictParserTest, RejectsDuplicateObjectKeysAtAnyDepth) {
+    EXPECT_THROW((void)parse_strict(R"({"outer":{"key":1,"key":2}})"), std::invalid_argument);
+}
+
+TEST(JsonStrictParserTest, RejectsOversizedAndDeeplyNestedDocuments) {
+    EXPECT_THROW((void)parse_strict("{}", 1), std::invalid_argument);
+
+    std::string deeply_nested(34, '[');
+    deeply_nested += "0";
+    deeply_nested.append(34, ']');
+    EXPECT_THROW((void)parse_strict(deeply_nested), std::invalid_argument);
+}
+
+TEST(JsonStrictParserTest, RejectsUnsafeOrOversizedObjectKeys) {
+    EXPECT_THROW((void)parse_strict(R"({"\u0001":true})"), std::invalid_argument);
+    EXPECT_THROW((void)parse_strict("{\"" + std::string(MAX_JSON_KEY_BYTES + 1, 'a') + "\":true}"),
+                 std::invalid_argument);
+}
+
 // ==================== Timestamp Tests ====================
 
 TEST(JsonTimestampTest, ParseValidTimestamp) {
@@ -23,6 +44,24 @@ TEST(JsonTimestampTest, ParseInvalidTimestamp) {
     auto ts = parse_timestamp("invalid");
 
     EXPECT_FALSE(ts.has_value());
+}
+
+TEST(JsonTimestampTest, ParsesOffsetsAndFractionsAsUtc) {
+    const auto utc = parse_timestamp("2026-01-19T09:30:00.125Z");
+    const auto offset = parse_timestamp("2026-01-19T12:00:00.125+02:30");
+
+    ASSERT_TRUE(utc.has_value());
+    ASSERT_TRUE(offset.has_value());
+    EXPECT_EQ(*utc, *offset);
+}
+
+TEST(JsonTimestampTest, RejectsInvalidCalendarAndNonRfc3339Values) {
+    EXPECT_FALSE(parse_timestamp("2025-02-29T00:00:00Z").has_value());
+    EXPECT_FALSE(parse_timestamp("2024-02-30T00:00:00Z").has_value());
+    EXPECT_FALSE(parse_timestamp("2026-01-19 12:00:00Z").has_value());
+    EXPECT_FALSE(parse_timestamp("2026-01-19T12:00:60Z").has_value());
+    EXPECT_FALSE(parse_timestamp("2026-01-19T12:00:00z").has_value());
+    EXPECT_FALSE(parse_timestamp("2026-01-19T12:00:00.1234567890Z").has_value());
 }
 
 TEST(JsonTimestampTest, FormatTimestamp) {
@@ -64,7 +103,7 @@ TEST(JsonMetadataTest, ParseMixedValues) {
     auto meta = parse_metadata(j);
 
     EXPECT_EQ(meta["str"], "hello");
-    EXPECT_EQ(meta["num"], "42.000000");  // number to string
+    EXPECT_EQ(meta["num"], "42.000000"); // number to string
     EXPECT_EQ(meta["bool"], "true");
 }
 
@@ -104,6 +143,17 @@ TEST(JsonEntitlementTest, ParseEntitlementWithMetadata) {
 
     EXPECT_EQ(ent.key, "premium");
     EXPECT_EQ(ent.metadata.at("tier"), "gold");
+}
+
+TEST(JsonEntitlementTest, RejectsMalformedOrOutOfRangeExpiry) {
+    EXPECT_THROW((void)parse_entitlement({{"key", "updates"}, {"expires_at", "not-a-time"}}),
+                 std::invalid_argument);
+    EXPECT_THROW((void)parse_entitlement({{"key", "updates"}, {"expires_at", 1.5}}),
+                 std::invalid_argument);
+    EXPECT_THROW((void)parse_entitlement({{"key", "updates"}, {"expires_at", -1}}),
+                 std::invalid_argument);
+    EXPECT_THROW((void)parse_entitlement({{"key", "updates"}, {"expires_at", 253402300800LL}}),
+                 std::invalid_argument);
 }
 
 TEST(JsonEntitlementTest, ParseEntitlementsArray) {
@@ -187,6 +237,15 @@ TEST(JsonLicenseTest, ParseLicenseWithNullSeatLimit) {
     EXPECT_FALSE(license.seat_limit().has_value());
 }
 
+TEST(JsonLicenseTest, RejectsMalformedDatesInsteadOfTreatingThemAsPerpetual) {
+    EXPECT_THROW(
+        (void)parse_license({{"key", "KEY"}, {"status", "active"}, {"starts_at", "invalid"}}),
+        std::invalid_argument);
+    EXPECT_THROW(
+        (void)parse_license({{"key", "KEY"}, {"status", "active"}, {"expires_at", "invalid"}}),
+        std::invalid_argument);
+}
+
 // ==================== Activation Parsing Tests ====================
 
 TEST(JsonActivationTest, ParseFullActivation) {
@@ -237,6 +296,17 @@ TEST(JsonActivationTest, ParseFingerprintFieldAsDeviceId) {
     EXPECT_EQ(activation.fingerprint(), "fp-123");
 }
 
+TEST(JsonActivationTest, RejectsMalformedLifecycleDates) {
+    EXPECT_THROW((void)parse_activation({{"id", 1}, {"activated_at", "invalid"}}),
+                 std::invalid_argument);
+    EXPECT_THROW(
+        (void)parse_activation(
+            {{"id", 1}, {"activated_at", "2026-01-19T12:00:00Z"}, {"deactivated_at", "invalid"}}),
+        std::invalid_argument);
+    EXPECT_THROW((void)parse_deactivation({{"activation_id", 1}, {"deactivated_at", "invalid"}}),
+                 std::invalid_argument);
+}
+
 // ==================== Deactivation Parsing Tests ====================
 
 TEST(JsonDeactivationTest, ParseDeactivation) {
@@ -259,8 +329,8 @@ TEST(JsonValidationWarningTest, ParseWarning) {
 }
 
 TEST(JsonValidationWarningTest, ParseWarningsArray) {
-    nlohmann::json j = nlohmann::json::array(
-        {{{"code", "warn1"}, {"message", "Warning 1"}}, {{"code", "warn2"}, {"message", "Warning 2"}}});
+    nlohmann::json j = nlohmann::json::array({{{"code", "warn1"}, {"message", "Warning 1"}},
+                                              {{"code", "warn2"}, {"message", "Warning 2"}}});
 
     auto warnings = parse_validation_warnings(j);
 
@@ -299,9 +369,10 @@ TEST(JsonValidationResultTest, ParseInvalidResult) {
 }
 
 TEST(JsonValidationResultTest, ParseWithWarnings) {
-    nlohmann::json j = {{"valid", true},
-                        {"warnings", {{{"code", "expiring_soon"}, {"message", "Expires in 7 days"}}}},
-                        {"license", {{"key", "KEY-123"}, {"status", "active"}}}};
+    nlohmann::json j = {
+        {"valid", true},
+        {"warnings", {{{"code", "expiring_soon"}, {"message", "Expires in 7 days"}}}},
+        {"license", {{"key", "KEY-123"}, {"status", "active"}}}};
 
     auto result = parse_validation_result(j);
 
@@ -341,7 +412,8 @@ TEST(JsonOfflineTokenTest, ParseFullOfflineToken) {
           {"kid", "key-v1"},
           {"entitlements", {{{"key", "updates"}}, {{"key", "support"}}}},
           {"metadata", {{"plan", "pro"}}}}},
-        {"signature", {{"algorithm", "Ed25519"}, {"key_id", "key-v1"}, {"value", "base64-signature"}}},
+        {"signature",
+         {{"algorithm", "Ed25519"}, {"key_id", "key-v1"}, {"value", "base64-signature"}}},
         {"canonical", R"({"license_key":"KEY-123"})"}};
 
     auto offline = parse_offline_token(j);
@@ -371,9 +443,10 @@ TEST(JsonOfflineTokenTest, ParseFullOfflineToken) {
 }
 
 TEST(JsonOfflineTokenTest, ParseMinimalOfflineToken) {
-    nlohmann::json j = {{"token", {{"license_key", "KEY-123"}, {"iat", 1000}, {"exp", 2000}, {"nbf", 1000}}},
-                        {"signature", {{"value", "sig"}}},
-                        {"canonical", "{}"}};
+    nlohmann::json j = {
+        {"token", {{"license_key", "KEY-123"}, {"iat", 1000}, {"exp", 2000}, {"nbf", 1000}}},
+        {"signature", {{"value", "sig"}}},
+        {"canonical", "{}"}};
 
     auto offline = parse_offline_token(j);
 
@@ -400,6 +473,34 @@ TEST(JsonOfflineTokenTest, ParseFingerprintAsPreferredBindingField) {
     ASSERT_TRUE(offline.token.device_id.has_value());
     EXPECT_EQ(*offline.token.fingerprint, "fp-123");
     EXPECT_EQ(*offline.token.device_id, "fp-123");
+}
+
+TEST(JsonOfflineTokenTest, SignedPayloadComparisonBindsEntitlementMetadataAndSchema) {
+    nlohmann::json signed_payload = {
+        {"schema_version", 1},
+        {"license_key", "KEY-123"},
+        {"product_slug", "my-app"},
+        {"plan_key", "pro"},
+        {"mode", "hardware_locked"},
+        {"fingerprint", "fp-12345"},
+        {"iat", 1737280800},
+        {"exp", 1737367200},
+        {"nbf", 1737280800},
+        {"kid", "key-v1"},
+        {"entitlements",
+         nlohmann::json::array(
+             {{{"key", "updates"}, {"expires_at", nullptr}, {"metadata", {{"tier", "gold"}}}}})},
+        {"metadata", {{"customer", "acme"}}}};
+
+    auto token = parse_offline_token_payload(signed_payload);
+    EXPECT_TRUE(offline_token_payload_matches_json(token, signed_payload));
+
+    token.entitlements[0].metadata["tier"] = "admin";
+    EXPECT_FALSE(offline_token_payload_matches_json(token, signed_payload));
+
+    token = parse_offline_token_payload(signed_payload);
+    signed_payload["unsigned_authority"] = true;
+    EXPECT_FALSE(offline_token_payload_matches_json(token, signed_payload));
 }
 
 // ==================== Machine File Tests ====================
@@ -442,31 +543,27 @@ TEST(JsonMachineFileTest, ParseMachineFilePayloadWithLicense) {
           {"lic", "KEY-123"},
           {"license_exp", 1760000000},
           {"kid", "kid-v1"},
-          {"sdk_version", "cpp-0.5.1"}}},
+          {"sdk_version", "cpp-0.6.0"}}},
         {"data",
          {{"type", "machines"},
           {"id", "42"},
           {"attributes",
            {{"fingerprint", "fp-123"},
             {"fingerprint_components",
-             {{"schema_version", "1"},
-              {"platform", "macos"},
-              {"platform_uuid", "ABC-123"}}},
+             {{"schema_version", "1"}, {"platform", "macos"}, {"platform_uuid", "ABC-123"}}},
             {"name", "Studio Mac"},
             {"platform", "darwin"},
             {"created", "2026-03-24T10:00:00Z"},
             {"metadata", {{"device_name", "Studio Mac"}}}}}}},
-        {"included",
-         nlohmann::json::array(
-             {{{"type", "licenses"},
-               {"id", "KEY-123"},
-               {"attributes",
-                {{"key", "KEY-123"},
-                 {"status", "active"},
-                 {"mode", "hardware_locked"},
-                 {"plan_key", "pro"},
-                 {"product_slug", "my-app"},
-                 {"entitlements", {{{"key", "pro_features"}}}}}}}})}};
+        {"included", nlohmann::json::array({{{"type", "licenses"},
+                                             {"id", "KEY-123"},
+                                             {"attributes",
+                                              {{"key", "KEY-123"},
+                                               {"status", "active"},
+                                               {"mode", "hardware_locked"},
+                                               {"plan_key", "pro"},
+                                               {"product_slug", "my-app"},
+                                               {"entitlements", {{{"key", "pro_features"}}}}}}}})}};
 
     auto payload = parse_machine_file_payload(j);
 
@@ -504,20 +601,20 @@ TEST(JsonMachineFileTest, ParseMachineFilePayloadWithNullableOptionalFields) {
             {"name", nullptr},
             {"platform", nullptr},
             {"created", "2026-03-24T10:00:00Z"},
-            {"metadata", {{"device_name", "Studio Mac"}, {"created_during_grace_period", false}}}}}}},
-        {"included",
-         nlohmann::json::array({{{"type", "licenses"},
-                                 {"id", "KEY-123"},
-                                 {"attributes",
-                                  {{"key", "KEY-123"},
-                                   {"status", "active"},
-                                   {"mode", "hardware_locked"},
-                                   {"plan_key", "pro"},
-                                   {"product_slug", "my-app"},
-                                   {"starts_at", nullptr},
-                                   {"ends_at", nullptr},
-                                   {"entitlements", {{{"key", "updates"}}}},
-                                   {"metadata", {{"issued_manually", true}}}}}}})}};
+            {"metadata",
+             {{"device_name", "Studio Mac"}, {"created_during_grace_period", false}}}}}}},
+        {"included", nlohmann::json::array({{{"type", "licenses"},
+                                             {"id", "KEY-123"},
+                                             {"attributes",
+                                              {{"key", "KEY-123"},
+                                               {"status", "active"},
+                                               {"mode", "hardware_locked"},
+                                               {"plan_key", "pro"},
+                                               {"product_slug", "my-app"},
+                                               {"starts_at", nullptr},
+                                               {"ends_at", nullptr},
+                                               {"entitlements", {{{"key", "updates"}}}},
+                                               {"metadata", {{"issued_manually", true}}}}}}})}};
 
     auto payload = parse_machine_file_payload(j);
 
@@ -549,9 +646,10 @@ TEST(JsonReleaseTest, ParseFullRelease) {
 }
 
 TEST(JsonReleaseTest, ParseReleasesListWrapped) {
-    nlohmann::json j = {
-        {"object", "list"},
-        {"data", {{{"version", "1.0.0"}, {"channel", "stable"}}, {{"version", "0.9.0"}, {"channel", "beta"}}}}};
+    nlohmann::json j = {{"object", "list"},
+                        {"data",
+                         {{{"version", "1.0.0"}, {"channel", "stable"}},
+                          {{"version", "0.9.0"}, {"channel", "beta"}}}}};
 
     auto releases = parse_releases(j);
 
@@ -562,7 +660,7 @@ TEST(JsonReleaseTest, ParseReleasesListWrapped) {
 
 TEST(JsonReleaseTest, ParseReleasesListRaw) {
     nlohmann::json j = nlohmann::json::array({{{"version", "1.0.0"}, {"channel", "stable"}},
-                                               {{"version", "0.9.0"}, {"channel", "beta"}}});
+                                              {{"version", "0.9.0"}, {"channel", "beta"}}});
 
     auto releases = parse_releases(j);
 
@@ -595,7 +693,8 @@ TEST(JsonSigningKeyTest, ParseSigningKey) {
 // ==================== Error Response Tests ====================
 
 TEST(JsonErrorResponseTest, ParseError) {
-    nlohmann::json j = {{"error", {{"code", "license_not_found"}, {"message", "License not found"}}}};
+    nlohmann::json j = {
+        {"error", {{"code", "license_not_found"}, {"message", "License not found"}}}};
 
     auto err = parse_error_response(j);
 
@@ -604,11 +703,9 @@ TEST(JsonErrorResponseTest, ParseError) {
 }
 
 TEST(JsonErrorResponseTest, ParseMachineFileErrorsArray) {
-    nlohmann::json j = {{"errors",
-                         nlohmann::json::array(
-                             {{{"code", "DEVICE_NOT_ACTIVATED"},
-                               {"title", "Device not activated"},
-                               {"detail", "Activate first"}}})}};
+    nlohmann::json j = {{"errors", nlohmann::json::array({{{"code", "DEVICE_NOT_ACTIVATED"},
+                                                           {"title", "Device not activated"},
+                                                           {"detail", "Activate first"}}})}};
 
     auto err = parse_error_response(j);
 
@@ -621,7 +718,8 @@ TEST(JsonErrorCodeMappingTest, ErrorCodeToErrorCode) {
     EXPECT_EQ(error_code_to_error_code("license_expired"), ErrorCode::LicenseExpired);
     EXPECT_EQ(error_code_to_error_code("seat_limit_exceeded"), ErrorCode::SeatLimitExceeded);
     EXPECT_EQ(error_code_to_error_code("activation_not_found"), ErrorCode::ActivationNotFound);
-    EXPECT_EQ(error_code_to_error_code("device_already_activated"), ErrorCode::DeviceAlreadyActivated);
+    EXPECT_EQ(error_code_to_error_code("device_already_activated"),
+              ErrorCode::DeviceAlreadyActivated);
     EXPECT_EQ(error_code_to_error_code("product_not_found"), ErrorCode::ProductNotFound);
     EXPECT_EQ(error_code_to_error_code("release_not_found"), ErrorCode::ReleaseNotFound);
     EXPECT_EQ(error_code_to_error_code("missing_parameter"), ErrorCode::MissingParameter);
@@ -716,9 +814,7 @@ TEST(JsonRequestBuilderTest, BuildMachineFileRequest) {
 
 TEST(JsonRequestBuilderTest, BuildMachineFileRequestWithFingerprintComponents) {
     Metadata fingerprint_components{
-        {"schema_version", "1"},
-        {"platform", "linux"},
-        {"machine_id", "machine-123"}};
+        {"schema_version", "1"}, {"platform", "linux"}, {"machine_id", "machine-123"}};
 
     auto body = build_machine_file_request("fp-123", 45, fingerprint_components);
 
@@ -728,6 +824,6 @@ TEST(JsonRequestBuilderTest, BuildMachineFileRequestWithFingerprintComponents) {
     EXPECT_EQ(body["fingerprint_components"]["machine_id"], "machine-123");
 }
 
-}  // namespace
-}  // namespace json
-}  // namespace licenseseat
+} // namespace
+} // namespace json
+} // namespace licenseseat

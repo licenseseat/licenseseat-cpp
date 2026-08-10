@@ -7,352 +7,346 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v1.0.0)'
+        description: Version tag (for example, v1.0.0)
         required: true
         type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
 
 env:
   BUILD_TYPE: Release
 
 jobs:
-  # =============================================================================
-  # Generate Single-Header Distribution
-  # =============================================================================
-  generate-single-header:
-    name: Generate Single-Header
+  validate-release:
+    name: Validate release source
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Generate single-header
-        run: python3 scripts/amalgamate.py > licenseseat_single.hpp
+      - name: Validate tag and source versions
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          version="${REF_NAME}"
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${REQUESTED_VERSION}"
+          fi
+          python3 scripts/validate-release-version.py \
+            "${version}" \
+            --github-output "${GITHUB_OUTPUT}"
 
-      - name: Verify single-header compiles
+      - name: Audit exact vendored commits
+        run: python3 scripts/audit-vendored-dependencies.py --online
+
+      - name: Check patch integrity
+        run: git diff --check
+
+  generate-single-header:
+    name: Generate single header
+    needs: validate-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install OpenSSL
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libssl-dev \
-            nlohmann-json3-dev
-          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
-          sudo cp /tmp/cpp-httplib/httplib.h /usr/local/include/
+          sudo apt-get install -y libssl-dev
 
-          cat > /tmp/test.cpp << 'EOF'
+      - name: Generate reproducibly
+        run: |
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          export SOURCE_DATE_EPOCH
+          python3 scripts/amalgamate.py > licenseseat_single.hpp
+
+      - name: Compile and run smoke test
+        run: |
+          cat > "${RUNNER_TEMP}/test.cpp" <<'EOF'
           #define LICENSESEAT_IMPLEMENTATION
           #include "licenseseat_single.hpp"
-          int main() { return 0; }
+
+          int main() {
+              const std::vector<uint8_t> input{'o', 'k'};
+              const auto encoded = licenseseat::crypto::base64_encode(input);
+              return licenseseat::crypto::base64_decode(encoded) == input ? 0 : 1;
+          }
           EOF
           g++ -std=c++17 \
             -DCPPHTTPLIB_OPENSSL_SUPPORT \
-            -I. \
-            -I/usr/local/include \
-            /tmp/test.cpp \
-            -o /tmp/test \
-            -lssl \
-            -lcrypto
+            -I. -Ideps \
+            "${RUNNER_TEMP}/test.cpp" \
+            -o "${RUNNER_TEMP}/test" \
+            -lssl -lcrypto -pthread
+          "${RUNNER_TEMP}/test"
 
-      - name: Upload single-header artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload single header
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: single-header
           path: licenseseat_single.hpp
+          if-no-files-found: error
+          retention-days: 1
 
-  # =============================================================================
-  # Build Linux x64 Static Library
-  # =============================================================================
   build-linux-x64:
     name: Build Linux x64
+    needs: validate-release
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libssl-dev \
-            nlohmann-json3-dev \
-            cmake \
-            ninja-build
+          sudo apt-get install -y libssl-dev cmake ninja-build
 
-      - name: Install cpp-httplib
+      - name: Configure and build
         run: |
-          git clone --depth 1 --branch v0.18.0 https://github.com/yhirose/cpp-httplib.git /tmp/cpp-httplib
-          sudo mkdir -p /usr/local/include
-          sudo cp /tmp/cpp-httplib/httplib.h /usr/local/include/
-          sudo mkdir -p /usr/local/lib/cmake/httplib
-          cat << 'EOF' | sudo tee /usr/local/lib/cmake/httplib/httplibConfig.cmake
-          add_library(httplib::httplib INTERFACE IMPORTED)
-          set_target_properties(httplib::httplib PROPERTIES
-            INTERFACE_INCLUDE_DIRECTORIES "/usr/local/include"
-          )
-          EOF
-
-      - name: Configure
-        run: |
-          cmake -B build \
+          cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DLICENSESEAT_BUILD_TESTS=OFF \
             -DLICENSESEAT_BUILD_EXAMPLES=OFF
+          cmake --build build
 
-      - name: Build
-        run: cmake --build build
-
-      - name: Package
+      - name: Install and package
         run: |
-          mkdir -p package/lib package/include
-          cp build/liblicenseseat.a package/lib/
-          cp -r include/licenseseat package/include/
-          cp LICENSE package/ 2>/dev/null || echo "MIT License" > package/LICENSE
-          cp README.md package/ 2>/dev/null || true
-          cd package && tar -czvf ../licenseseat-linux-x64.tar.gz .
+          cmake --install build --prefix package
+          cmake -S tests/package-consumer -B package-consumer-build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_PREFIX_PATH="$PWD/package"
+          cmake --build package-consumer-build
+          ./package-consumer-build/licenseseat_package_consumer
+          install -m 0644 LICENSE README.md THIRD_PARTY_LICENSES.md package/
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          tar \
+            --sort=name \
+            --owner=0 --group=0 --numeric-owner \
+            --mtime="@${source_date_epoch}" \
+            -czf licenseseat-linux-x64.tar.gz \
+            -C package .
+          tar -tzf licenseseat-linux-x64.tar.gz >/dev/null
+          test -s licenseseat-linux-x64.tar.gz
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: linux-x64
           path: licenseseat-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
 
-  # =============================================================================
-  # Build macOS Intel Static Library
-  # =============================================================================
   build-macos-intel:
     name: Build macOS Intel
+    needs: validate-release
     runs-on: macos-15-intel
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install dependencies
-        run: |
-          brew install \
-            openssl@3 \
-            nlohmann-json \
-            cpp-httplib \
-            ninja
+        run: brew install openssl@3 ninja
 
-      - name: Configure
+      - name: Configure and build
         run: |
-          cmake -B build \
+          cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DLICENSESEAT_BUILD_TESTS=OFF \
             -DLICENSESEAT_BUILD_EXAMPLES=OFF \
-            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+          cmake --build build
 
-      - name: Build
-        run: cmake --build build
-
-      - name: Package
+      - name: Install and package
         run: |
-          mkdir -p package/lib package/include
-          cp build/liblicenseseat.a package/lib/
-          cp -r include/licenseseat package/include/
-          cp LICENSE package/ 2>/dev/null || echo "MIT License" > package/LICENSE
-          cp README.md package/ 2>/dev/null || true
-          cd package && tar -czvf ../licenseseat-macos-intel.tar.gz .
+          cmake --install build --prefix package
+          install -m 0644 LICENSE README.md THIRD_PARTY_LICENSES.md package/
+          COPYFILE_DISABLE=1 tar -czf licenseseat-macos-intel.tar.gz -C package .
+          tar -tzf licenseseat-macos-intel.tar.gz >/dev/null
+          test -s licenseseat-macos-intel.tar.gz
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: macos-intel
           path: licenseseat-macos-intel.tar.gz
+          if-no-files-found: error
+          retention-days: 1
 
-  # =============================================================================
-  # Build macOS ARM64 Static Library
-  # =============================================================================
   build-macos-arm:
     name: Build macOS ARM64
+    needs: validate-release
     runs-on: macos-15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install dependencies
-        run: |
-          brew install \
-            openssl@3 \
-            nlohmann-json \
-            cpp-httplib \
-            ninja
+        run: brew install openssl@3 ninja
 
-      - name: Configure
+      - name: Configure and build
         run: |
-          cmake -B build \
+          cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
             -DLICENSESEAT_BUILD_TESTS=OFF \
             -DLICENSESEAT_BUILD_EXAMPLES=OFF \
-            -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+          cmake --build build
 
-      - name: Build
-        run: cmake --build build
-
-      - name: Package
+      - name: Install and package
         run: |
-          mkdir -p package/lib package/include
-          cp build/liblicenseseat.a package/lib/
-          cp -r include/licenseseat package/include/
-          cp LICENSE package/ 2>/dev/null || echo "MIT License" > package/LICENSE
-          cp README.md package/ 2>/dev/null || true
-          cd package && tar -czvf ../licenseseat-macos-arm64.tar.gz .
+          cmake --install build --prefix package
+          install -m 0644 LICENSE README.md THIRD_PARTY_LICENSES.md package/
+          COPYFILE_DISABLE=1 tar -czf licenseseat-macos-arm64.tar.gz -C package .
+          tar -tzf licenseseat-macos-arm64.tar.gz >/dev/null
+          test -s licenseseat-macos-arm64.tar.gz
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: macos-arm64
           path: licenseseat-macos-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
 
-  # =============================================================================
-  # Build Windows x64 Static Library
-  # =============================================================================
   build-windows-x64:
     name: Build Windows x64
+    needs: validate-release
     runs-on: windows-2022
-
+    timeout-minutes: 45
     env:
-      # Disable vcpkg binary caching entirely (x-gha was removed in June 2025)
-      VCPKG_BINARY_SOURCES: "clear"
+      VCPKG_BINARY_SOURCES: clear
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
+      - name: Setup pinned vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
         with:
-          vcpkgGitCommitId: "b5d1a94fb7f88fd835e360fd23a45a09ceedbf48"
+          vcpkgGitCommitId: ea1a7396b05637a53bf23c078647ecc0edee4b80
 
-      - name: Cache vcpkg installed packages
-        uses: actions/cache@v4
-        with:
-          path: build/vcpkg_installed
-          key: vcpkg-installed-release-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-installed-release-${{ runner.os }}-
-            vcpkg-installed-${{ runner.os }}-
-
-      - name: Configure
+      - name: Configure and build
         run: |
-          cmake -B build `
+          cmake -S . -B build `
             -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
             -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
             -DLICENSESEAT_BUILD_TESTS=OFF `
             -DLICENSESEAT_BUILD_EXAMPLES=OFF
+          cmake --build build --config ${{ env.BUILD_TYPE }}
 
-      - name: Build
-        run: cmake --build build --config ${{ env.BUILD_TYPE }}
-
-      - name: Package
-        shell: bash
+      - name: Install and package
+        shell: pwsh
         run: |
-          mkdir -p package/lib package/include
-          cp build/Release/licenseseat.lib package/lib/
-          cp -r include/licenseseat package/include/
-          cp LICENSE package/ 2>/dev/null || echo "MIT License" > package/LICENSE
-          cp README.md package/ 2>/dev/null || true
-          cd package && 7z a ../licenseseat-windows-x64.zip .
+          cmake --install build --config ${{ env.BUILD_TYPE }} --prefix package
+          Copy-Item LICENSE,README.md,THIRD_PARTY_LICENSES.md package/
+          7z a licenseseat-windows-x64.zip ./package/*
+          7z t licenseseat-windows-x64.zip
+          if ((Get-Item licenseseat-windows-x64.zip).Length -eq 0) { exit 1 }
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: windows-x64
           path: licenseseat-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 1
 
-  # =============================================================================
-  # Create GitHub Release
-  # =============================================================================
   create-release:
-    name: Create Release
-    runs-on: ubuntu-24.04
+    name: Attest and create release
     needs:
+      - validate-release
       - generate-single-header
       - build-linux-x64
       - build-macos-intel
       - build-macos-arm
       - build-windows-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - name: Download exact build artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: artifacts
 
-      - name: Prepare release files
+      - name: Assemble and checksum release files
         run: |
-          mkdir -p release
-          cp artifacts/single-header/licenseseat_single.hpp release/
-          cp artifacts/linux-x64/licenseseat-linux-x64.tar.gz release/
-          cp artifacts/macos-intel/licenseseat-macos-intel.tar.gz release/
-          cp artifacts/macos-arm64/licenseseat-macos-arm64.tar.gz release/
-          cp artifacts/windows-x64/licenseseat-windows-x64.zip release/
-          ls -la release/
+          mkdir release
+          install -m 0644 artifacts/single-header/licenseseat_single.hpp release/
+          install -m 0644 artifacts/linux-x64/licenseseat-linux-x64.tar.gz release/
+          install -m 0644 artifacts/macos-intel/licenseseat-macos-intel.tar.gz release/
+          install -m 0644 artifacts/macos-arm64/licenseseat-macos-arm64.tar.gz release/
+          install -m 0644 artifacts/windows-x64/licenseseat-windows-x64.zip release/
+          test "$(find release -maxdepth 1 -type f | wc -l)" -eq 5
+          (cd release && sha256sum \
+            licenseseat_single.hpp \
+            licenseseat-linux-x64.tar.gz \
+            licenseseat-macos-intel.tar.gz \
+            licenseseat-macos-arm64.tar.gz \
+            licenseseat-windows-x64.zip > SHA256SUMS)
+          (cd release && sha256sum -c SHA256SUMS)
 
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Attest release provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
-          tag_name: ${{ steps.version.outputs.version }}
-          name: LicenseSeat C++ SDK ${{ steps.version.outputs.version }}
+          subject-path: release/*
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.validate-release.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: LicenseSeat C++ SDK ${{ needs.validate-release.outputs.version }}
           draft: false
-          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          prerelease: ${{ contains(needs.validate-release.outputs.version, '-') }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             release/licenseseat_single.hpp
             release/licenseseat-linux-x64.tar.gz
             release/licenseseat-macos-intel.tar.gz
             release/licenseseat-macos-arm64.tar.gz
             release/licenseseat-windows-x64.zip
+            release/SHA256SUMS
           body: |
             ## Installation
 
-            ### Single-Header (Recommended for plugins/games)
-            Download `licenseseat_single.hpp`.
-            Link against OpenSSL when using machine-file verification or HTTPS endpoints.
+            The single-header and prebuilt archives are attached to this release.
+            Verify downloads with `SHA256SUMS` or GitHub's artifact attestation.
 
-            ```cpp
-            // In ONE .cpp file:
-            #define LICENSESEAT_IMPLEMENTATION
-            #include "licenseseat_single.hpp"
-
-            // In all other files:
-            #include "licenseseat_single.hpp"
-            ```
-
-            ### Prebuilt Static Libraries
-            Download the appropriate archive for your platform:
-            - **Linux x64**: `licenseseat-linux-x64.tar.gz`
-            - **macOS Intel**: `licenseseat-macos-intel.tar.gz`
-            - **macOS ARM64**: `licenseseat-macos-arm64.tar.gz`
-            - **Windows x64**: `licenseseat-windows-x64.zip`
-
-            Each archive contains:
-            - `lib/` - Static library (`liblicenseseat.a` or `licenseseat.lib`)
-            - `include/` - Header files
-
-            Link with OpenSSL (`-lssl -lcrypto`) when using the prebuilt libraries or the single-header implementation.
-
-            ## Requirements
-            - C++17 compiler
-            - nlohmann/json (for JSON parsing)
-            - cpp-httplib (for HTTP/HTTPS requests)
-            - OpenSSL (for HTTPS and machine-file cryptography)
+            The full SDK requires C++17 and OpenSSL. Direct single-header builds
+            also need the vendored-compatible nlohmann/json and cpp-httplib
+            headers. On macOS, link Security.framework so TLS verification can
+            use trusted roots from the system Keychain.

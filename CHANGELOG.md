@@ -2,6 +2,26 @@
 
 All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
+## [Unreleased]
+
+## [0.6.0] - 2026-08-10
+
+### Security
+
+- Hardened URL, request, response, JSON, identifier, timestamp, and offline-artifact validation with explicit size and complexity bounds.
+- Bound offline tokens and machine files to the requested license and local fingerprint, and made unsupported or inconsistent signed claims fail closed.
+- Replaced the legacy vendored Ed25519 implementation with OpenSSL EVP verification and strict canonical Base64 handling.
+- Upgraded the vendored HTTP transport from cpp-httplib 0.15.3 to 0.52.0, which includes fixes for published client-side credential-leakage, TLS-verification, response-parsing, and denial-of-service advisories.
+- Upgraded nlohmann/json to 3.12.0 and added exact source hashes, upstream commit provenance, and fail-closed OSV checks for all vendored dependencies.
+- Hardened file persistence against symlink attacks, partial writes, unbounded reads, unsafe names, and concurrent snapshot corruption.
+- Pinned CI and release actions to immutable commits and added release checksums and signed build-provenance attestations.
+- Made offline authorization fail closed by default: both an explicit fallback mode and a positive bounded grace period are now required, and disabled clients no longer fetch or refresh offline credentials.
+
+### Changed
+
+- Unified event subscription ownership and strengthened client timer, callback, and teardown concurrency behavior.
+- Aligned the JUCE and Unreal integrations with the same secret-safe request and response-binding rules as the core SDK.
+
 ## [0.4.0] - 2026-02-09
 
 ### Added

@@ -1,10 +1,11 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "licenseseat",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "C++ SDK for LicenseSeat licensing API",
   "homepage": "https://github.com/licenseseat/licenseseat-cpp",
   "license": "MIT",
+  "builtin-baseline": "ea1a7396b05637a53bf23c078647ecc0edee4b80",
   "supports": "!uwp",
   "dependencies": [
     "openssl"

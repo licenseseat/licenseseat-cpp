@@ -2,7 +2,7 @@
 
 This SDK bundles the following third-party libraries:
 
-## nlohmann/json (v3.11.3)
+## nlohmann/json (v3.12.0)
 
 **License:** MIT
 
@@ -28,7 +28,7 @@ SOFTWARE.
 
 ---
 
-## cpp-httplib (v0.15.3)
+## cpp-httplib (v0.52.0)
 
 **License:** MIT
 
@@ -51,15 +51,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-## ed25519
-
-**License:** Public Domain (zlib-style)
-
-The ed25519 implementation in `deps/ed25519/` is based on the SUPERCOP reference
-implementation and is released into the public domain.
 
 ---
 

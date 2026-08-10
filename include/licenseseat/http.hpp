@@ -10,6 +10,7 @@
 
 #include "licenseseat.hpp"
 
+#include <cstddef>
 #include <functional>
 #include <string>
 
@@ -23,6 +24,7 @@ enum class Method { GET, POST, PUT, DELETE_METHOD };
 struct Response {
     int status_code = 0;
     std::string body;
+    std::string content_type;
     bool success = false;
     std::string error_message;
 };
@@ -33,6 +35,9 @@ struct Request {
     std::string path;
     std::string body;
     std::string content_type = "application/json";
+    bool authenticated = true;
+    bool retryable = false;
+    bool expect_json = true;
 };
 
 /**
@@ -65,8 +70,11 @@ class HttpClient : public HttpClientInterface {
         std::string api_key;
         int timeout_seconds = 30;
         bool verify_ssl = true;
+        bool allow_insecure_http = false;
         int max_retries = 3;
         int retry_interval_ms = 1000;
+        std::size_t max_request_bytes = 1024 * 1024;
+        std::size_t max_response_bytes = 1024 * 1024;
     };
 
     /// Construct with configuration
@@ -130,5 +138,5 @@ class HttpClient : public HttpClientInterface {
     }
 }
 
-}  // namespace http
-}  // namespace licenseseat
+} // namespace http
+} // namespace licenseseat

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 
 project(licenseseat
-    VERSION 0.5.1
+    VERSION 0.6.0
     DESCRIPTION "C++ SDK for LicenseSeat licensing API"
     HOMEPAGE_URL "https://github.com/licenseseat/licenseseat-cpp"
     LANGUAGES CXX C
@@ -47,24 +47,12 @@ if(LICENSESEAT_ENABLE_CLANG_TIDY)
     endif()
 endif()
 
-# OpenSSL is the only external dependency (for HTTPS and machine-file AES-GCM)
+# OpenSSL is the only external dependency (for HTTPS, Ed25519 verification,
+# and machine-file AES-GCM)
 find_package(OpenSSL REQUIRED)
 
-# JSON and HTTP are bundled (no installation needed)
-
-# Vendored ed25519 sources
-set(ED25519_SOURCES
-    deps/ed25519/add_scalar.c
-    deps/ed25519/fe.c
-    deps/ed25519/ge.c
-    deps/ed25519/key_exchange.c
-    deps/ed25519/keypair.c
-    deps/ed25519/sc.c
-    deps/ed25519/seed.c
-    deps/ed25519/sha512.c
-    deps/ed25519/sign.c
-    deps/ed25519/verify.c
-)
+# JSON and HTTP are pinned, audited, and bundled. nlohmann/json is part of the
+# public header surface, so its exact bundled headers are also installed.
 
 # Main library sources
 set(LICENSESEAT_SOURCES
@@ -74,7 +62,6 @@ set(LICENSESEAT_SOURCES
     src/storage.cpp
     src/crypto.cpp
     src/telemetry.cpp
-    ${ED25519_SOURCES}
 )
 
 add_library(licenseseat ${LICENSESEAT_SOURCES})
@@ -84,11 +71,13 @@ add_library(licenseseat::licenseseat ALIAS licenseseat)
 target_include_directories(licenseseat
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps>
         $<INSTALL_INTERFACE:include>
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/deps
-        ${CMAKE_CURRENT_SOURCE_DIR}/deps/ed25519
 )
+
+# Bundled third-party headers are audited and pinned separately; do not make
+# compiler-version-specific warnings in those headers fail consumer builds.
+target_include_directories(licenseseat SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/deps)
 
 # Compile definitions for HTTPS support via cpp-httplib
 target_compile_definitions(licenseseat
@@ -110,6 +99,7 @@ if(APPLE)
         "-framework CoreFoundation"
         "-framework IOKit"
         "-framework CoreGraphics"
+        "-framework Security"
     )
 endif()
 
@@ -144,6 +134,10 @@ install(TARGETS licenseseat
 )
 
 install(DIRECTORY include/licenseseat
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(DIRECTORY deps/nlohmann
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
@@ -192,6 +186,6 @@ message(STATUS "LicenseSeat C++ SDK ${PROJECT_VERSION}")
 message(STATUS "  Build tests:    ${LICENSESEAT_BUILD_TESTS}")
 message(STATUS "  Build examples: ${LICENSESEAT_BUILD_EXAMPLES}")
 message(STATUS "  clang-tidy:     ${LICENSESEAT_ENABLE_CLANG_TIDY}")
-message(STATUS "  Dependencies:   Bundled (nlohmann/json, cpp-httplib, ed25519, PicoSHA2)")
-message(STATUS "  External:       OpenSSL only")
+message(STATUS "  Dependencies:   Bundled (nlohmann/json, cpp-httplib, PicoSHA2)")
+message(STATUS "  External:       OpenSSL (TLS, Ed25519, AES-GCM)")
 message(STATUS "")

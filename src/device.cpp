@@ -1,5 +1,7 @@
 #include "licenseseat/device.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -35,9 +37,18 @@ namespace internal {
 // Forward declaration - implementation in crypto.cpp
 std::string sha256_hex(const std::string& input);
 
-}  // namespace internal
+} // namespace internal
 
 namespace {
+
+constexpr std::size_t MAX_FINGERPRINT_COMPONENT_BYTES = 255;
+
+bool safe_component(const std::string& value) {
+    return !value.empty() && value.size() <= MAX_FINGERPRINT_COMPONENT_BYTES &&
+           std::all_of(value.begin(), value.end(), [](unsigned char character) {
+               return character >= 0x20 && character <= 0x7e;
+           });
+}
 
 #if defined(LICENSESEAT_PLATFORM_LINUX)
 std::string trim_identifier(const std::string& value) {
@@ -51,14 +62,19 @@ std::string trim_identifier(const std::string& value) {
 }
 
 std::string read_trimmed_file(const char* path) {
-    std::ifstream file(path);
+    std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
         return "";
     }
 
-    std::string value;
-    std::getline(file, value);
-    return trim_identifier(value);
+    std::array<char, MAX_FINGERPRINT_COMPONENT_BYTES + 1> buffer{};
+    file.read(buffer.data(), static_cast<std::streamsize>(MAX_FINGERPRINT_COMPONENT_BYTES));
+    const auto count = file.gcount();
+    char extra = '\0';
+    if (count <= 0 || file.get(extra))
+        return "";
+    const auto value = trim_identifier(std::string(buffer.data(), static_cast<std::size_t>(count)));
+    return safe_component(value) ? value : "";
 }
 #endif
 
@@ -82,17 +98,23 @@ std::string get_macos_platform_uuid() {
     std::string result;
     if (CFGetTypeID(uuid_ref) == CFStringGetTypeID()) {
         CFStringRef uuid_string = static_cast<CFStringRef>(uuid_ref);
-        CFIndex length = CFStringGetLength(uuid_string);
-        CFIndex max_size = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
+        const CFIndex length = CFStringGetLength(uuid_string);
+        const CFIndex max_size =
+            length > 0 && length <= static_cast<CFIndex>(MAX_FINGERPRINT_COMPONENT_BYTES)
+                ? CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1
+                : 0;
 
-        std::vector<char> buffer(static_cast<size_t>(max_size));
-        if (CFStringGetCString(uuid_string, buffer.data(), max_size, kCFStringEncodingUTF8)) {
-            result = buffer.data();
+        if (max_size > 1 &&
+            max_size <= 4 * static_cast<CFIndex>(MAX_FINGERPRINT_COMPONENT_BYTES) + 1) {
+            std::vector<char> buffer(static_cast<std::size_t>(max_size));
+            if (CFStringGetCString(uuid_string, buffer.data(), max_size, kCFStringEncodingUTF8)) {
+                result = buffer.data();
+            }
         }
     }
 
     CFRelease(uuid_ref);
-    return result;
+    return safe_component(result) ? result : "";
 }
 
 #elif defined(LICENSESEAT_PLATFORM_WINDOWS)
@@ -110,21 +132,25 @@ std::string get_windows_machine_guid() {
     DWORD size = sizeof(guid);
     DWORD type = REG_SZ;
 
-    result = RegQueryValueExA(hKey, "MachineGuid", nullptr, &type,
-                              reinterpret_cast<LPBYTE>(guid), &size);
+    result = RegQueryValueExA(hKey, "MachineGuid", nullptr, &type, reinterpret_cast<LPBYTE>(guid),
+                              &size);
 
     RegCloseKey(hKey);
 
-    if (result != ERROR_SUCCESS) {
+    if (result != ERROR_SUCCESS || type != REG_SZ || size == 0 || size > sizeof(guid)) {
         return "";
     }
 
-    return std::string(guid);
+    std::size_t length = size;
+    while (length > 0 && guid[length - 1] == '\0')
+        --length;
+    const std::string value(guid, length);
+    return safe_component(value) ? value : "";
 }
 
 #endif
 
-}  // namespace
+} // namespace
 
 std::string generate_device_id() {
     auto components = collect_fingerprint_components();
@@ -174,13 +200,16 @@ std::string get_hostname() {
 #if defined(LICENSESEAT_PLATFORM_WINDOWS)
     char hostname[256] = {0};
     DWORD size = sizeof(hostname);
-    if (GetComputerNameA(hostname, &size)) {
-        return std::string(hostname);
+    if (GetComputerNameA(hostname, &size) && size > 0 && size < sizeof(hostname)) {
+        const std::string value(hostname, size);
+        return safe_component(value) ? value : "unknown";
     }
 #else
     char hostname[256] = {0};
-    if (gethostname(hostname, sizeof(hostname)) == 0) {
-        return std::string(hostname);
+    if (gethostname(hostname, sizeof(hostname) - 1) == 0) {
+        hostname[sizeof(hostname) - 1] = '\0';
+        const std::string value(hostname);
+        return safe_component(value) ? value : "unknown";
     }
 #endif
     return "unknown";
@@ -240,5 +269,5 @@ std::map<std::string, std::string> collect_fingerprint_components() {
     return components;
 }
 
-}  // namespace device
-}  // namespace licenseseat
+} // namespace device
+} // namespace licenseseat

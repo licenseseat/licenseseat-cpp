@@ -1,8 +1,8 @@
-#include <gtest/gtest.h>
-#include <licenseseat/storage.hpp>
-
+#include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <gtest/gtest.h>
+#include <licenseseat/storage.hpp>
 #include <thread>
 
 namespace licenseseat {
@@ -12,18 +12,16 @@ namespace {
 class TempDirectory {
   public:
     TempDirectory() {
-        path_ = std::filesystem::temp_directory_path() / ("licenseseat_test_" + std::to_string(
-                                                              std::chrono::system_clock::now()
-                                                                  .time_since_epoch()
-                                                                  .count()));
+        path_ = std::filesystem::temp_directory_path() /
+                ("licenseseat_test_" +
+                 std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(path_);
     }
 
     ~TempDirectory() {
         try {
             std::filesystem::remove_all(path_);
-        } catch (...) {
-        }
+        } catch (...) {}
     }
 
     const std::filesystem::path& path() const { return path_; }
@@ -415,6 +413,76 @@ TEST_F(FileStorageTest, HandlesCorruptedFile) {
     EXPECT_FALSE(result.has_value());
 }
 
+TEST_F(FileStorageTest, RejectsDuplicateKeysAndOversizedCacheFiles) {
+    const auto license_path = temp_dir.path() / "licenseseat_license.json";
+    {
+        std::ofstream file(license_path, std::ios::binary | std::ios::trunc);
+        file << R"({"license_key":"FIRST","license_key":"SECOND"})";
+    }
+
+    FileStorage storage(temp_dir.path().string());
+    EXPECT_FALSE(storage.get_license().has_value());
+
+    {
+        std::ofstream file(license_path, std::ios::binary | std::ios::trunc);
+        file.seekp(2 * 1024 * 1024);
+        file.put('x');
+    }
+    EXPECT_FALSE(storage.get_license().has_value());
+}
+
+TEST_F(FileStorageTest, RejectsUnsafePrefixesAndSigningKeyIdentifiers) {
+    FileStorage storage(temp_dir.path().string(), "../../escape");
+    CachedLicense license;
+    license.license_key = "SAFE-KEY";
+    EXPECT_TRUE(storage.set_license(license));
+    EXPECT_TRUE(std::filesystem::exists(temp_dir.path() / "licenseseat_license.json"));
+    EXPECT_FALSE(std::filesystem::exists(temp_dir.path().parent_path() / "escape_license.json"));
+
+    EXPECT_FALSE(storage.set_signing_key("../outside", "public-key"));
+    EXPECT_FALSE(storage.get_signing_key("../outside").has_value());
+}
+
+#ifndef _WIN32
+TEST_F(FileStorageTest, RefusesSymlinkedCacheFileAndStorageDirectory) {
+    const auto outside = temp_dir.path() / "outside.json";
+    {
+        std::ofstream file(outside, std::ios::binary | std::ios::trunc);
+        file << R"({"license_key":"ATTACKER"})";
+    }
+    const auto cache = temp_dir.path() / "licenseseat_license.json";
+    std::filesystem::create_symlink(outside, cache);
+
+    FileStorage storage(temp_dir.path().string());
+    EXPECT_FALSE(storage.get_license().has_value());
+    CachedLicense license;
+    license.license_key = "SAFE-KEY";
+    EXPECT_FALSE(storage.set_license(license));
+
+    const auto real_directory = temp_dir.path() / "real";
+    const auto linked_directory = temp_dir.path() / "linked";
+    std::filesystem::create_directory(real_directory);
+    std::filesystem::create_directory_symlink(real_directory, linked_directory);
+    FileStorage symlinked_storage(linked_directory.string());
+    EXPECT_FALSE(symlinked_storage.set_license(license));
+}
+
+TEST_F(FileStorageTest, UsesOwnerOnlyPermissions) {
+    FileStorage storage(temp_dir.path().string());
+    CachedLicense license;
+    license.license_key = "SAFE-KEY";
+    ASSERT_TRUE(storage.set_license(license));
+
+    const auto directory_permissions = std::filesystem::status(temp_dir.path()).permissions();
+    const auto file_permissions =
+        std::filesystem::status(temp_dir.path() / "licenseseat_license.json").permissions();
+    const auto group_or_other =
+        std::filesystem::perms::group_all | std::filesystem::perms::others_all;
+    EXPECT_EQ(directory_permissions & group_or_other, std::filesystem::perms::none);
+    EXPECT_EQ(file_permissions & group_or_other, std::filesystem::perms::none);
+}
+#endif
+
 TEST_F(FileStorageTest, CreatesDirectoryIfNotExists) {
     auto new_dir = temp_dir.path() / "nested" / "directory";
 
@@ -427,25 +495,72 @@ TEST_F(FileStorageTest, CreatesDirectoryIfNotExists) {
     EXPECT_TRUE(std::filesystem::exists(new_dir));
 }
 
+TEST_F(FileStorageTest, ConcurrentReadsObserveOnlyCompleteAtomicSnapshots) {
+    FileStorage storage(temp_dir.path().string());
+
+    CachedLicense first;
+    first.license_key = "FIRST-LICENSE";
+    first.device_id = "first-device";
+    first.activated_at = std::chrono::system_clock::time_point(std::chrono::seconds(100));
+    first.last_validated = std::chrono::system_clock::time_point(std::chrono::seconds(101));
+
+    CachedLicense second = first;
+    second.license_key = "SECOND-LICENSE";
+    second.device_id = "second-device";
+    second.activated_at = std::chrono::system_clock::time_point(std::chrono::seconds(200));
+    second.last_validated = std::chrono::system_clock::time_point(std::chrono::seconds(201));
+
+    ASSERT_TRUE(storage.set_license(first));
+
+    std::atomic<bool> start{false};
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> threads;
+
+    threads.emplace_back([&]() {
+        while (!start.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        for (int iteration = 0; iteration < 250; ++iteration) {
+            if (!storage.set_license(iteration % 2 == 0 ? second : first))
+                failed.store(true, std::memory_order_relaxed);
+        }
+    });
+
+    for (int reader = 0; reader < 4; ++reader) {
+        threads.emplace_back([&]() {
+            while (!start.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            for (int iteration = 0; iteration < 500; ++iteration) {
+                const auto cached = storage.get_license();
+                if (!cached ||
+                    (cached->license_key == first.license_key &&
+                     cached->device_id != first.device_id) ||
+                    (cached->license_key == second.license_key &&
+                     cached->device_id != second.device_id) ||
+                    (cached->license_key != first.license_key &&
+                     cached->license_key != second.license_key)) {
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads)
+        thread.join();
+
+    EXPECT_FALSE(failed.load(std::memory_order_relaxed));
+}
+
 // ==================== Full License Data Serialization Tests ====================
 
 TEST_F(FileStorageTest, SerializesFullLicenseData) {
     FileStorage storage(temp_dir.path().string());
 
     // Create a full license
-    License license(
-        "LS-TEST-KEY",
-        LicenseStatus::Active,
-        LicenseMode::HardwareLocked,
-        "pro-annual",
-        std::optional<int>(5),
-        2,
-        std::nullopt,
-        std::nullopt,
-        std::vector<Entitlement>{},
-        Metadata{{"customer_id", "cust_123"}},
-        Product{"test-product", "Test Product"}
-    );
+    License license("LS-TEST-KEY", LicenseStatus::Active, LicenseMode::HardwareLocked, "pro-annual",
+                    std::optional<int>(5), 2, std::nullopt, std::nullopt,
+                    std::vector<Entitlement>{}, Metadata{{"customer_id", "cust_123"}},
+                    Product{"test-product", "Test Product"});
 
     CachedLicense cached;
     cached.license_key = "LS-TEST-KEY";
@@ -514,24 +629,12 @@ TEST_F(FileStorageTest, SerializesValidationOfflineFlag) {
 TEST_F(FileStorageTest, HandlesLicenseWithEntitlements) {
     FileStorage storage(temp_dir.path().string());
 
-    std::vector<Entitlement> entitlements = {
-        {"updates", std::nullopt, {}},
-        {"premium", std::nullopt, {{"tier", "gold"}}}
-    };
+    std::vector<Entitlement> entitlements = {{"updates", std::nullopt, {}},
+                                             {"premium", std::nullopt, {{"tier", "gold"}}}};
 
-    License license(
-        "LS-ENT-KEY",
-        LicenseStatus::Active,
-        LicenseMode::HardwareLocked,
-        "pro",
-        std::nullopt,
-        1,
-        std::nullopt,
-        std::nullopt,
-        entitlements,
-        {},
-        Product{"prod", "Product"}
-    );
+    License license("LS-ENT-KEY", LicenseStatus::Active, LicenseMode::HardwareLocked, "pro",
+                    std::nullopt, 1, std::nullopt, std::nullopt, entitlements, {},
+                    Product{"prod", "Product"});
 
     CachedLicense cached;
     cached.license_key = "LS-ENT-KEY";
@@ -554,5 +657,5 @@ TEST_F(FileStorageTest, HandlesLicenseWithEntitlements) {
     EXPECT_EQ(ents[1].metadata.at("tier"), "gold");
 }
 
-}  // namespace
-}  // namespace licenseseat
+} // namespace
+} // namespace licenseseat

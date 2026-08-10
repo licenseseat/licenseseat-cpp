@@ -1,9 +1,8 @@
+#include <atomic>
+#include <chrono>
 #include <gtest/gtest.h>
 #include <licenseseat/licenseseat.hpp>
 #include <licenseseat/telemetry.hpp>
-
-#include <atomic>
-#include <chrono>
 #include <thread>
 
 namespace licenseseat {
@@ -111,7 +110,7 @@ TEST(TelemetryTest, CollectReturnsCpuCores) {
     ASSERT_TRUE(result.contains("cpu_cores"));
     auto cores = result["cpu_cores"].get<int>();
     EXPECT_GT(cores, 0);
-    EXPECT_LE(cores, 1024);  // Sanity upper bound
+    EXPECT_LE(cores, 1024); // Sanity upper bound
 }
 
 TEST(TelemetryTest, CollectReturnsMemoryGb) {
@@ -120,7 +119,7 @@ TEST(TelemetryTest, CollectReturnsMemoryGb) {
     ASSERT_TRUE(result.contains("memory_gb"));
     auto memory = result["memory_gb"].get<int>();
     EXPECT_GT(memory, 0);
-    EXPECT_LE(memory, 4096);  // Sanity upper bound
+    EXPECT_LE(memory, 4096); // Sanity upper bound
 }
 
 TEST(TelemetryTest, CollectReturnsLanguageWhenLangEnvSet) {
@@ -185,6 +184,26 @@ TEST(TelemetryTest, CollectOmitsEmptyAppBuild) {
     EXPECT_FALSE(result.contains("app_build"));
 }
 
+TEST(TelemetryTest, CollectDropsUnsafeOrOversizedUserFields) {
+    const std::string invalid_utf8{static_cast<char>(0xc3), static_cast<char>(0x28)};
+    auto invalid = telemetry::collect("1.0.0", invalid_utf8, "build\nheader");
+    EXPECT_FALSE(invalid.contains("app_version"));
+    EXPECT_FALSE(invalid.contains("app_build"));
+    EXPECT_NO_THROW((void)invalid.dump());
+
+    auto oversized = telemetry::collect("1.0.0", std::string(257, 'x'), std::string(257, 'y'));
+    EXPECT_FALSE(oversized.contains("app_version"));
+    EXPECT_FALSE(oversized.contains("app_build"));
+}
+
+TEST(TelemetryTest, CollectPreservesBoundedUnicodeUserFields) {
+    auto result = telemetry::collect("1.0.0", "Edi\xC3\xA7\xC3\xA3o", "compila\xC3\xA7\xC3\xA3o");
+
+    EXPECT_EQ(result.value("app_version", ""), "Edi\xC3\xA7\xC3\xA3o");
+    EXPECT_EQ(result.value("app_build", ""), "compila\xC3\xA7\xC3\xA3o");
+    EXPECT_NO_THROW((void)result.dump());
+}
+
 // ==================== Telemetry Payload Completeness ====================
 
 TEST(TelemetryTest, CollectReturnsAllExpectedFields) {
@@ -235,7 +254,7 @@ TEST(TelemetryConfigTest, ConfigHasAppBuildField) {
 
 TEST(TelemetryConfigTest, ConfigHasHeartbeatInterval) {
     Config config;
-    EXPECT_EQ(config.heartbeat_interval, 300);  // Default 5 minutes
+    EXPECT_EQ(config.heartbeat_interval, 300); // Default 5 minutes
 
     config.heartbeat_interval = 60;
     EXPECT_EQ(config.heartbeat_interval, 60);
@@ -256,6 +275,7 @@ class HeartbeatTimerTest : public ::testing::Test {
         config_.product_slug = "test_product";
         config_.device_id = "test-device-001";
         config_.api_url = "http://localhost:1";
+        config_.allow_insecure_http = true;
         config_.timeout_seconds = 1;
         config_.max_retries = 0;
     }
@@ -301,7 +321,7 @@ TEST_F(HeartbeatTimerTest, StartTwiceDoesNotCrash) {
     Client client(config_);
 
     client.start_heartbeat("TEST-KEY");
-    client.start_heartbeat("TEST-KEY-2");  // Should stop first, then start
+    client.start_heartbeat("TEST-KEY-2"); // Should stop first, then start
 
     EXPECT_TRUE(client.is_heartbeat_running());
 
@@ -364,5 +384,5 @@ TEST_F(HeartbeatTimerTest, HeartbeatRunsIndependentlyOfAutoValidation) {
     EXPECT_FALSE(client.is_auto_validating());
 }
 
-}  // namespace
-}  // namespace licenseseat
+} // namespace
+} // namespace licenseseat

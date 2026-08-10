@@ -37,6 +37,7 @@ int main() {
     config.auto_validate_interval = 300.0;  // Revalidate every 5 minutes
 
     // Offline fallback settings
+    config.offline_fallback_mode = licenseseat::OfflineFallbackMode::NetworkOnly;
     config.max_offline_days = 30;  // Allow 30 days offline operation
 
     // Create the client

@@ -16,21 +16,20 @@
  *   ./integration_test
  */
 
-#include <licenseseat/licenseseat.hpp>
-#include <licenseseat/crypto.hpp>
-#include <licenseseat/device.hpp>
-#include <licenseseat/events.hpp>
+#include "test_env.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
+#include <licenseseat/crypto.hpp>
+#include <licenseseat/device.hpp>
+#include <licenseseat/events.hpp>
+#include <licenseseat/licenseseat.hpp>
+#include <sstream>
 #include <thread>
 #include <vector>
-#include <iomanip>
-#include <sstream>
-
-#include "test_env.hpp"
 
 namespace {
 
@@ -69,7 +68,7 @@ bool load_credentials() {
     return true;
 }
 
-}  // namespace
+} // namespace
 
 // Test counters
 std::atomic<int> tests_passed{0};
@@ -93,9 +92,12 @@ void fail(const std::string& test_name, const std::string& reason) {
 }
 
 void section(const std::string& name) {
-    std::cout << "\n" << CYAN << "═══════════════════════════════════════════════════════════════" << RESET << "\n";
+    std::cout << "\n"
+              << CYAN << "═══════════════════════════════════════════════════════════════" << RESET
+              << "\n";
     std::cout << CYAN << "  " << name << RESET << "\n";
-    std::cout << CYAN << "═══════════════════════════════════════════════════════════════" << RESET << "\n\n";
+    std::cout << CYAN << "═══════════════════════════════════════════════════════════════" << RESET
+              << "\n\n";
 }
 
 void info(const std::string& msg) {
@@ -141,7 +143,8 @@ void test_client_creation() {
         if (client.device_id() == "integration-test-device-001") {
             pass("Client creation with custom device ID");
         } else {
-            fail("Client creation with custom device ID", "Device ID mismatch: " + client.device_id());
+            fail("Client creation with custom device ID",
+                 "Device ID mismatch: " + client.device_id());
         }
     }
 
@@ -248,7 +251,8 @@ void test_license_validation() {
 
         if (result.is_error()) {
             pass("Invalid license key returns error");
-            info("Error code: " + std::string(licenseseat::error_code_to_string(result.error_code())));
+            info("Error code: " +
+                 std::string(licenseseat::error_code_to_string(result.error_code())));
             info("Error message: " + result.error_message());
         } else {
             if (!result.value().valid) {
@@ -283,21 +287,23 @@ void test_async_validation() {
         std::atomic<bool> success{false};
         std::string result_info;
 
-        client.validate_async(LICENSE_KEY, [&](licenseseat::Result<licenseseat::ValidationResult> result) {
-            if (result.is_ok()) {
-                // Success if we got a response - valid=true or seat_limit_exceeded are both valid responses
-                const auto& val = result.value();
-                success = true;
-                result_info = val.valid ? "valid" : ("invalid: " + val.code);
-            } else {
-                result_info = "error: " + result.error_message();
-            }
-            done = true;
-        });
+        client.validate_async(LICENSE_KEY,
+                              [&](licenseseat::Result<licenseseat::ValidationResult> result) {
+                                  if (result.is_ok()) {
+                                      // Success if we got a response - valid=true or
+                                      // seat_limit_exceeded are both valid responses
+                                      const auto& val = result.value();
+                                      success = true;
+                                      result_info = val.valid ? "valid" : ("invalid: " + val.code);
+                                  } else {
+                                      result_info = "error: " + result.error_message();
+                                  }
+                                  done = true;
+                              });
 
         // Wait with timeout
         int wait_count = 0;
-        while (!done && wait_count < 300) {  // 30 second timeout
+        while (!done && wait_count < 300) { // 30 second timeout
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             ++wait_count;
         }
@@ -318,9 +324,10 @@ void test_async_validation() {
         constexpr int NUM_REQUESTS = 5;
 
         for (int i = 0; i < NUM_REQUESTS; ++i) {
-            client.validate_async(LICENSE_KEY, [&](licenseseat::Result<licenseseat::ValidationResult> /*result*/) {
-                ++completed;
-            });
+            client.validate_async(
+                LICENSE_KEY, [&](licenseseat::Result<licenseseat::ValidationResult> /*result*/) {
+                    ++completed;
+                });
         }
 
         int wait_count = 0;
@@ -330,10 +337,12 @@ void test_async_validation() {
         }
 
         if (completed == NUM_REQUESTS) {
-            pass("Multiple concurrent async validations (" + std::to_string(NUM_REQUESTS) + " requests)");
+            pass("Multiple concurrent async validations (" + std::to_string(NUM_REQUESTS) +
+                 " requests)");
         } else {
             fail("Multiple concurrent async validations",
-                 "Only " + std::to_string(completed.load()) + "/" + std::to_string(NUM_REQUESTS) + " completed");
+                 "Only " + std::to_string(completed.load()) + "/" + std::to_string(NUM_REQUESTS) +
+                     " completed");
         }
     }
 }
@@ -353,7 +362,8 @@ void test_activation_deactivation() {
         metadata["test"] = "integration";
         metadata["timestamp"] = std::to_string(std::time(nullptr));
 
-        auto result = client.activate(LICENSE_KEY, client.device_id(), "Integration Test Device", metadata);
+        auto result =
+            client.activate(LICENSE_KEY, client.device_id(), "Integration Test Device", metadata);
 
         if (result.is_ok()) {
             const auto& activation = result.value();
@@ -410,7 +420,8 @@ void test_activation_deactivation() {
     {
         auto result = client.deactivate(LICENSE_KEY, "non-existent-device-xyz");
 
-        if (result.is_error() && result.error_code() == licenseseat::ErrorCode::ActivationNotFound) {
+        if (result.is_error() &&
+            result.error_code() == licenseseat::ErrorCode::ActivationNotFound) {
             pass("Deactivate non-existent device returns ActivationNotFound");
         } else if (result.is_error()) {
             pass("Deactivate non-existent device returns error: " + result.error_message());
@@ -433,14 +444,18 @@ void test_async_activation() {
         std::atomic<bool> success{false};
 
         std::string result_info;
-        client.activate_async(LICENSE_KEY, [&](licenseseat::Result<licenseseat::Activation> result) {
-            // Accept: success, already activated, or seat limit exceeded (expected for single-seat license)
-            success = result.is_ok()
-                || result.error_code() == licenseseat::ErrorCode::DeviceAlreadyActivated
-                || result.error_code() == licenseseat::ErrorCode::SeatLimitExceeded;
-            result_info = result.is_ok() ? "activated" : result.error_message();
-            done = true;
-        }, client.device_id(), "Async Test Device");
+        client.activate_async(
+            LICENSE_KEY,
+            [&](licenseseat::Result<licenseseat::Activation> result) {
+                // Accept: success, already activated, or seat limit exceeded (expected for
+                // single-seat license)
+                success = result.is_ok() ||
+                          result.error_code() == licenseseat::ErrorCode::DeviceAlreadyActivated ||
+                          result.error_code() == licenseseat::ErrorCode::SeatLimitExceeded;
+                result_info = result.is_ok() ? "activated" : result.error_message();
+                done = true;
+            },
+            client.device_id(), "Async Test Device");
 
         int wait_count = 0;
         while (!done && wait_count < 300) {
@@ -462,9 +477,10 @@ void test_async_activation() {
     {
         std::atomic<bool> done{false};
 
-        client.deactivate_async(LICENSE_KEY, [&](licenseseat::Result<licenseseat::Deactivation> /*result*/) {
-            done = true;
-        }, client.device_id());
+        client.deactivate_async(
+            LICENSE_KEY,
+            [&](licenseseat::Result<licenseseat::Deactivation> /*result*/) { done = true; },
+            client.device_id());
 
         int wait_count = 0;
         while (!done && wait_count < 300) {
@@ -581,7 +597,7 @@ void test_offline_token() {
         expired_token.token.license_key = LICENSE_KEY;
         expired_token.token.iat = std::time(nullptr) - 86400 * 365;
         expired_token.token.nbf = expired_token.token.iat;
-        expired_token.token.exp = std::time(nullptr) - 1;  // Expired
+        expired_token.token.exp = std::time(nullptr) - 1; // Expired
 
         auto result = client.verify_offline_token(expired_token);
 
@@ -684,9 +700,8 @@ void test_event_system() {
     {
         std::atomic<int> event_count{0};
 
-        auto sub = client.on(licenseseat::events::VALIDATION_SUCCESS, [&](const std::any& /*data*/) {
-            ++event_count;
-        });
+        auto sub = client.on(licenseseat::events::VALIDATION_SUCCESS,
+                             [&](const std::any& /*data*/) { ++event_count; });
 
         // Trigger a validation
         (void)client.validate(LICENSE_KEY);
@@ -708,9 +723,7 @@ void test_event_system() {
     {
         int call_count = 0;
 
-        auto sub = client.on("test:event", [&](const std::any& /*data*/) {
-            ++call_count;
-        });
+        auto sub = client.on("test:event", [&](const std::any& /*data*/) { ++call_count; });
 
         client.emit("test:event");
         int count_before_cancel = call_count;
@@ -793,7 +806,7 @@ void test_auto_validation() {
     section("Auto-Validation");
 
     auto config = make_config();
-    config.auto_validate_interval = 1.0;  // 1 second for testing
+    config.auto_validate_interval = 1.0; // 1 second for testing
     licenseseat::Client client(config);
 
     // Test 1: Start auto-validation
@@ -811,9 +824,8 @@ void test_auto_validation() {
     {
         std::atomic<int> validation_count{0};
 
-        auto sub = client.on(licenseseat::events::AUTOVALIDATION_CYCLE, [&](const std::any& /*data*/) {
-            ++validation_count;
-        });
+        auto sub = client.on(licenseseat::events::AUTOVALIDATION_CYCLE,
+                             [&](const std::any& /*data*/) { ++validation_count; });
 
         // Wait up to 5 seconds for at least one cycle
         for (int i = 0; i < 50 && validation_count == 0; ++i) {
@@ -886,7 +898,8 @@ void test_error_handling() {
         licenseseat::Config bad_config;
         bad_config.api_key = API_KEY;
         bad_config.product_slug = PRODUCT_SLUG;
-        bad_config.api_url = "http://localhost:1";  // Non-existent
+        bad_config.api_url = "http://localhost:1"; // Non-existent
+        bad_config.allow_insecure_http = true;
         bad_config.timeout_seconds = 2;
         bad_config.max_retries = 0;
 
@@ -1013,9 +1026,7 @@ void test_thread_safety() {
     {
         std::atomic<int> events_received{0};
 
-        auto sub = client.on("stress:test", [&](const std::any& /*data*/) {
-            ++events_received;
-        });
+        auto sub = client.on("stress:test", [&](const std::any& /*data*/) { ++events_received; });
 
         constexpr int NUM_THREADS = 10;
         constexpr int EVENTS_PER_THREAD = 100;
@@ -1034,11 +1045,12 @@ void test_thread_safety() {
         }
 
         if (events_received == NUM_THREADS * EVENTS_PER_THREAD) {
-            pass("Concurrent event emission (" + std::to_string(events_received.load()) + " events)");
+            pass("Concurrent event emission (" + std::to_string(events_received.load()) +
+                 " events)");
         } else {
             fail("Concurrent event emission",
-                 "Expected " + std::to_string(NUM_THREADS * EVENTS_PER_THREAD) +
-                 ", got " + std::to_string(events_received.load()));
+                 "Expected " + std::to_string(NUM_THREADS * EVENTS_PER_THREAD) + ", got " +
+                     std::to_string(events_received.load()));
         }
 
         sub.cancel();
@@ -1133,7 +1145,7 @@ void test_crypto_functions() {
 
     // Test 2: Base64URL round-trip
     {
-        std::vector<uint8_t> data = {0xFB, 0xFF, 0xFE};  // Contains +/
+        std::vector<uint8_t> data = {0xFB, 0xFF, 0xFE}; // Contains +/
         auto encoded = licenseseat::crypto::base64url_encode(data);
         auto decoded = licenseseat::crypto::base64url_decode(encoded);
 
@@ -1156,13 +1168,17 @@ int main() {
     }
 
     std::cout << "\n";
-    std::cout << CYAN << "╔═══════════════════════════════════════════════════════════════╗" << RESET << "\n";
-    std::cout << CYAN << "║     LicenseSeat C++ SDK - Live Integration Test Suite         ║" << RESET << "\n";
-    std::cout << CYAN << "╚═══════════════════════════════════════════════════════════════╝" << RESET << "\n";
+    std::cout << CYAN << "╔═══════════════════════════════════════════════════════════════╗"
+              << RESET << "\n";
+    std::cout << CYAN << "║     LicenseSeat C++ SDK - Live Integration Test Suite         ║"
+              << RESET << "\n";
+    std::cout << CYAN << "╚═══════════════════════════════════════════════════════════════╝"
+              << RESET << "\n";
 
     info("API URL: " + API_URL);
     info("Product: " + PRODUCT_SLUG);
-    info("License: " + LICENSE_KEY.substr(0, 5) + "..." + LICENSE_KEY.substr(LICENSE_KEY.length() - 5));
+    info("License: " + LICENSE_KEY.substr(0, 5) + "..." +
+         LICENSE_KEY.substr(LICENSE_KEY.length() - 5));
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -1190,9 +1206,11 @@ int main() {
 
     // Summary
     std::cout << "\n";
-    std::cout << CYAN << "═══════════════════════════════════════════════════════════════" << RESET << "\n";
+    std::cout << CYAN << "═══════════════════════════════════════════════════════════════" << RESET
+              << "\n";
     std::cout << CYAN << "  TEST SUMMARY" << RESET << "\n";
-    std::cout << CYAN << "═══════════════════════════════════════════════════════════════" << RESET << "\n\n";
+    std::cout << CYAN << "═══════════════════════════════════════════════════════════════" << RESET
+              << "\n\n";
 
     int total = tests_passed + tests_failed;
     std::cout << "  Total tests:  " << total << "\n";

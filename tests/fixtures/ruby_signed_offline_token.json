@@ -1,0 +1,37 @@
+{
+  "public_key": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "offline_token": {
+    "object": "offline_token",
+    "token": {
+      "entitlements": [{"expires_at": null, "key": "pro"}],
+      "exp": 4102444800,
+      "fingerprint": "test-device",
+      "iat": 1700000000,
+      "kid": "cross-language-2026",
+      "license_key": "CROSS-LANGUAGE-LICENSE",
+      "metadata": {
+        "array": [true, null, {"value": 1.5}],
+        "escaped": "quote: \" backslash: \\",
+        "int64_max": 9223372036854775807,
+        "large": 1e+21,
+        "negative_zero": -0.0,
+        "one": 1.0,
+        "slash": "https://example.com/a/b",
+        "small": 0.0000001,
+        "unicode": "Olá 👋"
+      },
+      "mode": "hardware_locked",
+      "nbf": 1700000000,
+      "plan_key": "pro",
+      "product_slug": "hustl",
+      "schema_version": 1,
+      "seat_limit": 5
+    },
+    "signature": {
+      "algorithm": "Ed25519",
+      "key_id": "cross-language-2026",
+      "value": "cd/knRP56RbV726Fci/sB1K8LGV7WpjbIM1RXfZ1ztAx9DXYjqxN5G6Fq8cICTyMufPS1mDOW39vYIhJcc+OCA=="
+    },
+    "canonical": "{\"entitlements\":[{\"expires_at\":null,\"key\":\"pro\"}],\"exp\":4102444800,\"fingerprint\":\"test-device\",\"iat\":1700000000,\"kid\":\"cross-language-2026\",\"license_key\":\"CROSS-LANGUAGE-LICENSE\",\"metadata\":{\"array\":[true,null,{\"value\":1.5}],\"escaped\":\"quote: \\\" backslash: \\\\\",\"int64_max\":9223372036854775807,\"large\":1e+21,\"negative_zero\":-0.0,\"one\":1.0,\"slash\":\"https://example.com/a/b\",\"small\":0.0000001,\"unicode\":\"Olá 👋\"},\"mode\":\"hardware_locked\",\"nbf\":1700000000,\"plan_key\":\"pro\",\"product_slug\":\"hustl\",\"schema_version\":1,\"seat_limit\":5}"
+  }
+}

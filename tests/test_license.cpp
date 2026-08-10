@@ -356,6 +356,8 @@ TEST(ConfigTest, DefaultValues) {
     EXPECT_TRUE(config.verify_ssl);
     EXPECT_EQ(config.max_retries, 3);
     EXPECT_EQ(config.retry_interval_ms, 1000);
+    EXPECT_EQ(config.offline_fallback_mode, OfflineFallbackMode::Disabled);
+    EXPECT_EQ(config.max_offline_days, 0);
 }
 
 TEST(ConfigTest, CustomValues) {

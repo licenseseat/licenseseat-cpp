@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "dependencies": [
+    {
+      "name": "cpp-httplib",
+      "version": "0.52.0",
+      "repository": "https://github.com/yhirose/cpp-httplib",
+      "commit": "095a5c1caf9e467ff840ee2ffd19be1a7852203b",
+      "files": [
+        {
+          "path": "httplib.h",
+          "sha256": "4b4453dc2261b8304e377526f4a45e3ed175913d1e718c65f06530a11a92dd27",
+          "marker": "#define CPPHTTPLIB_VERSION \"0.52.0\""
+        }
+      ]
+    },
+    {
+      "name": "nlohmann/json",
+      "version": "3.12.0",
+      "repository": "https://github.com/nlohmann/json",
+      "commit": "55f93686c01528224f448c19128836e7df245f72",
+      "files": [
+        {
+          "path": "nlohmann/json.hpp",
+          "sha256": "0d55a51a8ad7a9e3ff129639c29d23eea480242aa1d855d4f4d47e629555dbd2",
+          "marker": "version 3.12.0"
+        }
+      ]
+    },
+    {
+      "name": "PicoSHA2",
+      "version": "1.0.1",
+      "repository": "https://github.com/okdshin/PicoSHA2",
+      "commit": "161cb3fc4170fa7a3eca9e582cebd27cc4d1fe29",
+      "files": [
+        {
+          "path": "PicoSHA2/picosha2.h",
+          "sha256": "b13c180161ffac8d0adc81e033e493c409457c4d1258ab9781ac80579ba3bdd8"
+        },
+        {
+          "path": "PicoSHA2/LICENSE",
+          "sha256": "6c30eb1f37554ec4199cb82a8c86d9e7a852da78a757832bebb03ac9ddc44ff1"
+        }
+      ]
+    }
+  ]
+}

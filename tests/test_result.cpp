@@ -22,6 +22,12 @@ TEST(ResultTest, ErrorResultIsNotOk) {
     EXPECT_EQ(result.error_message(), "Connection failed");
 }
 
+TEST(ResultTest, ReadingErrorValueFailsPredictably) {
+    auto result = Result<int>::error(ErrorCode::InvalidParameter, "bad input");
+
+    EXPECT_THROW((void)result.value(), std::bad_optional_access);
+}
+
 TEST(ResultTest, VoidOkResult) {
     auto result = Result<void>::ok();
 

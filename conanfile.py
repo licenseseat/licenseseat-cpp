@@ -6,7 +6,7 @@ import os
 
 class LicenseSeatConan(ConanFile):
     name = "licenseseat"
-    version = "0.5.1"
+    version = "0.6.0"
     license = "MIT"
     author = "LicenseSeat"
     url = "https://github.com/licenseseat/licenseseat-cpp"
@@ -25,12 +25,19 @@ class LicenseSeatConan(ConanFile):
         "build_tests": False,
     }
 
-    exports_sources = "CMakeLists.txt", "src/*", "include/*", "cmake/*", "tests/*", "LICENSE"
+    exports_sources = (
+        "CMakeLists.txt",
+        "src/*",
+        "include/*",
+        "deps/*",
+        "cmake/*",
+        "tests/*",
+        "LICENSE",
+        "THIRD_PARTY_LICENSES.md",
+    )
 
     def requirements(self):
-        self.requires("openssl/3.2.0")
-        self.requires("nlohmann_json/3.11.3")
-        self.requires("cpp-httplib/0.15.3")
+        self.requires("openssl/3.5.7")
 
     def build_requirements(self):
         if self.options.build_tests:
@@ -63,11 +70,15 @@ class LicenseSeatConan(ConanFile):
     def package(self):
         cmake = CMake(self)
         cmake.install()
-        copy(self, "LICENSE", src=self.source_folder, dst=os.path.join(self.package_folder, "licenses"))
+        licenses = os.path.join(self.package_folder, "licenses")
+        copy(self, "LICENSE", src=self.source_folder, dst=licenses)
+        copy(self, "THIRD_PARTY_LICENSES.md", src=self.source_folder, dst=licenses)
 
     def package_info(self):
         self.cpp_info.libs = ["licenseseat"]
         self.cpp_info.set_property("cmake_file_name", "licenseseat")
         self.cpp_info.set_property("cmake_target_name", "licenseseat::licenseseat")
-        # OpenSSL is a public dependency for HTTPS and machine-file AES-GCM support.
-        self.cpp_info.requires = ["nlohmann_json::nlohmann_json", "cpp-httplib::cpp-httplib"]
+        # OpenSSL is a public dependency for HTTPS, Ed25519 verification, and
+        # machine-file AES-GCM support. JSON and HTTP use the audited copies
+        # exported with this recipe rather than unrelated Conan packages.
+        self.cpp_info.requires = ["openssl::openssl"]

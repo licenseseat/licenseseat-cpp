@@ -1,9 +1,9 @@
-#include "licenseseat/licenseseat.hpp"
 #include "licenseseat/crypto.hpp"
 #include "licenseseat/device.hpp"
 #include "licenseseat/events.hpp"
 #include "licenseseat/http.hpp"
 #include "licenseseat/json.hpp"
+#include "licenseseat/licenseseat.hpp"
 #include "licenseseat/storage.hpp"
 #include "licenseseat/telemetry.hpp"
 
@@ -11,26 +11,213 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
+#include <unordered_map>
 
 namespace licenseseat {
 
+namespace {
+
+bool is_safe_text(const std::string& value, std::size_t maximum) {
+    if (value.empty() || value.size() > maximum)
+        return false;
+    return std::none_of(value.begin(), value.end(), [](unsigned char character) {
+        return character < 0x20 || character > 0x7e;
+    });
+}
+
+bool is_valid_utf8(std::string_view value) {
+    std::size_t index = 0;
+    while (index < value.size()) {
+        const auto first = static_cast<unsigned char>(value[index]);
+        if (first <= 0x7f) {
+            ++index;
+            continue;
+        }
+
+        std::size_t continuation_count = 0;
+        std::uint32_t code_point = 0;
+        std::uint32_t minimum = 0;
+        if (first >= 0xc2 && first <= 0xdf) {
+            continuation_count = 1;
+            code_point = first & 0x1f;
+            minimum = 0x80;
+        } else if (first >= 0xe0 && first <= 0xef) {
+            continuation_count = 2;
+            code_point = first & 0x0f;
+            minimum = 0x800;
+        } else if (first >= 0xf0 && first <= 0xf4) {
+            continuation_count = 3;
+            code_point = first & 0x07;
+            minimum = 0x10000;
+        } else {
+            return false;
+        }
+
+        if (continuation_count > value.size() - index - 1)
+            return false;
+        for (std::size_t offset = 1; offset <= continuation_count; ++offset) {
+            const auto continuation = static_cast<unsigned char>(value[index + offset]);
+            if ((continuation & 0xc0) != 0x80)
+                return false;
+            code_point = (code_point << 6) | (continuation & 0x3f);
+        }
+        if (code_point < minimum || code_point > 0x10ffff ||
+            (code_point >= 0xd800 && code_point <= 0xdfff) ||
+            (code_point >= 0x80 && code_point <= 0x9f)) {
+            return false;
+        }
+        index += continuation_count + 1;
+    }
+    return true;
+}
+
+bool is_safe_user_text(const std::string& value, std::size_t maximum, bool allow_empty = false) {
+    if ((!allow_empty && value.empty()) || value.size() > maximum || !is_valid_utf8(value))
+        return false;
+    return std::none_of(value.begin(), value.end(), [](unsigned char character) {
+        return character < 0x20 || character == 0x7f;
+    });
+}
+
+bool is_safe_metadata(const Metadata& metadata) {
+    if (metadata.size() > 100)
+        return false;
+    std::size_t total_bytes = 0;
+    for (const auto& [key, value] : metadata) {
+        if (!is_safe_user_text(key, 100) || !is_safe_user_text(value, 16 * 1024, true) ||
+            key.size() > 512 * 1024 - total_bytes ||
+            value.size() > 512 * 1024 - total_bytes - key.size()) {
+            return false;
+        }
+        total_bytes += key.size() + value.size();
+    }
+    return true;
+}
+
+std::string encode_url_component(const std::string& value) {
+    static constexpr char HEX[] = "0123456789ABCDEF";
+    std::string encoded;
+    encoded.reserve(value.size());
+    for (unsigned char character : value) {
+        if ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+            (character >= '0' && character <= '9') || character == '-' || character == '_' ||
+            character == '.' || character == '~') {
+            encoded.push_back(static_cast<char>(character));
+        } else {
+            encoded.push_back('%');
+            encoded.push_back(HEX[character >> 4]);
+            encoded.push_back(HEX[character & 0x0f]);
+        }
+    }
+    return encoded;
+}
+
+bool is_valid_ed25519_public_key(const std::string& encoded) {
+    auto decoded = crypto::base64_decode(encoded);
+    if (decoded.size() != 32)
+        decoded = crypto::base64url_decode(encoded);
+    return decoded.size() == 32;
+}
+
+bool valid_release_response(const Release& release, const std::string& expected_product,
+                            const std::string& expected_channel,
+                            const std::string& expected_platform) {
+    return is_safe_text(release.version, 100) && is_safe_text(release.channel, 100) &&
+           is_safe_text(release.platform, 100) && release.product_slug == expected_product &&
+           release.published_at.has_value() &&
+           (expected_channel.empty() || release.channel == expected_channel) &&
+           (expected_platform.empty() || release.platform == expected_platform);
+}
+
+constexpr double MAX_TIMER_INTERVAL_SECONDS = 366.0 * 24.0 * 60.0 * 60.0;
+constexpr double MAX_CLOCK_SKEW_MS = 24.0 * 60.0 * 60.0 * 1000.0;
+constexpr int MAX_OFFLINE_DAYS = 36600;
+
+bool valid_timer_interval(double seconds) {
+    return std::isfinite(seconds) && seconds >= 0.0 && seconds <= MAX_TIMER_INTERVAL_SECONDS;
+}
+
+struct WorkerSignal final {
+    std::atomic<bool> running{true};
+    std::mutex mutex;
+    std::condition_variable cv;
+
+    bool stop() {
+        bool was_running = false;
+        {
+            // Coordinate the predicate transition with wait_for's mutex so a
+            // stop cannot land between its predicate check and sleeping.
+            std::lock_guard<std::mutex> lock(mutex);
+            was_running = running.exchange(false);
+        }
+        cv.notify_all();
+        return was_running;
+    }
+};
+
+thread_local const void* auto_validation_worker_owner = nullptr;
+thread_local const void* heartbeat_worker_owner = nullptr;
+thread_local const void* network_recheck_worker_owner = nullptr;
+thread_local const void* offline_refresh_worker_owner = nullptr;
+thread_local WorkerSignal* auto_validation_worker_signal = nullptr;
+thread_local WorkerSignal* heartbeat_worker_signal = nullptr;
+thread_local WorkerSignal* network_recheck_worker_signal = nullptr;
+thread_local WorkerSignal* offline_refresh_worker_signal = nullptr;
+thread_local const void* async_worker_owner = nullptr;
+thread_local std::uint64_t async_worker_id = 0;
+
+class WorkerOwnerScope final {
+  public:
+    WorkerOwnerScope(const void*& owner_slot, WorkerSignal*& signal_slot, const void* owner,
+                     WorkerSignal* signal)
+        : owner_slot_(owner_slot), signal_slot_(signal_slot) {
+        owner_slot_ = owner;
+        signal_slot_ = signal;
+    }
+    WorkerOwnerScope(const WorkerOwnerScope&) = delete;
+    WorkerOwnerScope& operator=(const WorkerOwnerScope&) = delete;
+    ~WorkerOwnerScope() {
+        signal_slot_ = nullptr;
+        owner_slot_ = nullptr;
+    }
+
+  private:
+    const void*& owner_slot_;
+    WorkerSignal*& signal_slot_;
+};
+
+class AsyncOwnerScope final {
+  public:
+    AsyncOwnerScope(const void* owner, std::uint64_t id) {
+        async_worker_owner = owner;
+        async_worker_id = id;
+    }
+    AsyncOwnerScope(const AsyncOwnerScope&) = delete;
+    AsyncOwnerScope& operator=(const AsyncOwnerScope&) = delete;
+    ~AsyncOwnerScope() {
+        async_worker_id = 0;
+        async_worker_owner = nullptr;
+    }
+};
+
+} // namespace
+
 // PIMPL implementation
-class Client::Impl {
+class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
   public:
     explicit Impl(Config config) : config_(std::move(config)) {
         // Auto-generate device ID if not provided
         if (config_.device_id.empty()) {
             device_id_auto_generated_ = true;
             device_id_ = device::generate_device_id();
-            if (device_id_.empty()) {
-                device_id_ = "unknown-device";
-            }
         } else {
             device_id_ = config_.device_id;
         }
@@ -41,8 +228,11 @@ class Client::Impl {
         http_config.api_key = config_.api_key;
         http_config.timeout_seconds = config_.timeout_seconds;
         http_config.verify_ssl = config_.verify_ssl;
+        http_config.allow_insecure_http = config_.allow_insecure_http;
         http_config.max_retries = config_.max_retries;
         http_config.retry_interval_ms = config_.retry_interval_ms;
+        http_config.max_request_bytes = config_.max_request_bytes;
+        http_config.max_response_bytes = config_.max_response_bytes;
 
         http_client_ = std::make_unique<http::HttpClient>(std::move(http_config));
 
@@ -50,11 +240,10 @@ class Client::Impl {
         if (!config_.storage_path.empty()) {
             storage_ = std::make_unique<FileStorage>(config_.storage_path, config_.storage_prefix);
 
-            // Load cached license
+            // Discover cached state, but do not expose it as authority until
+            // restore_license() verifies it online or cryptographically.
             auto cached = storage_->get_license();
             if (cached) {
-                cached_license_ = cached->license_data;
-                cached_validation_ = cached->validation;
                 event_bus_.emit(events::LICENSE_LOADED, *cached);
             }
         } else {
@@ -62,7 +251,13 @@ class Client::Impl {
         }
     }
 
-    ~Impl() {
+    ~Impl() { shutdown(); }
+
+    void shutdown() {
+        bool expected = false;
+        if (!shutdown_started_.compare_exchange_strong(expected, true))
+            return;
+
         stop_heartbeat();
         stop_auto_validation();
         stop_network_recheck();
@@ -82,6 +277,11 @@ class Client::Impl {
         bool was_online = true;
     };
 
+    struct PendingFuture {
+        std::uint64_t id = 0;
+        std::future<void> future;
+    };
+
     std::string resolve_fingerprint_unlocked(const std::string& fingerprint_override) const {
         return fingerprint_override.empty() ? device_id_ : fingerprint_override;
     }
@@ -94,15 +294,21 @@ class Client::Impl {
         LicenseRequestContext context;
         std::lock_guard<std::mutex> lock(mutex_);
 
-        if (license_key.empty()) {
+        if (!is_safe_text(license_key, 512)) {
             context.error_code = ErrorCode::InvalidLicenseKey;
-            context.error_message = "License key cannot be empty";
+            context.error_message = "License key is empty or invalid";
             return context;
         }
 
-        if (config_.product_slug.empty()) {
+        if (!is_safe_text(config_.product_slug, 100)) {
             context.error_code = ErrorCode::MissingParameter;
-            context.error_message = "Product slug is required in config";
+            context.error_message = "Product slug is missing or invalid in config";
+            return context;
+        }
+
+        if (config_.api_key.empty() || !http_client_->is_configured()) {
+            context.error_code = ErrorCode::InvalidParameter;
+            context.error_message = "API client configuration is invalid";
             return context;
         }
 
@@ -111,9 +317,11 @@ class Client::Impl {
                                   ? resolve_fingerprint_unlocked(fingerprint_override)
                                   : fingerprint_override;
 
-        if (require_fingerprint && context.fingerprint.empty()) {
+        if ((require_fingerprint && context.fingerprint.empty()) ||
+            (!context.fingerprint.empty() && !is_safe_text(context.fingerprint, 255))) {
             context.error_code = ErrorCode::MissingParameter;
-            context.error_message = missing_fingerprint_message;
+            context.error_message = context.fingerprint.empty() ? missing_fingerprint_message
+                                                                : "Fingerprint is invalid";
             return context;
         }
 
@@ -145,12 +353,14 @@ class Client::Impl {
 
         // Make HTTP call without holding mutex
         auto body = json::build_validate_request(request.fingerprint);
-        auto response = send_post(
-            "/products/" + request.product_slug + "/licenses/" + license_key + "/validate", body);
+        body["license_key"] = license_key;
+        auto response = send_post("/products/" + encode_url_component(request.product_slug) +
+                                      "/licenses/validate",
+                                  body, true);
 
         if (!response.success) {
             // Check for authentication failure (401) - emit auth-failed event (matches Swift SDK)
-            if (response.status_code == 401 || response.status_code == 501) {
+            if (response.status_code == 401 || response.status_code == 403) {
                 auto err = handle_error_response<ValidationResult>(response);
                 ValidationResult failed_validation;
                 failed_validation.valid = false;
@@ -174,8 +384,8 @@ class Client::Impl {
             if (is_revocation_error(response)) {
                 purge_cache_on_revocation();
                 auto err = handle_error_response<ValidationResult>(response);
-                event_bus_.emit(events::LICENSE_REVOKED,
-                                std::map<std::string, std::string>{{"reason", err.error_message()}});
+                event_bus_.emit(events::LICENSE_REVOKED, std::map<std::string, std::string>{
+                                                             {"reason", err.error_message()}});
                 return err;
             }
 
@@ -247,26 +457,44 @@ class Client::Impl {
 
         // Parse response
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
+            if (!j.is_object() || j.value("object", std::string{}) != "validation_result" ||
+                !j.contains("valid") || !j["valid"].is_boolean()) {
+                throw std::invalid_argument("Validation response has an invalid schema");
+            }
             auto result = json::parse_validation_result(j);
+            if (result.valid) {
+                if (!constant_time_equal(result.license.key(), license_key) ||
+                    result.license.product().slug != request.product_slug ||
+                    result.license.status() != LicenseStatus::Active ||
+                    result.license.mode() == LicenseMode::Unknown ||
+                    result.license.plan_key().empty() || !result.license.is_valid() ||
+                    (result.activation.has_value() &&
+                     (!constant_time_equal(result.activation->license_key(), license_key) ||
+                      !constant_time_equal(result.activation->fingerprint(), request.fingerprint) ||
+                      !result.activation->is_active()))) {
+                    throw std::invalid_argument("Validation response identity is inconsistent");
+                }
+            } else if (!is_safe_text(result.code, 100)) {
+                throw std::invalid_argument("Invalid validation response is missing a safe code");
+            }
 
             // Check for revocation (valid: false with code: "revoked" or "suspended")
             if (!result.valid && is_revocation_code(result.code)) {
                 purge_cache_on_revocation();
                 event_bus_.emit(events::LICENSE_REVOKED,
                                 std::map<std::string, std::string>{{"code", result.code},
-                                                                    {"message", result.message}});
+                                                                   {"message", result.message}});
             }
 
             // Cache the result
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 cached_validation_ = result;
-                if (result.valid || !is_revocation_code(result.code)) {
-                    if (!result.license.key().empty()) {
-                        cached_license_ = result.license;
-                    }
-                }
+                if (result.valid)
+                    cached_license_ = result.license;
+                else
+                    cached_license_.reset();
             }
 
             if (result.valid) {
@@ -277,20 +505,26 @@ class Client::Impl {
             }
 
             return Result<ValidationResult>::ok(std::move(result));
-        } catch (const nlohmann::json::exception& e) {
+        } catch (const std::exception& e) {
             return Result<ValidationResult>::error(
                 ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
         }
     }
 
-    Result<Activation> activate(const std::string& license_key,
-                                const std::string& device_id_param,
-                                const std::string& device_name,
-                                const Metadata& metadata) {
-        auto request = prepare_license_request_context(
-            license_key, device_id_param, true, false, true, "Device ID is required");
+    Result<Activation> activate(const std::string& license_key, const std::string& device_id_param,
+                                const std::string& device_name, const Metadata& metadata) {
+        auto request = prepare_license_request_context(license_key, device_id_param, true, false,
+                                                       true, "Device ID is required");
         if (!request.ok) {
             return request_context_error<Activation>(request);
+        }
+        if (!is_safe_user_text(device_name, 255, true)) {
+            return Result<Activation>::error(ErrorCode::InvalidParameter,
+                                             "Device name is invalid or too long");
+        }
+        if (!is_safe_metadata(metadata)) {
+            return Result<Activation>::error(ErrorCode::InvalidParameter,
+                                             "Metadata is invalid or too large");
         }
 
         event_bus_.emit(events::ACTIVATION_START,
@@ -299,8 +533,9 @@ class Client::Impl {
 
         // Make HTTP call without holding mutex
         auto body = json::build_activate_request(request.fingerprint, device_name, metadata);
+        body["license_key"] = license_key;
         auto response = send_post(
-            "/products/" + request.product_slug + "/licenses/" + license_key + "/activate", body);
+            "/products/" + encode_url_component(request.product_slug) + "/licenses/activate", body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -314,8 +549,17 @@ class Client::Impl {
 
         // Parse response
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
+            if (!j.is_object() || j.value("object", std::string{}) != "activation") {
+                throw std::invalid_argument("Activation response has an invalid object type");
+            }
             auto activation = json::parse_activation(j);
+            if (activation.id() <= 0 ||
+                !constant_time_equal(activation.license_key(), license_key) ||
+                !constant_time_equal(activation.fingerprint(), request.fingerprint) ||
+                !activation.is_active() || activation.activated_at() == Timestamp{}) {
+                throw std::invalid_argument("Activation response identity is inconsistent");
+            }
 
             // Update state with mutex
             {
@@ -329,16 +573,15 @@ class Client::Impl {
             sync_offline_assets_impl(license_key, request.fingerprint);
 
             return Result<Activation>::ok(std::move(activation));
-        } catch (const nlohmann::json::exception& e) {
+        } catch (const std::exception& e) {
             return Result<Activation>::error(ErrorCode::ParseError,
                                              std::string("Failed to parse response: ") + e.what());
         }
     }
 
-    Result<Deactivation> deactivate(const std::string& license_key,
-                                    const std::string& device_id) {
-        auto request = prepare_license_request_context(
-            license_key, device_id, true, false, false, "Device ID is required");
+    Result<Deactivation> deactivate(const std::string& license_key, const std::string& device_id) {
+        auto request = prepare_license_request_context(license_key, device_id, true, false, false,
+                                                       "Device ID is required");
         if (!request.ok) {
             return request_context_error<Deactivation>(request);
         }
@@ -348,8 +591,10 @@ class Client::Impl {
 
         // Make HTTP call without holding mutex
         auto body = json::build_deactivate_request(request.fingerprint);
-        auto response = send_post(
-            "/products/" + request.product_slug + "/licenses/" + license_key + "/deactivate", body);
+        body["license_key"] = license_key;
+        auto response = send_post("/products/" + encode_url_component(request.product_slug) +
+                                      "/licenses/deactivate",
+                                  body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -363,8 +608,14 @@ class Client::Impl {
 
         // Parse response
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
+            if (!j.is_object() || j.value("object", std::string{}) != "deactivation") {
+                throw std::invalid_argument("Deactivation response has an invalid object type");
+            }
             auto deactivation = json::parse_deactivation(j);
+            if (deactivation.activation_id <= 0 || deactivation.deactivated_at == Timestamp{}) {
+                throw std::invalid_argument("Deactivation response is incomplete");
+            }
 
             // Clear cached state with mutex
             {
@@ -380,46 +631,65 @@ class Client::Impl {
             event_bus_.emit(events::DEACTIVATION_SUCCESS, deactivation);
 
             return Result<Deactivation>::ok(std::move(deactivation));
-        } catch (const nlohmann::json::exception& e) {
-            return Result<Deactivation>::error(ErrorCode::ParseError,
-                                               std::string("Failed to parse response: ") + e.what());
+        } catch (const std::exception& e) {
+            return Result<Deactivation>::error(
+                ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
         }
     }
 
     // ========== Async API ==========
 
+    template <typename Operation> void launch_async(Operation&& operation) {
+        if (shutdown_started_.load())
+            return;
+        // Hold the registry lock until the future has been stored. A very fast
+        // callback may destroy its Client, and shutdown must see this job before
+        // it decides which futures to wait for or hand to a reaper.
+        std::lock_guard<std::mutex> lock(futures_mutex_);
+        if (shutdown_started_.load())
+            return;
+        cleanup_futures_unlocked();
+        pending_futures_.reserve(pending_futures_.size() + 1);
+
+        const auto id = ++next_async_job_id_;
+        auto self = shared_from_this();
+        auto future = std::async(
+            std::launch::async,
+            [self = std::move(self), id, operation = std::forward<Operation>(operation)]() mutable {
+                AsyncOwnerScope owner_scope(self.get(), id);
+                operation(*self);
+            });
+        pending_futures_.push_back(PendingFuture{id, std::move(future)});
+    }
+
     void validate_async(const std::string& license_key, AsyncCallback callback,
                         const std::string& device_id) {
-        auto future = std::async(std::launch::async, [this, license_key, callback, device_id]() {
-            auto result = this->validate(license_key, device_id);
+        launch_async([license_key, callback = std::move(callback), device_id](Impl& self) mutable {
+            auto result = self.validate(license_key, device_id);
             if (callback) {
                 callback(std::move(result));
             }
         });
-        store_future(std::move(future));
     }
 
     void activate_async(const std::string& license_key, ActivationCallback callback,
                         const std::string& device_id, const std::string& device_name,
                         const Metadata& metadata) {
-        auto future = std::async(std::launch::async, [this, license_key, callback, device_id, device_name, metadata]() {
-            auto result = this->activate(license_key, device_id, device_name, metadata);
-            if (callback) {
+        launch_async([license_key, callback = std::move(callback), device_id, device_name,
+                      metadata](Impl& self) mutable {
+            auto result = self.activate(license_key, device_id, device_name, metadata);
+            if (callback)
                 callback(std::move(result));
-            }
         });
-        store_future(std::move(future));
     }
 
     void deactivate_async(const std::string& license_key, DeactivationCallback callback,
                           const std::string& device_id) {
-        auto future = std::async(std::launch::async, [this, license_key, callback, device_id]() {
-            auto result = this->deactivate(license_key, device_id);
-            if (callback) {
+        launch_async([license_key, callback = std::move(callback), device_id](Impl& self) mutable {
+            auto result = self.deactivate(license_key, device_id);
+            if (callback)
                 callback(std::move(result));
-            }
         });
-        store_future(std::move(future));
     }
 
     // ========== Heartbeat ==========
@@ -433,8 +703,10 @@ class Client::Impl {
 
         // Make HTTP call without holding mutex
         auto body = json::fingerprint_alias_payload(request.fingerprint, true);
-        auto response = send_post(
-            "/products/" + request.product_slug + "/licenses/" + license_key + "/heartbeat", body);
+        body["license_key"] = license_key;
+        auto response = send_post("/products/" + encode_url_component(request.product_slug) +
+                                      "/licenses/heartbeat",
+                                  body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -445,17 +717,22 @@ class Client::Impl {
             }
             event_bus_.emit(events::HEARTBEAT_ERROR,
                             std::map<std::string, std::string>{{"error", response.error_message}});
-            return Result<HeartbeatResponse>::error(ErrorCode::NetworkError, response.error_message);
+            return Result<HeartbeatResponse>::error(ErrorCode::NetworkError,
+                                                    response.error_message);
         }
 
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
             HeartbeatResponse result;
             result.object = j.value("object", "");
             result.received_at = j.value("received_at", "");
+            if (!j.is_object() || result.object != "heartbeat" ||
+                !json::parse_timestamp(result.received_at).has_value()) {
+                throw std::invalid_argument("Heartbeat response has an invalid schema");
+            }
             event_bus_.emit(events::HEARTBEAT_SUCCESS, result);
             return Result<HeartbeatResponse>::ok(std::move(result));
-        } catch (const nlohmann::json::exception& e) {
+        } catch (const std::exception& e) {
             return Result<HeartbeatResponse>::error(
                 ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
         }
@@ -463,20 +740,21 @@ class Client::Impl {
 
     void heartbeat_async(const std::string& license_key, HeartbeatCallback callback,
                          const std::string& device_id) {
-        auto future = std::async(std::launch::async, [this, license_key, callback, device_id]() {
-            auto result = this->heartbeat(license_key, device_id);
-            if (callback) {
+        launch_async([license_key, callback = std::move(callback), device_id](Impl& self) mutable {
+            auto result = self.heartbeat(license_key, device_id);
+            if (callback)
                 callback(std::move(result));
-            }
         });
-        store_future(std::move(future));
     }
 
     // ========== Offline Tokens ==========
 
     Result<OfflineToken> generate_offline_token(const std::string& license_key,
-                                                const std::string& device_id_param,
-                                                int ttl_days) {
+                                                const std::string& device_id_param, int ttl_days) {
+        if (ttl_days < 0 || ttl_days > 36500) {
+            return Result<OfflineToken>::error(ErrorCode::InvalidParameter,
+                                               "Offline token TTL is invalid");
+        }
         auto request = prepare_license_request_context(license_key, device_id_param);
         if (!request.ok) {
             return request_context_error<OfflineToken>(request);
@@ -484,8 +762,10 @@ class Client::Impl {
 
         // Make HTTP call without holding mutex
         auto body = json::build_offline_token_request(request.fingerprint, ttl_days);
-        auto response = send_post(
-            "/products/" + request.product_slug + "/licenses/" + license_key + "/offline_token", body);
+        body["license_key"] = license_key;
+        auto response = send_post("/products/" + encode_url_component(request.product_slug) +
+                                      "/licenses/offline-token",
+                                  body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -496,26 +776,54 @@ class Client::Impl {
 
         // Parse response
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
+            if (!j.is_object() || j.value("object", std::string{}) != "offline_token") {
+                return Result<OfflineToken>::error(
+                    ErrorCode::ParseError, "Offline-token response has an invalid object type");
+            }
             auto offline = json::parse_offline_token(j);
+            if (!constant_time_equal(offline.token.license_key, license_key) ||
+                offline.token.product_slug != request.product_slug ||
+                !offline.token.fingerprint.has_value() ||
+                !constant_time_equal(*offline.token.fingerprint, request.fingerprint)) {
+                return Result<OfflineToken>::error(
+                    ErrorCode::InvalidSignature,
+                    "Offline-token response identity does not match the request");
+            }
+            auto public_key = resolve_signing_key(offline.signature.key_id, "", true);
+            if (public_key.empty()) {
+                return Result<OfflineToken>::error(ErrorCode::MissingParameter,
+                                                   "Unable to establish a trusted signing key");
+            }
+            auto verification = crypto::verify_offline_token_signature(offline, public_key);
+            if (!verification.is_ok() || !verification.value()) {
+                return Result<OfflineToken>::error(
+                    verification.is_ok() ? ErrorCode::InvalidSignature : verification.error_code(),
+                    verification.is_ok() ? "Offline-token signature is invalid"
+                                         : verification.error_message());
+            }
 
-            // Cache it
-            storage_->set_offline_token(offline);
+            if (constant_time_equal(request.fingerprint, device_id_)) {
+                storage_->set_offline_token(offline);
+            }
 
             event_bus_.emit(events::OFFLINE_TOKEN_READY, offline);
 
             return Result<OfflineToken>::ok(std::move(offline));
-        } catch (const nlohmann::json::exception& e) {
+        } catch (const std::exception& e) {
             return Result<OfflineToken>::error(
                 ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
         }
     }
 
     Result<MachineFile> checkout_machine_file(const std::string& license_key,
-                                              const std::string& device_id_param,
-                                              int ttl_days) {
-        auto request = prepare_license_request_context(
-            license_key, device_id_param, true, false, true, "Fingerprint is required");
+                                              const std::string& device_id_param, int ttl_days) {
+        if (ttl_days < 0 || ttl_days > 36500) {
+            return Result<MachineFile>::error(ErrorCode::InvalidParameter,
+                                              "Machine-file TTL is invalid");
+        }
+        auto request = prepare_license_request_context(license_key, device_id_param, true, false,
+                                                       true, "Fingerprint is required");
         if (!request.ok) {
             return request_context_error<MachineFile>(request);
         }
@@ -525,18 +833,21 @@ class Client::Impl {
                                                            {"fingerprint", request.fingerprint}});
 
         const auto fingerprint_components = local_fingerprint_components_for(request.fingerprint);
-        auto body = json::build_machine_file_request(request.fingerprint, ttl_days, fingerprint_components);
-        auto response = send_post(
-            "/products/" + request.product_slug + "/licenses/" + license_key + "/machine-file", body);
+        auto body =
+            json::build_machine_file_request(request.fingerprint, ttl_days, fingerprint_components);
+        body["license_key"] = license_key;
+        auto response = send_post("/products/" + encode_url_component(request.product_slug) +
+                                      "/licenses/machine-file",
+                                  body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
                 auto err = handle_error_response<MachineFile>(response);
-                event_bus_.emit(events::MACHINE_FILE_FETCH_ERROR,
-                                std::map<std::string, std::string>{
-                                    {"licenseKey", license_key},
-                                    {"fingerprint", request.fingerprint},
-                                    {"error", err.error_message()}});
+                event_bus_.emit(
+                    events::MACHINE_FILE_FETCH_ERROR,
+                    std::map<std::string, std::string>{{"licenseKey", license_key},
+                                                       {"fingerprint", request.fingerprint},
+                                                       {"error", err.error_message()}});
                 return err;
             }
 
@@ -548,35 +859,54 @@ class Client::Impl {
         }
 
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
+            if (!j.is_object() || j.size() != 1 || !j.contains("data") || !j["data"].is_object() ||
+                j["data"].value("type", std::string{}) != "machine-files" ||
+                !j["data"].contains("attributes") || !j["data"]["attributes"].is_object() ||
+                !j["data"].contains("relationships") || !j["data"]["relationships"].is_object()) {
+                throw std::invalid_argument("Machine-file response has an invalid schema");
+            }
             auto machine_file = json::parse_machine_file(j);
-            if (machine_file.license_key.empty()) {
-                machine_file.license_key = license_key;
+            if (machine_file.certificate.empty() ||
+                machine_file.certificate.size() > 2 * json::MAX_JSON_BYTES ||
+                machine_file.algorithm != "aes-256-gcm+ed25519" || machine_file.ttl <= 0 ||
+                machine_file.ttl > 100LL * 366 * 24 * 60 * 60 ||
+                !machine_file.issued_at.has_value() || !machine_file.expires_at.has_value() ||
+                *machine_file.expires_at <= *machine_file.issued_at ||
+                machine_file.license_key.empty() ||
+                !constant_time_equal(machine_file.license_key, license_key) ||
+                machine_file.fingerprint.empty() ||
+                !constant_time_equal(machine_file.fingerprint, request.fingerprint)) {
+                return Result<MachineFile>::error(ErrorCode::InvalidSignature,
+                                                  "Machine-file response identity is invalid");
             }
-            if (machine_file.fingerprint.empty()) {
-                machine_file.fingerprint = request.fingerprint;
-            }
-
-            storage_->set_machine_file(machine_file);
 
             auto key_id = extract_machine_file_key_id(machine_file);
-            if (key_id.has_value() && !key_id->empty() && config_.signing_public_key.empty()) {
-                auto cached_key = storage_->get_signing_key(*key_id);
-                if (!cached_key.has_value()) {
-                    (void)fetch_signing_key(*key_id);
-                }
+            auto public_key = resolve_signing_key(key_id, "", true);
+            if (!key_id.has_value() || public_key.empty()) {
+                return Result<MachineFile>::error(ErrorCode::MissingParameter,
+                                                  "Unable to establish a trusted signing key");
+            }
+            auto verification = crypto::verify_machine_file(machine_file, license_key,
+                                                            request.fingerprint, public_key);
+            if (!verification.is_ok()) {
+                return Result<MachineFile>::error(verification.error_code(),
+                                                  verification.error_message());
+            }
+            if (constant_time_equal(request.fingerprint, device_id_)) {
+                storage_->set_machine_file(machine_file);
             }
 
             event_bus_.emit(events::MACHINE_FILE_FETCHED, machine_file);
             event_bus_.emit(events::MACHINE_FILE_READY, machine_file);
             return Result<MachineFile>::ok(std::move(machine_file));
-        } catch (const nlohmann::json::exception& e) {
+        } catch (const std::exception& e) {
             event_bus_.emit(events::MACHINE_FILE_FETCH_ERROR,
                             std::map<std::string, std::string>{{"licenseKey", license_key},
                                                                {"fingerprint", request.fingerprint},
                                                                {"error", e.what()}});
-            return Result<MachineFile>::error(
-                ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
+            return Result<MachineFile>::error(ErrorCode::ParseError,
+                                              std::string("Failed to parse response: ") + e.what());
         }
     }
 
@@ -592,7 +922,8 @@ class Client::Impl {
         }
 
         if (offline_token.is_not_yet_valid()) {
-            return Result<bool>::error(ErrorCode::LicenseNotStarted, "Offline token is not yet valid");
+            return Result<bool>::error(ErrorCode::LicenseNotStarted,
+                                       "Offline token is not yet valid");
         }
 
         const auto token_fingerprint = offline_token.token.fingerprint.has_value()
@@ -604,22 +935,14 @@ class Client::Impl {
         }
 
         if (offline_token.is_license_expired()) {
-            return Result<bool>::error(ErrorCode::LicenseExpired,
-                                       "Underlying license has expired");
+            return Result<bool>::error(ErrorCode::LicenseExpired, "Underlying license has expired");
         }
 
-        // Determine which public key to use
-        std::string key_to_use = public_key_b64;
-        if (key_to_use.empty()) {
-            key_to_use = config_.signing_public_key;
-        }
-        if (key_to_use.empty()) {
-            // Try to get from cache
-            auto cached_key = storage_->get_signing_key(offline_token.signature.key_id);
-            if (cached_key) {
-                key_to_use = *cached_key;
-            }
-        }
+        // Local storage is attacker-writable and cannot establish signing
+        // authority. Use a caller/configuration pin or a key fetched over the
+        // authenticated transport during this process.
+        auto key_to_use =
+            resolve_signing_key(offline_token.signature.key_id, public_key_b64, false);
 
         if (key_to_use.empty()) {
             return Result<bool>::error(ErrorCode::MissingParameter,
@@ -668,8 +991,7 @@ class Client::Impl {
         auto public_key = resolve_signing_key(key_id, public_key_b64, false);
         if (public_key.empty()) {
             return Result<MachineFileVerificationResult>::error(
-                ErrorCode::MissingParameter,
-                "Public key required for machine file verification");
+                ErrorCode::MissingParameter, "Public key required for machine file verification");
         }
 
         auto crypto_result = crypto::verify_machine_file(machine_file, resolved_license_key,
@@ -680,12 +1002,19 @@ class Client::Impl {
             result.valid = false;
             result.code = offline_error_code_string(crypto_result.error_code());
             result.message = crypto_result.error_message();
-            event_bus_.emit(events::MACHINE_FILE_VERIFICATION_FAILED,
-                            std::map<std::string, std::string>{
-                                {"fingerprint", resolved_fingerprint},
-                                {"licenseKey", resolved_license_key},
-                                {"code", result.code},
-                                {"error", result.message}});
+            event_bus_.emit(
+                events::MACHINE_FILE_VERIFICATION_FAILED,
+                std::map<std::string, std::string>{{"fingerprint", resolved_fingerprint},
+                                                   {"licenseKey", resolved_license_key},
+                                                   {"code", result.code},
+                                                   {"error", result.message}});
+            return Result<MachineFileVerificationResult>::ok(std::move(result));
+        }
+
+        if (crypto_result.value().product_slug != config_.product_slug) {
+            result.valid = false;
+            result.code = "product_mismatch";
+            result.message = "Machine file belongs to a different product";
             return Result<MachineFileVerificationResult>::ok(std::move(result));
         }
 
@@ -698,14 +1027,16 @@ class Client::Impl {
 
     Result<std::string> fetch_signing_key(const std::string& key_id) {
         // Validate input without holding mutex for long
-        if (key_id.empty()) {
+        if (!is_safe_text(key_id, 255)) {
             return Result<std::string>::error(ErrorCode::MissingParameter, "Key ID is required");
         }
 
         // Make HTTP call without holding mutex
         http::Request request;
         request.method = http::Method::GET;
-        request.path = "/signing_keys/" + key_id;
+        request.path = "/signing_keys/" + encode_url_component(key_id);
+        request.authenticated = false;
+        request.retryable = true;
 
         auto response = http_client_->send(request);
 
@@ -718,28 +1049,51 @@ class Client::Impl {
 
         // Parse response
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
+            if (!j.is_object() || j.value("object", std::string{}) != "signing_key" ||
+                j.value("key_id", std::string{}) != key_id ||
+                j.value("algorithm", std::string{}) != "Ed25519" ||
+                j.value("status", std::string{}) != "active") {
+                return Result<std::string>::error(ErrorCode::ParseError,
+                                                  "Signing-key response has an invalid identity");
+            }
             auto key = json::parse_signing_key(j);
+            if (!is_valid_ed25519_public_key(key)) {
+                return Result<std::string>::error(ErrorCode::ParseError,
+                                                  "Signing-key response contains an invalid key");
+            }
 
-            // Cache it
-            storage_->set_signing_key(key_id, key);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto existing = trusted_signing_keys_.find(key_id);
+                if (existing != trusted_signing_keys_.end() && existing->second != key) {
+                    return Result<std::string>::error(ErrorCode::InvalidSignature,
+                                                      "Signing key changed for an existing key ID");
+                }
+                trusted_signing_keys_[key_id] = key;
+            }
 
             return Result<std::string>::ok(std::move(key));
-        } catch (const nlohmann::json::exception& e) {
-            return Result<std::string>::error(
-                ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
+        } catch (const std::exception& e) {
+            return Result<std::string>::error(ErrorCode::ParseError,
+                                              std::string("Failed to parse response: ") + e.what());
         }
     }
 
     void sync_offline_assets() {
-        if (!cached_license_) {
+        if (!offline_policy_is_enabled())
             return;
+
+        std::string license_key;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!cached_license_)
+                return;
+            license_key = cached_license_->key();
         }
-        auto license_key = cached_license_->key();
-        auto future = std::async(std::launch::async, [this, license_key]() {
-            this->sync_offline_assets_impl(license_key, device_id_);
+        launch_async([license_key](Impl& self) {
+            self.sync_offline_assets_impl(license_key, self.device_id_);
         });
-        store_future(std::move(future));
     }
 
     // ========== Session Restore ==========
@@ -756,7 +1110,7 @@ class Client::Impl {
         }
 
         std::string license_key = cached->license_key;
-        std::string device_id = cached->device_id.empty() ? device_id_ : cached->device_id;
+        const std::string device_id = device_id_;
 
         // Step 2: Check connectivity
         auto health_result = health();
@@ -780,9 +1134,8 @@ class Client::Impl {
             } else {
                 result.success = false;
                 result.status = ClientStatus::Invalid;
-                result.message = validation_result.is_ok()
-                                     ? validation_result.value().message
-                                     : validation_result.error_message();
+                result.message = validation_result.is_ok() ? validation_result.value().message
+                                                           : validation_result.error_message();
             }
             return result;
         } else {
@@ -793,19 +1146,22 @@ class Client::Impl {
             if (offline_result.is_ok() && offline_result.value().valid) {
                 result.success = true;
                 result.status = ClientStatus::OfflineValid;
-                result.license = cached->license_data;
+                result.license = offline_result.value().license;
                 result.message = "License restored from offline cache";
 
                 // Update cached state
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    cached_license_ = cached->license_data;
+                    cached_license_ = offline_result.value().license;
                     cached_validation_ = offline_result.value();
                 }
 
-                current_auto_license_key_ = license_key;
-                current_heartbeat_license_key_ = license_key;
-                offline_refresh_license_key_ = license_key;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    current_auto_license_key_ = license_key;
+                    current_heartbeat_license_key_ = license_key;
+                    offline_refresh_license_key_ = license_key;
+                }
 
                 // Start network recheck to detect when we come back online
                 start_network_recheck();
@@ -817,9 +1173,12 @@ class Client::Impl {
                                      ? "Offline verification failed: " + offline_result.value().code
                                      : offline_result.error_message();
 
-                current_auto_license_key_ = license_key;
-                current_heartbeat_license_key_ = license_key;
-                offline_refresh_license_key_ = license_key;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    current_auto_license_key_ = license_key;
+                    current_heartbeat_license_key_ = license_key;
+                    offline_refresh_license_key_ = license_key;
+                }
 
                 // Start network recheck to detect when we come back online
                 start_network_recheck();
@@ -829,135 +1188,273 @@ class Client::Impl {
     }
 
     void restore_license_async(RestoreCallback callback) {
-        auto future = std::async(std::launch::async, [this, callback]() {
-            auto result = this->restore_license();
-            if (callback) {
+        launch_async([callback = std::move(callback)](Impl& self) mutable {
+            auto result = self.restore_license();
+            if (callback)
                 callback(std::move(result));
-            }
         });
-        store_future(std::move(future));
     }
 
     // ========== Auto-Validation ==========
 
     void start_auto_validation(const std::string& license_key) {
-        stop_auto_validation();
-
-        if (config_.auto_validate_interval <= 0) {
+        if (shutdown_started_.load())
+            return;
+        if (auto_validation_worker_owner == this) {
+            stop_auto_validation();
             return;
         }
 
-        auto_validate_running_ = true;
-        current_auto_license_key_ = license_key;
-
-        auto_validate_thread_ = std::thread([this, license_key]() {
-            // Emit first cycle information immediately (matches Swift SDK)
-            auto next_run = std::chrono::system_clock::now() +
-                            std::chrono::duration<double>(config_.auto_validate_interval);
-            auto next_run_unix = std::chrono::duration_cast<std::chrono::seconds>(
-                                     next_run.time_since_epoch())
-                                     .count();
-            event_bus_.emit(events::AUTOVALIDATION_CYCLE,
-                            std::map<std::string, std::string>{
-                                {"license_key", license_key},
-                                {"nextRunAt", std::to_string(next_run_unix)}});
-
-            while (auto_validate_running_) {
-                std::unique_lock<std::mutex> lock(auto_validate_mutex_);
-                auto_validate_cv_.wait_for(
-                    lock, std::chrono::duration<double>(config_.auto_validate_interval),
-                    [this]() { return !auto_validate_running_; });
-
-                if (!auto_validate_running_) {
-                    break;
-                }
-
-                // Perform validation
-                auto result = this->validate(license_key, "");
-
-                // Emit validation:auto-failed on error (matches Swift SDK)
-                if (result.is_error() || (result.is_ok() && !result.value().valid)) {
-                    event_bus_.emit(events::VALIDATION_AUTO_FAILED,
-                                    std::map<std::string, std::string>{
-                                        {"licenseKey", license_key},
-                                        {"error", result.is_error() ? result.error_message() : result.value().code}});
-                }
-
-                // Piggyback heartbeat (fire-and-forget, ignore errors)
-                (void)this->heartbeat(license_key, "");
-
-                // Announce next scheduled run (matches Swift SDK)
-                if (auto_validate_running_) {
-                    auto next = std::chrono::system_clock::now() +
-                                std::chrono::duration<double>(config_.auto_validate_interval);
-                    auto next_unix = std::chrono::duration_cast<std::chrono::seconds>(
-                                         next.time_since_epoch())
-                                         .count();
-                    event_bus_.emit(events::AUTOVALIDATION_CYCLE,
-                                    std::map<std::string, std::string>{
-                                        {"license_key", license_key},
-                                        {"nextRunAt", std::to_string(next_unix)}});
-                }
+        std::thread retired_worker;
+        std::uint64_t operation = 0;
+        {
+            std::lock_guard<std::mutex> lifecycle_lock(auto_validate_lifecycle_mutex_);
+            operation = ++auto_validate_operation_;
+            auto signal = std::atomic_load(&auto_validate_signal_);
+            if (signal)
+                signal->stop();
+            std::atomic_store(&auto_validate_signal_, std::shared_ptr<WorkerSignal>{});
+            if (auto_validate_thread_.joinable()) {
+                retired_worker = std::move(auto_validate_thread_);
             }
-        });
+        }
+        if (retired_worker.joinable())
+            retired_worker.join();
+
+        std::lock_guard<std::mutex> lifecycle_lock(auto_validate_lifecycle_mutex_);
+        if (shutdown_started_.load() || operation != auto_validate_operation_ ||
+            !valid_timer_interval(config_.auto_validate_interval) ||
+            config_.auto_validate_interval == 0.0 || !is_safe_text(license_key, 512)) {
+            return;
+        }
+
+        auto signal = std::make_shared<WorkerSignal>();
+        std::atomic_store(&auto_validate_signal_, signal);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            current_auto_license_key_ = license_key;
+        }
+
+        try {
+            auto self = shared_from_this();
+            auto_validate_thread_ = std::thread([self = std::move(self), license_key, signal]() {
+                WorkerOwnerScope worker_scope(auto_validation_worker_owner,
+                                              auto_validation_worker_signal, self.get(),
+                                              signal.get());
+                // Emit first cycle information immediately (matches Swift SDK)
+                auto next_run = std::chrono::system_clock::now() +
+                                std::chrono::duration<double>(self->config_.auto_validate_interval);
+                auto next_run_unix =
+                    std::chrono::duration_cast<std::chrono::seconds>(next_run.time_since_epoch())
+                        .count();
+                self->event_bus_.emit(events::AUTOVALIDATION_CYCLE,
+                                      std::map<std::string, std::string>{
+                                          {"license_key", license_key},
+                                          {"nextRunAt", std::to_string(next_run_unix)}});
+
+                while (signal->running) {
+                    std::unique_lock<std::mutex> lock(signal->mutex);
+                    signal->cv.wait_for(
+                        lock, std::chrono::duration<double>(self->config_.auto_validate_interval),
+                        [signal]() { return !signal->running; });
+
+                    if (!signal->running)
+                        break;
+                    lock.unlock();
+
+                    // Perform validation
+                    auto result = self->validate(license_key, "");
+
+                    // Event handlers invoked by validate may stop the worker or
+                    // destroy the public Client. Do not perform another request
+                    // after shutdown has been requested.
+                    if (!signal->running)
+                        break;
+
+                    // Emit validation:auto-failed on error (matches Swift SDK)
+                    if (result.is_error() || (result.is_ok() && !result.value().valid)) {
+                        self->event_bus_.emit(
+                            events::VALIDATION_AUTO_FAILED,
+                            std::map<std::string, std::string>{
+                                {"licenseKey", license_key},
+                                {"error", result.is_error() ? result.error_message()
+                                                            : result.value().code}});
+                    }
+
+                    // Piggyback heartbeat (fire-and-forget, ignore errors)
+                    (void)self->heartbeat(license_key, "");
+
+                    // Announce next scheduled run (matches Swift SDK)
+                    if (signal->running) {
+                        auto next =
+                            std::chrono::system_clock::now() +
+                            std::chrono::duration<double>(self->config_.auto_validate_interval);
+                        auto next_unix = std::chrono::duration_cast<std::chrono::seconds>(
+                                             next.time_since_epoch())
+                                             .count();
+                        self->event_bus_.emit(events::AUTOVALIDATION_CYCLE,
+                                              std::map<std::string, std::string>{
+                                                  {"license_key", license_key},
+                                                  {"nextRunAt", std::to_string(next_unix)}});
+                    }
+                }
+            });
+        } catch (...) {
+            signal->stop();
+            std::atomic_store(&auto_validate_signal_, std::shared_ptr<WorkerSignal>{});
+            throw;
+        }
     }
 
     void stop_auto_validation() {
-        bool was_running = auto_validate_running_.exchange(false);
-        auto_validate_cv_.notify_all();
-
-        // Always check joinable regardless of running flag (race condition safety)
-        if (auto_validate_thread_.joinable()) {
-            auto_validate_thread_.join();
+        if (auto_validation_worker_owner == this) {
+            bool was_running =
+                auto_validation_worker_signal ? auto_validation_worker_signal->stop() : false;
+            {
+                std::lock_guard<std::mutex> lifecycle_lock(auto_validate_lifecycle_mutex_);
+                ++auto_validate_operation_;
+                auto current = std::atomic_load(&auto_validate_signal_);
+                if (current.get() == auto_validation_worker_signal) {
+                    std::atomic_store(&auto_validate_signal_, std::shared_ptr<WorkerSignal>{});
+                }
+                if (auto_validate_thread_.joinable() &&
+                    auto_validate_thread_.get_id() == std::this_thread::get_id()) {
+                    auto_validate_thread_.detach();
+                }
+            }
+            if (was_running) {
+                event_bus_.emit(events::AUTOVALIDATION_STOPPED,
+                                std::map<std::string, std::string>{});
+            }
+            return;
         }
+
+        bool was_running = false;
+        std::thread retired_worker;
+        {
+            std::lock_guard<std::mutex> lifecycle_lock(auto_validate_lifecycle_mutex_);
+            ++auto_validate_operation_;
+            auto signal = std::atomic_load(&auto_validate_signal_);
+            was_running = signal ? signal->stop() : false;
+            std::atomic_store(&auto_validate_signal_, std::shared_ptr<WorkerSignal>{});
+            if (auto_validate_thread_.joinable()) {
+                retired_worker = std::move(auto_validate_thread_);
+            }
+        }
+        if (retired_worker.joinable())
+            retired_worker.join();
 
         if (was_running) {
             event_bus_.emit(events::AUTOVALIDATION_STOPPED, std::map<std::string, std::string>{});
         }
     }
 
-    bool is_auto_validating() const { return auto_validate_running_; }
+    bool is_auto_validating() const {
+        auto signal = std::atomic_load(&auto_validate_signal_);
+        return signal && signal->running;
+    }
 
     // ========== Heartbeat Timer ==========
 
     void start_heartbeat(const std::string& license_key) {
-        stop_heartbeat();
-
-        if (config_.heartbeat_interval <= 0) {
+        if (shutdown_started_.load())
+            return;
+        if (heartbeat_worker_owner == this) {
+            stop_heartbeat();
             return;
         }
 
-        current_heartbeat_license_key_ = license_key;
-        heartbeat_running_ = true;
+        std::thread retired_worker;
+        std::uint64_t operation = 0;
+        {
+            std::lock_guard<std::mutex> lifecycle_lock(heartbeat_lifecycle_mutex_);
+            operation = ++heartbeat_operation_;
+            auto signal = std::atomic_load(&heartbeat_signal_);
+            if (signal)
+                signal->stop();
+            std::atomic_store(&heartbeat_signal_, std::shared_ptr<WorkerSignal>{});
+            if (heartbeat_thread_.joinable())
+                retired_worker = std::move(heartbeat_thread_);
+        }
+        if (retired_worker.joinable())
+            retired_worker.join();
 
-        heartbeat_thread_ = std::thread([this, license_key]() {
-            while (heartbeat_running_) {
-                std::unique_lock<std::mutex> lock(heartbeat_mutex_);
-                heartbeat_cv_.wait_for(
-                    lock, std::chrono::seconds(config_.heartbeat_interval),
-                    [this]() { return !heartbeat_running_; });
+        std::lock_guard<std::mutex> lifecycle_lock(heartbeat_lifecycle_mutex_);
+        if (shutdown_started_.load() || operation != heartbeat_operation_ ||
+            config_.heartbeat_interval <= 0 ||
+            static_cast<double>(config_.heartbeat_interval) > MAX_TIMER_INTERVAL_SECONDS ||
+            !is_safe_text(license_key, 512)) {
+            return;
+        }
 
-                if (!heartbeat_running_) {
-                    break;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            current_heartbeat_license_key_ = license_key;
+        }
+        auto signal = std::make_shared<WorkerSignal>();
+        std::atomic_store(&heartbeat_signal_, signal);
+        try {
+            auto self = shared_from_this();
+            heartbeat_thread_ = std::thread([self = std::move(self), license_key, signal]() {
+                WorkerOwnerScope worker_scope(heartbeat_worker_owner, heartbeat_worker_signal,
+                                              self.get(), signal.get());
+                while (signal->running) {
+                    std::unique_lock<std::mutex> lock(signal->mutex);
+                    signal->cv.wait_for(lock,
+                                        std::chrono::seconds(self->config_.heartbeat_interval),
+                                        [signal]() { return !signal->running; });
+
+                    if (!signal->running)
+                        break;
+                    lock.unlock();
+
+                    // Send heartbeat (fire-and-forget)
+                    (void)self->heartbeat(license_key, "");
                 }
-
-                // Send heartbeat (fire-and-forget)
-                (void)this->heartbeat(license_key, "");
-            }
-        });
-    }
-
-    void stop_heartbeat() {
-        heartbeat_running_ = false;
-        heartbeat_cv_.notify_all();
-
-        // Always check joinable regardless of running flag (race condition safety)
-        if (heartbeat_thread_.joinable()) {
-            heartbeat_thread_.join();
+            });
+        } catch (...) {
+            signal->stop();
+            std::atomic_store(&heartbeat_signal_, std::shared_ptr<WorkerSignal>{});
+            throw;
         }
     }
 
-    bool is_heartbeat_running() const { return heartbeat_running_; }
+    void stop_heartbeat() {
+        if (heartbeat_worker_owner == this) {
+            if (heartbeat_worker_signal)
+                heartbeat_worker_signal->stop();
+            std::lock_guard<std::mutex> lifecycle_lock(heartbeat_lifecycle_mutex_);
+            ++heartbeat_operation_;
+            auto current = std::atomic_load(&heartbeat_signal_);
+            if (current.get() == heartbeat_worker_signal) {
+                std::atomic_store(&heartbeat_signal_, std::shared_ptr<WorkerSignal>{});
+            }
+            if (heartbeat_thread_.joinable() &&
+                heartbeat_thread_.get_id() == std::this_thread::get_id()) {
+                heartbeat_thread_.detach();
+            }
+            return;
+        }
+
+        std::thread retired_worker;
+        {
+            std::lock_guard<std::mutex> lifecycle_lock(heartbeat_lifecycle_mutex_);
+            ++heartbeat_operation_;
+            auto signal = std::atomic_load(&heartbeat_signal_);
+            if (signal)
+                signal->stop();
+            std::atomic_store(&heartbeat_signal_, std::shared_ptr<WorkerSignal>{});
+            if (heartbeat_thread_.joinable())
+                retired_worker = std::move(heartbeat_thread_);
+        }
+        if (retired_worker.joinable())
+            retired_worker.join();
+    }
+
+    bool is_heartbeat_running() const {
+        auto signal = std::atomic_load(&heartbeat_signal_);
+        return signal && signal->running;
+    }
 
     // ========== Status & State ==========
 
@@ -989,11 +1486,17 @@ class Client::Impl {
             status.reason = "no_license";
             return status;
         }
+        if (!cached_validation_.has_value() || !cached_validation_->valid ||
+            !cached_license_->is_valid()) {
+            status.active = false;
+            status.reason = "license_inactive";
+            return status;
+        }
 
         for (const auto& ent : cached_license_->active_entitlements()) {
             if (ent.key == entitlement_key) {
                 if (ent.expires_at) {
-                    if (*ent.expires_at < std::chrono::system_clock::now()) {
+                    if (*ent.expires_at <= std::chrono::system_clock::now()) {
                         status.active = false;
                         status.reason = "expired";
                         status.expires_at = ent.expires_at;
@@ -1024,7 +1527,8 @@ class Client::Impl {
 
         if (cached_validation_->offline) {
             // Differentiate between offline valid and offline invalid (matches Swift SDK)
-            return cached_validation_->valid ? ClientStatus::OfflineValid : ClientStatus::OfflineInvalid;
+            return cached_validation_->valid ? ClientStatus::OfflineValid
+                                             : ClientStatus::OfflineInvalid;
         }
 
         if (cached_validation_->valid) {
@@ -1037,9 +1541,7 @@ class Client::Impl {
     // ========== Event Handling ==========
 
     Subscription on(const std::string& event, EventHandler handler) {
-        auto event_sub = event_bus_.on(event, handler);
-        // Wrap the EventSubscription's cancel in a Subscription
-        return Subscription([sub = std::move(event_sub)]() mutable { sub.cancel(); });
+        return event_bus_.on(event, std::move(handler));
     }
 
     void emit(const std::string& event, const std::any& data) { event_bus_.emit(event, data); }
@@ -1047,8 +1549,7 @@ class Client::Impl {
     // ========== Releases ==========
 
     Result<Release> get_latest_release(const std::string& product_slug_param,
-                                       const std::string& channel,
-                                       const std::string& platform) {
+                                       const std::string& channel, const std::string& platform) {
         // Prepare request data while holding mutex briefly
         std::string product_slug;
         {
@@ -1056,24 +1557,32 @@ class Client::Impl {
             product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
         }
 
-        if (product_slug.empty()) {
+        if (!is_safe_text(product_slug, 100)) {
             return Result<Release>::error(ErrorCode::MissingParameter, "Product slug is required");
         }
+        if ((!channel.empty() && !is_safe_text(channel, 100)) ||
+            (!platform.empty() && !is_safe_text(platform, 100))) {
+            return Result<Release>::error(ErrorCode::InvalidParameter, "Release filter is invalid");
+        }
 
-        std::string path = "/products/" + product_slug + "/releases/latest";
+        std::string path = "/products/" + encode_url_component(product_slug) + "/releases/latest";
         std::string query;
 
         if (!channel.empty()) {
-            query += (query.empty() ? "?" : "&") + std::string("channel=") + channel;
+            query += (query.empty() ? "?" : "&") + std::string("channel=") +
+                     encode_url_component(channel);
         }
         if (!platform.empty()) {
-            query += (query.empty() ? "?" : "&") + std::string("platform=") + platform;
+            query += (query.empty() ? "?" : "&") + std::string("platform=") +
+                     encode_url_component(platform);
         }
 
         // Make HTTP call without holding mutex
         http::Request request;
         request.method = http::Method::GET;
         request.path = path + query;
+        request.authenticated = false;
+        request.retryable = true;
 
         auto response = http_client_->send(request);
 
@@ -1086,10 +1595,16 @@ class Client::Impl {
 
         // Parse response
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
+            if (!j.is_object() || j.value("object", std::string{}) != "release") {
+                throw std::invalid_argument("Release response has an invalid schema");
+            }
             auto release = json::parse_release(j);
+            if (!valid_release_response(release, product_slug, channel, platform)) {
+                throw std::invalid_argument("Release response identity is inconsistent");
+            }
             return Result<Release>::ok(std::move(release));
-        } catch (const nlohmann::json::exception& e) {
+        } catch (const std::exception& e) {
             return Result<Release>::error(ErrorCode::ParseError,
                                           std::string("Failed to parse response: ") + e.what());
         }
@@ -1105,25 +1620,34 @@ class Client::Impl {
             product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
         }
 
-        if (product_slug.empty()) {
+        if (!is_safe_text(product_slug, 100)) {
             return Result<std::vector<Release>>::error(ErrorCode::MissingParameter,
                                                        "Product slug is required");
         }
+        if ((!channel.empty() && !is_safe_text(channel, 100)) ||
+            (!platform.empty() && !is_safe_text(platform, 100))) {
+            return Result<std::vector<Release>>::error(ErrorCode::InvalidParameter,
+                                                       "Release filter is invalid");
+        }
 
-        std::string path = "/products/" + product_slug + "/releases";
+        std::string path = "/products/" + encode_url_component(product_slug) + "/releases";
         std::string query;
 
         if (!channel.empty()) {
-            query += (query.empty() ? "?" : "&") + std::string("channel=") + channel;
+            query += (query.empty() ? "?" : "&") + std::string("channel=") +
+                     encode_url_component(channel);
         }
         if (!platform.empty()) {
-            query += (query.empty() ? "?" : "&") + std::string("platform=") + platform;
+            query += (query.empty() ? "?" : "&") + std::string("platform=") +
+                     encode_url_component(platform);
         }
 
         // Make HTTP call without holding mutex
         http::Request request;
         request.method = http::Method::GET;
         request.path = path + query;
+        request.authenticated = false;
+        request.retryable = true;
 
         auto response = http_client_->send(request);
 
@@ -1137,10 +1661,24 @@ class Client::Impl {
 
         // Parse response
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
+            if (!j.is_object() || j.value("object", std::string{}) != "list" ||
+                !j.contains("data") || !j["data"].is_array() || j["data"].size() > 100) {
+                throw std::invalid_argument("Release list response has an invalid schema");
+            }
+            for (const auto& item : j["data"]) {
+                if (!item.is_object() || item.value("object", std::string{}) != "release") {
+                    throw std::invalid_argument("Release list contains an invalid item schema");
+                }
+            }
             auto releases = json::parse_releases(j);
+            for (const auto& release : releases) {
+                if (!valid_release_response(release, product_slug, channel, platform)) {
+                    throw std::invalid_argument("Release list contains an inconsistent item");
+                }
+            }
             return Result<std::vector<Release>>::ok(std::move(releases));
-        } catch (const nlohmann::json::exception& e) {
+        } catch (const std::exception& e) {
             return Result<std::vector<Release>>::error(
                 ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
         }
@@ -1151,14 +1689,13 @@ class Client::Impl {
                                                   const std::string& product_slug_param,
                                                   const std::string& platform) {
         // Validate inputs before mutex
-        if (license_key.empty()) {
+        if (!is_safe_text(license_key, 512)) {
             return Result<DownloadToken>::error(ErrorCode::InvalidLicenseKey,
-                                                "License key is required");
+                                                "License key is empty or invalid");
         }
 
-        if (version.empty()) {
-            return Result<DownloadToken>::error(ErrorCode::MissingParameter,
-                                                "Version is required");
+        if (!is_safe_text(version, 100)) {
+            return Result<DownloadToken>::error(ErrorCode::MissingParameter, "Version is required");
         }
 
         // Get product_slug while holding mutex briefly
@@ -1168,15 +1705,19 @@ class Client::Impl {
             product_slug = product_slug_param.empty() ? config_.product_slug : product_slug_param;
         }
 
-        if (product_slug.empty()) {
+        if (!is_safe_text(product_slug, 100)) {
             return Result<DownloadToken>::error(ErrorCode::MissingParameter,
                                                 "Product slug is required");
+        }
+        if (!platform.empty() && !is_safe_text(platform, 100)) {
+            return Result<DownloadToken>::error(ErrorCode::InvalidParameter, "Platform is invalid");
         }
 
         // Make HTTP call without holding mutex
         auto body = json::build_download_token_request(license_key, platform);
-        auto response = send_post(
-            "/products/" + product_slug + "/releases/" + version + "/download_token", body);
+        auto response = send_post("/products/" + encode_url_component(product_slug) + "/releases/" +
+                                      encode_url_component(version) + "/download_token",
+                                  body);
 
         if (!response.success) {
             if (response.error_message.empty()) {
@@ -1187,10 +1728,18 @@ class Client::Impl {
 
         // Parse response
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
+            if (!j.is_object() || j.value("object", std::string{}) != "download_token") {
+                throw std::invalid_argument("Download token response has an invalid schema");
+            }
             auto token = json::parse_download_token(j);
+            const auto now = std::chrono::system_clock::now();
+            if (!is_safe_text(token.token, 16 * 1024) || !token.expires_at.has_value() ||
+                *token.expires_at <= now || *token.expires_at > now + std::chrono::hours(24)) {
+                throw std::invalid_argument("Download token response is incomplete or expired");
+            }
             return Result<DownloadToken>::ok(std::move(token));
-        } catch (const nlohmann::json::exception& e) {
+        } catch (const std::exception& e) {
             return Result<DownloadToken>::error(
                 ErrorCode::ParseError, std::string("Failed to parse response: ") + e.what());
         }
@@ -1203,6 +1752,9 @@ class Client::Impl {
         http::Request request;
         request.method = http::Method::GET;
         request.path = "/health";
+        request.authenticated = false;
+        request.retryable = true;
+        request.expect_json = false;
 
         auto response = http_client_->send(request);
 
@@ -1245,10 +1797,19 @@ class Client::Impl {
     void reset() {
         stop_heartbeat();
         stop_auto_validation();
+        stop_network_recheck();
+        stop_offline_refresh();
         storage_->clear_all();
-        cached_license_.reset();
-        cached_validation_.reset();
-        current_activation_.reset();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_license_.reset();
+            cached_validation_.reset();
+            current_activation_.reset();
+            current_auto_license_key_.clear();
+            current_heartbeat_license_key_.clear();
+            offline_refresh_license_key_.clear();
+            trusted_signing_keys_.clear();
+        }
         event_bus_.emit(events::SDK_RESET, std::map<std::string, std::string>{});
     }
 
@@ -1259,28 +1820,41 @@ class Client::Impl {
 
   private:
     /// Send a POST request, injecting telemetry if enabled
-    http::Response send_post(const std::string& path, nlohmann::json body) {
-        if (config_.telemetry_enabled) {
-            body["telemetry"] = telemetry::collect(VERSION, config_.app_version, config_.app_build);
+    http::Response send_post(const std::string& path, nlohmann::json body, bool retryable = false) {
+        http::Response response;
+        try {
+            if (config_.telemetry_enabled) {
+                body["telemetry"] =
+                    telemetry::collect(VERSION, config_.app_version, config_.app_build);
+            }
+            http::Request request;
+            request.method = http::Method::POST;
+            request.path = path;
+            request.body = body.dump();
+            request.retryable = retryable;
+            return http_client_->send(request);
+        } catch (const std::exception&) {
+            response.error_message = "Failed to serialize request";
+            return response;
+        } catch (...) {
+            response.error_message = "Failed to serialize request";
+            return response;
         }
-        http::Request request;
-        request.method = http::Method::POST;
-        request.path = path;
-        request.body = body.dump();
-        return http_client_->send(request);
     }
 
-    template <typename T>
-    Result<T> handle_error_response(const http::Response& response) {
+    template <typename T> Result<T> handle_error_response(const http::Response& response) {
         // Try to parse error response
         try {
-            auto j = nlohmann::json::parse(response.body);
+            auto j = json::parse_strict(response.body);
             auto api_error = json::parse_error_response(j);
 
             ErrorCode code = ErrorCode::Unknown;
             if (!api_error.code.empty()) {
                 code = json::error_code_to_error_code(api_error.code);
-            } else {
+            }
+            // Preserve the authoritative HTTP classification when the server
+            // adds a newer machine-readable code this SDK does not know yet.
+            if (code == ErrorCode::Unknown) {
                 code = http::status_code_to_error_code(response.status_code);
             }
 
@@ -1290,7 +1864,7 @@ class Client::Impl {
             }
 
             return Result<T>::error(code, message);
-        } catch (const nlohmann::json::exception&) {
+        } catch (const std::exception&) {
             // Couldn't parse as JSON, use status code
             auto code = http::status_code_to_error_code(response.status_code);
             return Result<T>::error(code, error_code_to_string(code));
@@ -1298,22 +1872,10 @@ class Client::Impl {
     }
 
     bool should_fallback_to_offline(const http::Response& response) const {
-        if (config_.offline_fallback_mode == OfflineFallbackMode::Always) {
-            return true;
-        }
-
-        // NetworkOnly mode - only fallback on transport errors
-        if (!response.success && response.status_code == 0) {
-            return true;  // Network error
-        }
-        if (response.status_code >= 500 && response.status_code < 600) {
-            return true;  // Server error
-        }
-        if (response.status_code == 408) {
-            return true;  // Timeout
-        }
-
-        return false;
+        // Only transport failures are eligible. A received HTTP response is
+        // authoritative, including 408 and 5xx, and must never be masked by a
+        // stale local grant.
+        return offline_policy_is_enabled() && !response.success && response.status_code == 0;
     }
 
     // Check if the validation result code indicates license revocation
@@ -1329,7 +1891,7 @@ class Client::Impl {
         // 422 with revocation codes in the body indicates revocation
         if (response.status_code == 422) {
             try {
-                auto j = nlohmann::json::parse(response.body);
+                auto j = json::parse_strict(response.body);
                 if (j.contains("error") && j["error"].contains("code")) {
                     std::string code = j["error"]["code"].get<std::string>();
                     return is_revocation_code(code);
@@ -1343,9 +1905,15 @@ class Client::Impl {
 
     // Purge all cached data when license is revoked
     void purge_cache_on_revocation() {
-        cached_license_.reset();
-        cached_validation_.reset();
-        current_activation_.reset();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_license_.reset();
+            cached_validation_.reset();
+            current_activation_.reset();
+            current_auto_license_key_.clear();
+            current_heartbeat_license_key_.clear();
+            offline_refresh_license_key_.clear();
+        }
         storage_->clear_license();
         storage_->clear_offline_token();
         storage_->clear_machine_file();
@@ -1361,31 +1929,47 @@ class Client::Impl {
 
     // Unlocked versions of stop methods for use during revocation
     void stop_auto_validation_unlocked() {
-        if (auto_validate_running_) {
-            auto_validate_running_ = false;
-            auto_validate_cv_.notify_all();
-            // Don't join here - we're in the middle of validation which may be on the timer thread
+        std::lock_guard<std::mutex> lifecycle_lock(auto_validate_lifecycle_mutex_);
+        ++auto_validate_operation_;
+        auto signal = std::atomic_load(&auto_validate_signal_);
+        if (signal)
+            signal->stop();
+        if (!signal || signal.get() == auto_validation_worker_signal) {
+            std::atomic_store(&auto_validate_signal_, std::shared_ptr<WorkerSignal>{});
         }
+        // Don't join here: revocation may be handled by this worker.
     }
 
     void stop_heartbeat_unlocked() {
-        if (heartbeat_running_) {
-            heartbeat_running_ = false;
-            heartbeat_cv_.notify_all();
+        std::lock_guard<std::mutex> lifecycle_lock(heartbeat_lifecycle_mutex_);
+        ++heartbeat_operation_;
+        auto signal = std::atomic_load(&heartbeat_signal_);
+        if (signal)
+            signal->stop();
+        if (!signal || signal.get() == heartbeat_worker_signal) {
+            std::atomic_store(&heartbeat_signal_, std::shared_ptr<WorkerSignal>{});
         }
     }
 
     void stop_network_recheck_unlocked() {
-        if (network_recheck_running_) {
-            network_recheck_running_ = false;
-            network_recheck_cv_.notify_all();
+        std::lock_guard<std::mutex> lifecycle_lock(network_recheck_lifecycle_mutex_);
+        ++network_recheck_operation_;
+        auto signal = std::atomic_load(&network_recheck_signal_);
+        if (signal)
+            signal->stop();
+        if (!signal || signal.get() == network_recheck_worker_signal) {
+            std::atomic_store(&network_recheck_signal_, std::shared_ptr<WorkerSignal>{});
         }
     }
 
     void stop_offline_refresh_unlocked() {
-        if (offline_refresh_running_) {
-            offline_refresh_running_ = false;
-            offline_refresh_cv_.notify_all();
+        std::lock_guard<std::mutex> lifecycle_lock(offline_refresh_lifecycle_mutex_);
+        ++offline_refresh_operation_;
+        auto signal = std::atomic_load(&offline_refresh_signal_);
+        if (signal)
+            signal->stop();
+        if (!signal || signal.get() == offline_refresh_worker_signal) {
+            std::atomic_store(&offline_refresh_signal_, std::shared_ptr<WorkerSignal>{});
         }
     }
 
@@ -1433,70 +2017,36 @@ class Client::Impl {
     }
 
     std::optional<std::string> extract_machine_file_key_id(const MachineFile& machine_file) const {
-        if (machine_file.certificate.empty()) {
-            return std::nullopt;
-        }
-
-        std::string cleaned = machine_file.certificate;
-        const std::string begin_marker = "-----BEGIN MACHINE FILE-----";
-        const std::string end_marker = "-----END MACHINE FILE-----";
-
-        auto begin_pos = cleaned.find(begin_marker);
-        if (begin_pos != std::string::npos) {
-            cleaned.erase(begin_pos, begin_marker.size());
-        }
-
-        auto end_pos = cleaned.find(end_marker);
-        if (end_pos != std::string::npos) {
-            cleaned.erase(end_pos, end_marker.size());
-        }
-
-        cleaned.erase(std::remove_if(cleaned.begin(), cleaned.end(),
-                                     [](unsigned char ch) { return std::isspace(ch) != 0; }),
-                      cleaned.end());
-
-        auto decoded = crypto::base64_decode(cleaned);
-        if (decoded.empty()) {
-            return std::nullopt;
-        }
-
-        try {
-            auto envelope =
-                nlohmann::json::parse(std::string(decoded.begin(), decoded.end()));
-            auto key_id = envelope.value("kid", std::string{});
-            if (key_id.empty()) {
-                return std::nullopt;
-            }
-            return key_id;
-        } catch (const nlohmann::json::exception&) {
-            return std::nullopt;
-        }
+        auto key_id = crypto::internal::extract_machine_file_key_id(machine_file);
+        return key_id.is_ok() ? std::optional<std::string>(key_id.value()) : std::nullopt;
     }
 
     std::string resolve_signing_key(const std::optional<std::string>& key_id,
-                                    const std::string& explicit_public_key,
-                                    bool allow_fetch) {
+                                    const std::string& explicit_public_key, bool allow_fetch) {
         if (!explicit_public_key.empty()) {
-            return explicit_public_key;
+            return is_valid_ed25519_public_key(explicit_public_key) ? explicit_public_key : "";
         }
 
         if (!config_.signing_public_key.empty()) {
+            if (!is_valid_ed25519_public_key(config_.signing_public_key) ||
+                (!config_.signing_key_id.empty() && key_id.has_value() &&
+                 *key_id != config_.signing_key_id)) {
+                return "";
+            }
             return config_.signing_public_key;
         }
 
         auto resolve_by_key_id = [&](const std::string& candidate_key_id) -> std::string {
-            if (candidate_key_id.empty()) {
+            if (!is_safe_text(candidate_key_id, 255))
                 return "";
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto trusted = trusted_signing_keys_.find(candidate_key_id);
+                if (trusted != trusted_signing_keys_.end())
+                    return trusted->second;
             }
-
-            auto cached_key = storage_->get_signing_key(candidate_key_id);
-            if (cached_key.has_value()) {
-                return *cached_key;
-            }
-
-            if (!allow_fetch) {
+            if (!allow_fetch)
                 return "";
-            }
 
             auto fetched_key = fetch_signing_key(candidate_key_id);
             if (fetched_key.is_ok()) {
@@ -1521,6 +2071,7 @@ class Client::Impl {
     }
 
     std::string reconnect_license_key() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!offline_refresh_license_key_.empty()) {
             return offline_refresh_license_key_;
         }
@@ -1551,6 +2102,18 @@ class Client::Impl {
         return static_cast<double>(now_unix) + max_skew_sec < *last_seen;
     }
 
+    bool offline_policy_is_valid() const {
+        return config_.max_offline_days >= 0 && config_.max_offline_days <= MAX_OFFLINE_DAYS &&
+               std::isfinite(config_.max_clock_skew_ms) && config_.max_clock_skew_ms >= 0.0 &&
+               config_.max_clock_skew_ms <= MAX_CLOCK_SKEW_MS;
+    }
+
+    bool offline_policy_is_enabled() const {
+        return offline_policy_is_valid() &&
+               config_.offline_fallback_mode != OfflineFallbackMode::Disabled &&
+               config_.max_offline_days > 0;
+    }
+
     void update_last_seen(int64_t now_unix) {
         storage_->set_last_seen_timestamp(static_cast<double>(now_unix));
     }
@@ -1558,26 +2121,34 @@ class Client::Impl {
     License fallback_license_for_machine_payload(
         const MachineFilePayload& payload,
         const std::optional<CachedLicense>& cached_license) const {
-        if (cached_license.has_value() && cached_license->license_data.has_value()) {
-            return *cached_license->license_data;
-        }
-
         std::optional<Timestamp> expires_at;
         if (payload.license_expires_at.has_value()) {
             expires_at = std::chrono::system_clock::from_time_t(
                 static_cast<std::time_t>(*payload.license_expires_at));
         }
 
-        Product product;
-        if (cached_license.has_value() && cached_license->license_data.has_value()) {
-            product = cached_license->license_data->product();
-        }
-
         return License(payload.license_key, LicenseStatus::Active, LicenseMode::Unknown, "",
-                       std::nullopt, 0, std::nullopt, expires_at, {}, {}, product);
+                       std::nullopt, 0, std::nullopt, expires_at, {}, {}, {});
     }
 
     Result<ValidationResult> verify_cached_machine_file() {
+        if (!offline_policy_is_valid()) {
+            ValidationResult result;
+            result.valid = false;
+            result.offline = true;
+            result.code = "invalid_configuration";
+            result.message = "Offline policy configuration is invalid";
+            return Result<ValidationResult>::ok(std::move(result));
+        }
+        if (!offline_policy_is_enabled()) {
+            ValidationResult result;
+            result.valid = false;
+            result.offline = true;
+            result.code = "offline_disabled";
+            result.message = "Offline validation is disabled by local policy";
+            return Result<ValidationResult>::ok(std::move(result));
+        }
+
         auto cached_machine_file = storage_->get_machine_file();
         if (!cached_machine_file.has_value()) {
             ValidationResult result;
@@ -1618,13 +2189,19 @@ class Client::Impl {
         }
 
         auto now = std::chrono::system_clock::now();
-        auto now_unix = std::chrono::duration_cast<std::chrono::seconds>(
-                            now.time_since_epoch())
-                            .count();
+        auto now_unix =
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
 
         if (is_clock_tampered(now_unix)) {
             result.valid = false;
             result.code = "clock_tamper";
+            return Result<ValidationResult>::ok(std::move(result));
+        }
+
+        if (now_unix >= payload.iat &&
+            now_unix - payload.iat > static_cast<int64_t>(config_.max_offline_days) * 86400) {
+            result.valid = false;
+            result.code = "grace_period_expired";
             return Result<ValidationResult>::ok(std::move(result));
         }
 
@@ -1639,6 +2216,23 @@ class Client::Impl {
     }
 
     Result<ValidationResult> verify_cached_offline_token() {
+        if (!offline_policy_is_valid()) {
+            ValidationResult result;
+            result.valid = false;
+            result.offline = true;
+            result.code = "invalid_configuration";
+            result.message = "Offline policy configuration is invalid";
+            return Result<ValidationResult>::ok(std::move(result));
+        }
+        if (!offline_policy_is_enabled()) {
+            ValidationResult result;
+            result.valid = false;
+            result.offline = true;
+            result.code = "offline_disabled";
+            result.message = "Offline validation is disabled by local policy";
+            return Result<ValidationResult>::ok(std::move(result));
+        }
+
         auto cached_offline = storage_->get_offline_token();
         if (!cached_offline) {
             ValidationResult result;
@@ -1648,15 +2242,7 @@ class Client::Impl {
             return Result<ValidationResult>::ok(result);
         }
 
-        std::string public_key;
-        if (!config_.signing_public_key.empty()) {
-            public_key = config_.signing_public_key;
-        } else {
-            auto cached_key = storage_->get_signing_key(cached_offline->signature.key_id);
-            if (cached_key) {
-                public_key = *cached_key;
-            }
-        }
+        auto public_key = resolve_signing_key(cached_offline->signature.key_id, "", false);
 
         if (public_key.empty()) {
             ValidationResult result;
@@ -1672,11 +2258,13 @@ class Client::Impl {
 
         if (!verify_result.is_ok() || !verify_result.value()) {
             result.valid = false;
-            result.code = verify_result.is_ok() ? "signature_invalid"
-                                                : offline_error_code_string(verify_result.error_code());
+            result.code = verify_result.is_ok()
+                              ? "signature_invalid"
+                              : offline_error_code_string(verify_result.error_code());
             result.message = verify_result.is_ok() ? "" : verify_result.error_message();
-            event_bus_.emit(events::OFFLINE_TOKEN_VERIFICATION_FAILED,
-                            std::map<std::string, std::string>{{"kid", cached_offline->signature.key_id}});
+            event_bus_.emit(
+                events::OFFLINE_TOKEN_VERIFICATION_FAILED,
+                std::map<std::string, std::string>{{"kid", cached_offline->signature.key_id}});
             return Result<ValidationResult>::ok(result);
         }
 
@@ -1694,11 +2282,10 @@ class Client::Impl {
         }
 
         auto now = std::chrono::system_clock::now();
-        auto now_unix = std::chrono::duration_cast<std::chrono::seconds>(
-                            now.time_since_epoch())
-                            .count();
+        auto now_unix =
+            std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
 
-        if (now_unix > cached_offline->token.exp) {
+        if (now_unix >= cached_offline->token.exp) {
             result.valid = false;
             result.code = "token_expired";
             return Result<ValidationResult>::ok(result);
@@ -1711,23 +2298,18 @@ class Client::Impl {
         }
 
         if (cached_offline->token.license_expires_at.has_value() &&
-            now_unix > *cached_offline->token.license_expires_at) {
+            now_unix >= *cached_offline->token.license_expires_at) {
             result.valid = false;
             result.code = "license_expired";
             return Result<ValidationResult>::ok(result);
         }
 
-        if (config_.max_offline_days > 0) {
-            auto last_validated = cached_license->last_validated;
-            auto last_validated_unix = std::chrono::duration_cast<std::chrono::seconds>(
-                                           last_validated.time_since_epoch())
-                                           .count();
-            auto days_since_validation = (now_unix - last_validated_unix) / 86400;
-            if (days_since_validation > config_.max_offline_days) {
-                result.valid = false;
-                result.code = "grace_period_expired";
-                return Result<ValidationResult>::ok(result);
-            }
+        if (now_unix >= cached_offline->token.iat &&
+            now_unix - cached_offline->token.iat >
+                static_cast<int64_t>(config_.max_offline_days) * 86400) {
+            result.valid = false;
+            result.code = "grace_period_expired";
+            return Result<ValidationResult>::ok(result);
         }
 
         if (is_clock_tampered(now_unix)) {
@@ -1752,13 +2334,8 @@ class Client::Impl {
         result.license = License(
             cached_offline->token.license_key,
             result.valid ? LicenseStatus::Active : LicenseStatus::Unknown,
-            license_mode_from_string(cached_offline->token.mode),
-            cached_offline->token.plan_key,
-            cached_offline->token.seat_limit,
-            0,
-            std::nullopt,
-            license_expires,
-            entitlements,
+            license_mode_from_string(cached_offline->token.mode), cached_offline->token.plan_key,
+            cached_offline->token.seat_limit, 0, std::nullopt, license_expires, entitlements,
             cached_offline->token.metadata,
             Product{cached_offline->token.product_slug, cached_offline->token.product_slug});
 
@@ -1784,7 +2361,7 @@ class Client::Impl {
     }
 
     void sync_offline_assets_impl(const std::string& license_key, const std::string& device_id) {
-        if (license_key.empty()) {
+        if (!offline_policy_is_enabled() || license_key.empty()) {
             return;
         }
 
@@ -1813,10 +2390,7 @@ class Client::Impl {
 
             // Fetch signing key if needed
             if (!offline.signature.key_id.empty()) {
-                auto cached_key = storage_->get_signing_key(offline.signature.key_id);
-                if (!cached_key) {
-                    (void)fetch_signing_key(offline.signature.key_id);
-                }
+                (void)resolve_signing_key(offline.signature.key_id, "", true);
             }
 
             // Immediately verify offline token locally (matches Swift SDK behavior)
@@ -1830,10 +2404,10 @@ class Client::Impl {
                 }
             }
         } else {
-            event_bus_.emit(events::OFFLINE_TOKEN_FETCH_ERROR,
-                            std::map<std::string, std::string>{
-                                {"licenseKey", license_key},
-                                {"error", offline_result.error_message()}});
+            event_bus_.emit(
+                events::OFFLINE_TOKEN_FETCH_ERROR,
+                std::map<std::string, std::string>{{"licenseKey", license_key},
+                                                   {"error", offline_result.error_message()}});
         }
     }
 
@@ -1855,130 +2429,262 @@ class Client::Impl {
                                     .count()));
     }
 
-    // Store a future and clean up completed ones
-    void store_future(std::future<void> future) {
-        std::lock_guard<std::mutex> lock(futures_mutex_);
-        cleanup_futures_unlocked();
-        pending_futures_.push_back(std::move(future));
-    }
-
     // Remove completed futures from the list (must hold futures_mutex_)
     void cleanup_futures_unlocked() {
-        pending_futures_.erase(
-            std::remove_if(pending_futures_.begin(), pending_futures_.end(),
-                           [](std::future<void>& f) {
-                               return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-                           }),
-            pending_futures_.end());
+        pending_futures_.erase(std::remove_if(pending_futures_.begin(), pending_futures_.end(),
+                                              [](PendingFuture& pending) {
+                                                  return pending.future.wait_for(
+                                                             std::chrono::seconds(0)) ==
+                                                         std::future_status::ready;
+                                              }),
+                               pending_futures_.end());
     }
 
     // Wait for all pending futures to complete
     void wait_for_pending_futures() {
-        std::vector<std::future<void>> futures_to_wait;
+        std::vector<PendingFuture> futures_to_wait;
         {
             std::lock_guard<std::mutex> lock(futures_mutex_);
             futures_to_wait = std::move(pending_futures_);
         }
-        for (auto& f : futures_to_wait) {
-            if (f.valid()) {
-                f.wait();
+        for (auto& pending : futures_to_wait) {
+            if (!pending.future.valid())
+                continue;
+            if (async_worker_owner == this && async_worker_id == pending.id) {
+                // std::future from std::async waits in its destructor. Hand the
+                // current job to a separate reaper so a callback can safely
+                // destroy its own Client without waiting on itself.
+                std::thread([future = std::move(pending.future)]() mutable {
+                    if (future.valid())
+                        future.wait();
+                }).detach();
+            } else {
+                pending.future.wait();
             }
         }
     }
 
     // Network recheck timer management
     void start_network_recheck() {
-        stop_network_recheck();
-
-        if (config_.network_recheck_interval <= 0) {
+        if (shutdown_started_.load())
+            return;
+        if (network_recheck_worker_owner == this) {
+            stop_network_recheck();
             return;
         }
 
-        network_recheck_running_ = true;
+        std::thread retired_worker;
+        std::uint64_t operation = 0;
+        {
+            std::lock_guard<std::mutex> lifecycle_lock(network_recheck_lifecycle_mutex_);
+            operation = ++network_recheck_operation_;
+            auto signal = std::atomic_load(&network_recheck_signal_);
+            if (signal)
+                signal->stop();
+            std::atomic_store(&network_recheck_signal_, std::shared_ptr<WorkerSignal>{});
+            if (network_recheck_thread_.joinable()) {
+                retired_worker = std::move(network_recheck_thread_);
+            }
+        }
+        if (retired_worker.joinable())
+            retired_worker.join();
 
-        network_recheck_thread_ = std::thread([this]() {
-            while (network_recheck_running_) {
-                std::unique_lock<std::mutex> lock(network_recheck_mutex_);
-                network_recheck_cv_.wait_for(
-                    lock, std::chrono::duration<double>(config_.network_recheck_interval),
-                    [this]() { return !network_recheck_running_; });
+        std::lock_guard<std::mutex> lifecycle_lock(network_recheck_lifecycle_mutex_);
+        if (shutdown_started_.load() || operation != network_recheck_operation_ ||
+            !valid_timer_interval(config_.network_recheck_interval) ||
+            config_.network_recheck_interval == 0.0) {
+            return;
+        }
 
-                if (!network_recheck_running_) {
-                    break;
-                }
+        auto signal = std::make_shared<WorkerSignal>();
+        std::atomic_store(&network_recheck_signal_, signal);
+        try {
+            auto self = shared_from_this();
+            network_recheck_thread_ = std::thread([self = std::move(self), signal]() {
+                WorkerOwnerScope worker_scope(network_recheck_worker_owner,
+                                              network_recheck_worker_signal, self.get(),
+                                              signal.get());
+                while (signal->running) {
+                    std::unique_lock<std::mutex> lock(signal->mutex);
+                    signal->cv.wait_for(
+                        lock, std::chrono::duration<double>(self->config_.network_recheck_interval),
+                        [signal]() { return !signal->running; });
 
-                // Check network status by calling health endpoint
-                auto result = health_check_unlocked();
-                if (result) {
-                    // We're back online!
-                    is_online_ = true;
-                    event_bus_.emit(events::NETWORK_ONLINE, std::map<std::string, std::string>{});
+                    if (!signal->running)
+                        break;
+                    lock.unlock();
 
-                    // Stop the recheck timer since we're online now
-                    network_recheck_running_ = false;
+                    // Check network status by calling health endpoint
+                    auto result = self->health_check_unlocked();
+                    if (result) {
+                        // We're back online!
+                        self->is_online_ = true;
+                        self->event_bus_.emit(events::NETWORK_ONLINE,
+                                              std::map<std::string, std::string>{});
 
-                    auto license_key = reconnect_license_key();
-                    if (!license_key.empty()) {
-                        auto validation_result = this->validate(license_key, "");
-                        if (validation_result.is_ok() && validation_result.value().valid) {
-                            this->start_auto_validation(license_key);
-                            this->start_heartbeat(license_key);
-                            this->start_offline_refresh(license_key);
+                        if (!signal->running)
+                            break;
+
+                        // Stop the recheck timer since we're online now
+                        signal->stop();
+
+                        auto license_key = self->reconnect_license_key();
+                        if (!license_key.empty()) {
+                            auto validation_result = self->validate(license_key, "");
+                            if (validation_result.is_ok() && validation_result.value().valid) {
+                                self->start_auto_validation(license_key);
+                                self->start_heartbeat(license_key);
+                                self->start_offline_refresh(license_key);
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
+        } catch (...) {
+            signal->stop();
+            std::atomic_store(&network_recheck_signal_, std::shared_ptr<WorkerSignal>{});
+            throw;
+        }
     }
 
     void stop_network_recheck() {
-        network_recheck_running_ = false;
-        network_recheck_cv_.notify_all();
-
-        // Always check joinable regardless of running flag (race condition safety)
-        if (network_recheck_thread_.joinable()) {
-            network_recheck_thread_.join();
+        if (network_recheck_worker_owner == this) {
+            if (network_recheck_worker_signal)
+                network_recheck_worker_signal->stop();
+            std::lock_guard<std::mutex> lifecycle_lock(network_recheck_lifecycle_mutex_);
+            ++network_recheck_operation_;
+            auto current = std::atomic_load(&network_recheck_signal_);
+            if (current.get() == network_recheck_worker_signal) {
+                std::atomic_store(&network_recheck_signal_, std::shared_ptr<WorkerSignal>{});
+            }
+            if (network_recheck_thread_.joinable() &&
+                network_recheck_thread_.get_id() == std::this_thread::get_id()) {
+                network_recheck_thread_.detach();
+            }
+            return;
         }
+
+        std::thread retired_worker;
+        {
+            std::lock_guard<std::mutex> lifecycle_lock(network_recheck_lifecycle_mutex_);
+            ++network_recheck_operation_;
+            auto signal = std::atomic_load(&network_recheck_signal_);
+            if (signal)
+                signal->stop();
+            std::atomic_store(&network_recheck_signal_, std::shared_ptr<WorkerSignal>{});
+            if (network_recheck_thread_.joinable()) {
+                retired_worker = std::move(network_recheck_thread_);
+            }
+        }
+        if (retired_worker.joinable())
+            retired_worker.join();
     }
 
     // Offline license refresh timer management
     void start_offline_refresh(const std::string& license_key) {
-        stop_offline_refresh();
-
-        if (config_.offline_license_refresh_interval <= 0) {
+        if (shutdown_started_.load())
+            return;
+        if (offline_refresh_worker_owner == this) {
+            stop_offline_refresh();
             return;
         }
 
-        offline_refresh_running_ = true;
-        offline_refresh_license_key_ = license_key;
-
-        offline_refresh_thread_ = std::thread([this]() {
-            while (offline_refresh_running_) {
-                std::unique_lock<std::mutex> lock(offline_refresh_mutex_);
-                offline_refresh_cv_.wait_for(
-                    lock, std::chrono::duration<double>(config_.offline_license_refresh_interval),
-                    [this]() { return !offline_refresh_running_; });
-
-                if (!offline_refresh_running_) {
-                    break;
-                }
-
-                // Refresh offline assets
-                if (!offline_refresh_license_key_.empty()) {
-                    sync_offline_assets_impl(offline_refresh_license_key_, device_id_);
-                }
+        std::thread retired_worker;
+        std::uint64_t operation = 0;
+        {
+            std::lock_guard<std::mutex> lifecycle_lock(offline_refresh_lifecycle_mutex_);
+            operation = ++offline_refresh_operation_;
+            auto signal = std::atomic_load(&offline_refresh_signal_);
+            if (signal)
+                signal->stop();
+            std::atomic_store(&offline_refresh_signal_, std::shared_ptr<WorkerSignal>{});
+            if (offline_refresh_thread_.joinable()) {
+                retired_worker = std::move(offline_refresh_thread_);
             }
-        });
+        }
+        if (retired_worker.joinable())
+            retired_worker.join();
+
+        std::lock_guard<std::mutex> lifecycle_lock(offline_refresh_lifecycle_mutex_);
+        if (shutdown_started_.load() || operation != offline_refresh_operation_ ||
+            !offline_policy_is_enabled() ||
+            !valid_timer_interval(config_.offline_license_refresh_interval) ||
+            config_.offline_license_refresh_interval == 0.0 || !is_safe_text(license_key, 512)) {
+            return;
+        }
+
+        auto signal = std::make_shared<WorkerSignal>();
+        std::atomic_store(&offline_refresh_signal_, signal);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            offline_refresh_license_key_ = license_key;
+        }
+
+        try {
+            auto self = shared_from_this();
+            offline_refresh_thread_ = std::thread([self = std::move(self), signal]() {
+                WorkerOwnerScope worker_scope(offline_refresh_worker_owner,
+                                              offline_refresh_worker_signal, self.get(),
+                                              signal.get());
+                while (signal->running) {
+                    std::unique_lock<std::mutex> lock(signal->mutex);
+                    signal->cv.wait_for(lock,
+                                        std::chrono::duration<double>(
+                                            self->config_.offline_license_refresh_interval),
+                                        [signal]() { return !signal->running; });
+
+                    if (!signal->running)
+                        break;
+                    lock.unlock();
+
+                    std::string license_key;
+                    {
+                        std::lock_guard<std::mutex> state_lock(self->mutex_);
+                        license_key = self->offline_refresh_license_key_;
+                    }
+                    if (!license_key.empty()) {
+                        self->sync_offline_assets_impl(license_key, self->device_id_);
+                    }
+                }
+            });
+        } catch (...) {
+            signal->stop();
+            std::atomic_store(&offline_refresh_signal_, std::shared_ptr<WorkerSignal>{});
+            throw;
+        }
     }
 
     void stop_offline_refresh() {
-        offline_refresh_running_ = false;
-        offline_refresh_cv_.notify_all();
-
-        // Always check joinable regardless of running flag (race condition safety)
-        if (offline_refresh_thread_.joinable()) {
-            offline_refresh_thread_.join();
+        if (offline_refresh_worker_owner == this) {
+            if (offline_refresh_worker_signal)
+                offline_refresh_worker_signal->stop();
+            std::lock_guard<std::mutex> lifecycle_lock(offline_refresh_lifecycle_mutex_);
+            ++offline_refresh_operation_;
+            auto current = std::atomic_load(&offline_refresh_signal_);
+            if (current.get() == offline_refresh_worker_signal) {
+                std::atomic_store(&offline_refresh_signal_, std::shared_ptr<WorkerSignal>{});
+            }
+            if (offline_refresh_thread_.joinable() &&
+                offline_refresh_thread_.get_id() == std::this_thread::get_id()) {
+                offline_refresh_thread_.detach();
+            }
+            return;
         }
+
+        std::thread retired_worker;
+        {
+            std::lock_guard<std::mutex> lifecycle_lock(offline_refresh_lifecycle_mutex_);
+            ++offline_refresh_operation_;
+            auto signal = std::atomic_load(&offline_refresh_signal_);
+            if (signal)
+                signal->stop();
+            std::atomic_store(&offline_refresh_signal_, std::shared_ptr<WorkerSignal>{});
+            if (offline_refresh_thread_.joinable()) {
+                retired_worker = std::move(offline_refresh_thread_);
+            }
+        }
+        if (retired_worker.joinable())
+            retired_worker.join();
     }
 
     // Health check without locking (for internal use)
@@ -1986,6 +2692,9 @@ class Client::Impl {
         http::Request request;
         request.method = http::Method::GET;
         request.path = "/health";
+        request.authenticated = false;
+        request.retryable = true;
+        request.expect_json = false;
 
         auto response = http_client_->send(request);
         return response.success;
@@ -2008,195 +2717,269 @@ class Client::Impl {
     std::optional<Activation> current_activation_;
     std::optional<License> cached_license_;
     std::optional<ValidationResult> cached_validation_;
+    std::unordered_map<std::string, std::string> trusted_signing_keys_;
     mutable std::mutex mutex_;
 
     // Event bus
     EventBus event_bus_;
 
     // Auto-validation
-    std::atomic<bool> auto_validate_running_{false};
+    std::shared_ptr<WorkerSignal> auto_validate_signal_;
+    std::uint64_t auto_validate_operation_ = 0;
     std::thread auto_validate_thread_;
-    std::mutex auto_validate_mutex_;
-    std::condition_variable auto_validate_cv_;
+    std::mutex auto_validate_lifecycle_mutex_;
     std::string current_auto_license_key_;
     std::string current_heartbeat_license_key_;
 
     // Heartbeat timer
-    std::atomic<bool> heartbeat_running_{false};
+    std::shared_ptr<WorkerSignal> heartbeat_signal_;
+    std::uint64_t heartbeat_operation_ = 0;
     std::thread heartbeat_thread_;
-    std::mutex heartbeat_mutex_;
-    std::condition_variable heartbeat_cv_;
+    std::mutex heartbeat_lifecycle_mutex_;
 
     // Network status
     std::atomic<bool> is_online_{true};
 
     // Network recheck timer
-    std::atomic<bool> network_recheck_running_{false};
+    std::shared_ptr<WorkerSignal> network_recheck_signal_;
+    std::uint64_t network_recheck_operation_ = 0;
     std::thread network_recheck_thread_;
-    std::mutex network_recheck_mutex_;
-    std::condition_variable network_recheck_cv_;
+    std::mutex network_recheck_lifecycle_mutex_;
 
     // Offline license refresh timer
-    std::atomic<bool> offline_refresh_running_{false};
+    std::shared_ptr<WorkerSignal> offline_refresh_signal_;
+    std::uint64_t offline_refresh_operation_ = 0;
     std::thread offline_refresh_thread_;
-    std::mutex offline_refresh_mutex_;
-    std::condition_variable offline_refresh_cv_;
+    std::mutex offline_refresh_lifecycle_mutex_;
     std::string offline_refresh_license_key_;
 
     // Pending async futures
-    std::vector<std::future<void>> pending_futures_;
+    std::vector<PendingFuture> pending_futures_;
     std::mutex futures_mutex_;
+    std::uint64_t next_async_job_id_ = 0;
+    std::atomic<bool> shutdown_started_{false};
 };
 
 // Client implementation
-Client::Client(Config config) : impl_(std::make_unique<Impl>(std::move(config))) {}
+Client::Client(Config config) : impl_(std::make_shared<Impl>(std::move(config))) {}
 
-Client::~Client() = default;
+Client::~Client() {
+    if (impl_)
+        impl_->shutdown();
+}
 
 Client::Client(Client&&) noexcept = default;
-Client& Client::operator=(Client&&) noexcept = default;
+Client& Client::operator=(Client&& other) noexcept {
+    if (this == &other)
+        return *this;
+    if (impl_)
+        impl_->shutdown();
+    impl_ = std::move(other.impl_);
+    return *this;
+}
 
 Result<ValidationResult> Client::validate(const std::string& license_key,
                                           const std::string& device_id) {
-    return impl_->validate(license_key, device_id);
+    auto impl = impl_;
+    return impl->validate(license_key, device_id);
 }
 
-Result<Activation> Client::activate(const std::string& license_key,
-                                    const std::string& device_id,
-                                    const std::string& device_name,
-                                    const Metadata& metadata) {
-    return impl_->activate(license_key, device_id, device_name, metadata);
+Result<Activation> Client::activate(const std::string& license_key, const std::string& device_id,
+                                    const std::string& device_name, const Metadata& metadata) {
+    auto impl = impl_;
+    return impl->activate(license_key, device_id, device_name, metadata);
 }
 
 Result<Deactivation> Client::deactivate(const std::string& license_key,
                                         const std::string& device_id) {
-    return impl_->deactivate(license_key, device_id);
+    auto impl = impl_;
+    return impl->deactivate(license_key, device_id);
 }
 
 void Client::validate_async(const std::string& license_key, AsyncCallback callback,
                             const std::string& device_id) {
-    impl_->validate_async(license_key, std::move(callback), device_id);
+    auto impl = impl_;
+    impl->validate_async(license_key, std::move(callback), device_id);
 }
 
 void Client::activate_async(const std::string& license_key, ActivationCallback callback,
                             const std::string& device_id, const std::string& device_name,
                             const Metadata& metadata) {
-    impl_->activate_async(license_key, std::move(callback), device_id, device_name, metadata);
+    auto impl = impl_;
+    impl->activate_async(license_key, std::move(callback), device_id, device_name, metadata);
 }
 
 void Client::deactivate_async(const std::string& license_key, DeactivationCallback callback,
                               const std::string& device_id) {
-    impl_->deactivate_async(license_key, std::move(callback), device_id);
+    auto impl = impl_;
+    impl->deactivate_async(license_key, std::move(callback), device_id);
 }
 
 Result<HeartbeatResponse> Client::heartbeat(const std::string& license_key,
                                             const std::string& device_id) {
-    return impl_->heartbeat(license_key, device_id);
+    auto impl = impl_;
+    return impl->heartbeat(license_key, device_id);
 }
 
 void Client::heartbeat_async(const std::string& license_key, HeartbeatCallback callback,
-                              const std::string& device_id) {
-    impl_->heartbeat_async(license_key, std::move(callback), device_id);
+                             const std::string& device_id) {
+    auto impl = impl_;
+    impl->heartbeat_async(license_key, std::move(callback), device_id);
 }
 
 Result<OfflineToken> Client::generate_offline_token(const std::string& license_key,
-                                                    const std::string& device_id,
-                                                    int ttl_days) {
-    return impl_->generate_offline_token(license_key, device_id, ttl_days);
+                                                    const std::string& device_id, int ttl_days) {
+    auto impl = impl_;
+    return impl->generate_offline_token(license_key, device_id, ttl_days);
 }
 
 Result<MachineFile> Client::checkout_machine_file(const std::string& license_key,
-                                                  const std::string& device_id,
-                                                  int ttl_days) {
-    return impl_->checkout_machine_file(license_key, device_id, ttl_days);
+                                                  const std::string& device_id, int ttl_days) {
+    auto impl = impl_;
+    return impl->checkout_machine_file(license_key, device_id, ttl_days);
 }
 
 Result<bool> Client::verify_offline_token(const OfflineToken& offline_token,
                                           const std::string& public_key_b64) {
-    return impl_->verify_offline_token(offline_token, public_key_b64);
+    auto impl = impl_;
+    return impl->verify_offline_token(offline_token, public_key_b64);
 }
 
-Result<MachineFileVerificationResult> Client::verify_machine_file(
-    const MachineFile& machine_file,
-    const std::string& public_key_b64,
-    const std::string& license_key,
-    const std::string& device_id) {
-    return impl_->verify_machine_file(machine_file, public_key_b64, license_key, device_id);
+Result<MachineFileVerificationResult> Client::verify_machine_file(const MachineFile& machine_file,
+                                                                  const std::string& public_key_b64,
+                                                                  const std::string& license_key,
+                                                                  const std::string& device_id) {
+    auto impl = impl_;
+    return impl->verify_machine_file(machine_file, public_key_b64, license_key, device_id);
 }
 
 Result<std::string> Client::fetch_signing_key(const std::string& key_id) {
-    return impl_->fetch_signing_key(key_id);
+    auto impl = impl_;
+    return impl->fetch_signing_key(key_id);
 }
 
-void Client::sync_offline_assets() { impl_->sync_offline_assets(); }
+void Client::sync_offline_assets() {
+    auto impl = impl_;
+    impl->sync_offline_assets();
+}
 
 void Client::start_auto_validation(const std::string& license_key) {
-    impl_->start_auto_validation(license_key);
+    auto impl = impl_;
+    impl->start_auto_validation(license_key);
 }
 
-void Client::stop_auto_validation() { impl_->stop_auto_validation(); }
+void Client::stop_auto_validation() {
+    auto impl = impl_;
+    impl->stop_auto_validation();
+}
 
-bool Client::is_auto_validating() const { return impl_->is_auto_validating(); }
+bool Client::is_auto_validating() const {
+    auto impl = impl_;
+    return impl->is_auto_validating();
+}
 
 void Client::start_heartbeat(const std::string& license_key) {
-    impl_->start_heartbeat(license_key);
+    auto impl = impl_;
+    impl->start_heartbeat(license_key);
 }
 
-void Client::stop_heartbeat() { impl_->stop_heartbeat(); }
+void Client::stop_heartbeat() {
+    auto impl = impl_;
+    impl->stop_heartbeat();
+}
 
-bool Client::is_heartbeat_running() const { return impl_->is_heartbeat_running(); }
+bool Client::is_heartbeat_running() const {
+    auto impl = impl_;
+    return impl->is_heartbeat_running();
+}
 
-RestoreResult Client::restore_license() { return impl_->restore_license(); }
+RestoreResult Client::restore_license() {
+    auto impl = impl_;
+    return impl->restore_license();
+}
 
 void Client::restore_license_async(RestoreCallback callback) {
-    impl_->restore_license_async(std::move(callback));
+    auto impl = impl_;
+    impl->restore_license_async(std::move(callback));
 }
 
-ValidationResult Client::get_status() const { return impl_->get_status(); }
+ValidationResult Client::get_status() const {
+    auto impl = impl_;
+    return impl->get_status();
+}
 
-std::optional<License> Client::current_license() const { return impl_->current_license(); }
+std::optional<License> Client::current_license() const {
+    auto impl = impl_;
+    return impl->current_license();
+}
 
 EntitlementStatus Client::check_entitlement(const std::string& entitlement_key) const {
-    return impl_->check_entitlement(entitlement_key);
+    auto impl = impl_;
+    return impl->check_entitlement(entitlement_key);
 }
 
-bool Client::is_online() const { return impl_->is_online(); }
+bool Client::is_online() const {
+    auto impl = impl_;
+    return impl->is_online();
+}
 
-ClientStatus Client::get_client_status() const { return impl_->get_client_status(); }
+ClientStatus Client::get_client_status() const {
+    auto impl = impl_;
+    return impl->get_client_status();
+}
 
 Subscription Client::on(const std::string& event, EventHandler handler) {
-    return impl_->on(event, std::move(handler));
+    auto impl = impl_;
+    return impl->on(event, std::move(handler));
 }
 
-void Client::emit(const std::string& event, const std::any& data) { impl_->emit(event, data); }
+void Client::emit(const std::string& event, const std::any& data) {
+    auto impl = impl_;
+    impl->emit(event, data);
+}
 
 Result<Release> Client::get_latest_release(const std::string& product_slug,
                                            const std::string& channel,
                                            const std::string& platform) {
-    return impl_->get_latest_release(product_slug, channel, platform);
+    auto impl = impl_;
+    return impl->get_latest_release(product_slug, channel, platform);
 }
 
 Result<std::vector<Release>> Client::list_releases(const std::string& product_slug,
                                                    const std::string& channel,
                                                    const std::string& platform) {
-    return impl_->list_releases(product_slug, channel, platform);
+    auto impl = impl_;
+    return impl->list_releases(product_slug, channel, platform);
 }
 
 Result<DownloadToken> Client::generate_download_token(const std::string& version,
                                                       const std::string& license_key,
                                                       const std::string& product_slug,
                                                       const std::string& platform) {
-    return impl_->generate_download_token(version, license_key, product_slug, platform);
+    auto impl = impl_;
+    return impl->generate_download_token(version, license_key, product_slug, platform);
 }
 
-Result<bool> Client::health() { return impl_->health(); }
+Result<bool> Client::health() {
+    auto impl = impl_;
+    return impl->health();
+}
 
-void Client::reset() { impl_->reset(); }
+void Client::reset() {
+    auto impl = impl_;
+    impl->reset();
+}
 
-const Config& Client::config() const noexcept { return impl_->config(); }
+const Config& Client::config() const noexcept {
+    return impl_->config();
+}
 
-const std::string& Client::device_id() const { return impl_->device_id(); }
+const std::string& Client::device_id() const {
+    return impl_->device_id();
+}
 
-const std::string& Client::fingerprint() const { return impl_->fingerprint(); }
+const std::string& Client::fingerprint() const {
+    return impl_->fingerprint();
+}
 
-}  // namespace licenseseat
+} // namespace licenseseat
