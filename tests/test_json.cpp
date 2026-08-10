@@ -543,7 +543,7 @@ TEST(JsonMachineFileTest, ParseMachineFilePayloadWithLicense) {
           {"lic", "KEY-123"},
           {"license_exp", 1760000000},
           {"kid", "kid-v1"},
-          {"sdk_version", "cpp-0.5.1"}}},
+          {"sdk_version", "cpp-0.6.0"}}},
         {"data",
          {{"type", "machines"},
           {"id", "42"},

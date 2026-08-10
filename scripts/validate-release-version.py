@@ -37,7 +37,14 @@ def main() -> None:
             "include/licenseseat/licenseseat.hpp", r'VERSION\s*=\s*"([^"]+)"'
         ),
         "CMake project": extract("CMakeLists.txt", r"project\(licenseseat\s+VERSION\s+([^\s\)]+)"),
+        "Conan recipe": extract("conanfile.py", r'version\s*=\s*"([^"]+)"'),
         "vcpkg manifest": json.loads((ROOT / "vcpkg.json").read_text(encoding="utf-8"))["version"],
+        "Unreal plugin": json.loads(
+            (ROOT / "integrations/unreal/LicenseSeat/LicenseSeat.uplugin").read_text(
+                encoding="utf-8"
+            )
+        )["VersionName"],
+        "changelog": extract("CHANGELOG.md", r"## \[([0-9]+\.[0-9]+\.[0-9]+)\]"),
     }
     expected = arguments.version[1:].split("-", 1)[0]
     mismatches = {name: version for name, version in versions.items() if version != expected}

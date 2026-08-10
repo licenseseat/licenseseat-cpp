@@ -130,6 +130,12 @@ jobs:
       - name: Install and package
         run: |
           cmake --install build --prefix package
+          cmake -S tests/package-consumer -B package-consumer-build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_PREFIX_PATH="$PWD/package"
+          cmake --build package-consumer-build
+          ./package-consumer-build/licenseseat_package_consumer
           install -m 0644 LICENSE README.md THIRD_PARTY_LICENSES.md package/
           source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}")"
           tar \

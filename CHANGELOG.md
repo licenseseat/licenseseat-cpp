@@ -4,6 +4,8 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-10
+
 ### Security
 
 - Hardened URL, request, response, JSON, identifier, timestamp, and offline-artifact validation with explicit size and complexity bounds.

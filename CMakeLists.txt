@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 
 project(licenseseat
-    VERSION 0.5.1
+    VERSION 0.6.0
     DESCRIPTION "C++ SDK for LicenseSeat licensing API"
     HOMEPAGE_URL "https://github.com/licenseseat/licenseseat-cpp"
     LANGUAGES CXX C
@@ -51,7 +51,8 @@ endif()
 # and machine-file AES-GCM)
 find_package(OpenSSL REQUIRED)
 
-# JSON and HTTP are bundled (no installation needed)
+# JSON and HTTP are pinned, audited, and bundled. nlohmann/json is part of the
+# public header surface, so its exact bundled headers are also installed.
 
 # Main library sources
 set(LICENSESEAT_SOURCES
@@ -70,6 +71,7 @@ add_library(licenseseat::licenseseat ALIAS licenseseat)
 target_include_directories(licenseseat
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps>
         $<INSTALL_INTERFACE:include>
 )
 
@@ -132,6 +134,10 @@ install(TARGETS licenseseat
 )
 
 install(DIRECTORY include/licenseseat
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(DIRECTORY deps/nlohmann
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
