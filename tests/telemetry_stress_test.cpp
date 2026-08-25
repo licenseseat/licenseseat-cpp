@@ -125,7 +125,7 @@ static void scenario1_activation_with_telemetry() {
     if (result.is_ok()) {
         printTest(true, "Activation succeeded");
         logInfo("device_id: " + result.value().device_id());
-        logInfo("activation_id: " + std::to_string(result.value().id()));
+        logInfo("activation_id: " + result.value().id());
     } else if (result.error_code() == licenseseat::ErrorCode::DeviceAlreadyActivated) {
         printTest(true, "Activation returned already_activated (expected, passing)");
         logInfo("device_id: " + sdk->device_id());

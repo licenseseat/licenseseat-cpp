@@ -442,9 +442,15 @@ inline constexpr std::size_t MAX_JSON_STRING_BYTES = 256 * 1024;
 
 /// Parse Activation from JSON response (new API format)
 [[nodiscard]] inline Activation parse_activation(const json& j) {
-    int64_t id = 0;
-    if (j.contains("id") && j["id"].is_number()) {
-        id = j["id"].get<int64_t>();
+    // The API issues UUID primary keys, so `id` arrives as a string. Older servers
+    // sent integers, so accept both and normalise to the string form.
+    std::string id;
+    if (j.contains("id") && !j["id"].is_null()) {
+        if (j["id"].is_string()) {
+            id = j["id"].get<std::string>();
+        } else if (j["id"].is_number_integer()) {
+            id = std::to_string(j["id"].get<int64_t>());
+        }
     }
 
     std::string device_id;

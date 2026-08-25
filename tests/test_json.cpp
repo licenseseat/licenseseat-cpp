@@ -260,7 +260,7 @@ TEST(JsonActivationTest, ParseFullActivation) {
 
     auto activation = parse_activation(j);
 
-    EXPECT_EQ(activation.id(), 42);
+    EXPECT_EQ(activation.id(), "42");
     EXPECT_EQ(activation.device_id(), "device-001");
     EXPECT_EQ(activation.device_name(), "My MacBook");
     EXPECT_EQ(activation.license_key(), "KEY-123");
@@ -294,6 +294,20 @@ TEST(JsonActivationTest, ParseFingerprintFieldAsDeviceId) {
 
     EXPECT_EQ(activation.device_id(), "fp-123");
     EXPECT_EQ(activation.fingerprint(), "fp-123");
+}
+
+TEST(JsonActivationTest, ParsesUuidActivationId) {
+    // Production issues UUID primary keys, so `id` arrives as a string. Parsing it as a
+    // number left the id empty and made every activate() call fail the identity check.
+    nlohmann::json j = {{"id", "9d063849-d144-49a5-bf91-2af06e700421"},
+                        {"fingerprint", "device-001"},
+                        {"license_key", "KEY-123"},
+                        {"activated_at", "2026-01-19T12:00:00Z"}};
+
+    auto activation = parse_activation(j);
+
+    EXPECT_EQ(activation.id(), "9d063849-d144-49a5-bf91-2af06e700421");
+    EXPECT_FALSE(activation.id().empty());
 }
 
 TEST(JsonActivationTest, RejectsMalformedLifecycleDates) {
@@ -390,7 +404,7 @@ TEST(JsonValidationResultTest, ParseWithActivation) {
 
     EXPECT_TRUE(result.valid);
     EXPECT_TRUE(result.activation.has_value());
-    EXPECT_EQ(result.activation->id(), 42);
+    EXPECT_EQ(result.activation->id(), "42");
 }
 
 // ==================== Offline Token Tests ====================

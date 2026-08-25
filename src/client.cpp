@@ -554,7 +554,7 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                 throw std::invalid_argument("Activation response has an invalid object type");
             }
             auto activation = json::parse_activation(j);
-            if (activation.id() <= 0 ||
+            if (activation.id().empty() ||
                 !constant_time_equal(activation.license_key(), license_key) ||
                 !constant_time_equal(activation.fingerprint(), request.fingerprint) ||
                 !activation.is_active() || activation.activated_at() == Timestamp{}) {

@@ -197,7 +197,7 @@ TEST(LicenseModeTest, FromStringConversion) {
 TEST(ActivationTest, DefaultConstructor) {
     Activation activation;
 
-    EXPECT_EQ(activation.id(), 0);
+    EXPECT_TRUE(activation.id().empty());
     EXPECT_TRUE(activation.device_id().empty());
     EXPECT_TRUE(activation.device_name().empty());
     EXPECT_TRUE(activation.license_key().empty());
@@ -210,10 +210,10 @@ TEST(ActivationTest, FullConstructor) {
     auto activated = std::chrono::system_clock::now();
     Metadata meta{{"os", "macos"}};
 
-    Activation activation(42, "device-123", "My MacBook", "KEY-ABC", activated, std::nullopt,
+    Activation activation("42", "device-123", "My MacBook", "KEY-ABC", activated, std::nullopt,
                           "192.168.1.1", meta);
 
-    EXPECT_EQ(activation.id(), 42);
+    EXPECT_EQ(activation.id(), "42");
     EXPECT_EQ(activation.device_id(), "device-123");
     EXPECT_EQ(activation.device_name(), "My MacBook");
     EXPECT_EQ(activation.license_key(), "KEY-ABC");

@@ -368,7 +368,7 @@ void test_activation_deactivation() {
         if (result.is_ok()) {
             const auto& activation = result.value();
             pass("Activate license");
-            info("Activation ID: " + std::to_string(activation.id()));
+            info("Activation ID: " + activation.id());
             info("Device ID: " + activation.device_id());
             info("Device Name: " + activation.device_name());
             info("Is Active: " + std::string(activation.is_active() ? "yes" : "no"));
