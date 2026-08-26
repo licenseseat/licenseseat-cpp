@@ -117,6 +117,22 @@ After building:
 | `synthdemo.js` | Emscripten runtime + glue code (~230KB) |
 | `synthdemo.wasm` | WebAssembly binary (~300KB) |
 
+## Embedding
+
+The generated `synthdemo.js` reads these hooks off the `Module` object the host
+page defines before loading it:
+
+| Hook | When it fires |
+|------|---------------|
+| `Module.canvas` | The canvas to render into (required) |
+| `Module.onRuntimeInitialized` | The runtime is up, just before `main()` runs |
+| `Module.onDemoUnsupported(reason)` | The browser gave us no graphics context; the demo has stopped and nothing else will happen |
+| `Module.onAbort(what)` | Emscripten aborted; `what` is runtime internals, not user-facing copy |
+
+A page that embeds the demo should check WebGL support before pulling in the
+~500 KB runtime, and treat `onDemoUnsupported` as the "show a screenshot
+instead" signal. `licenseseat.com` does both from its Stimulus controller.
+
 ## Deployment
 
 Copy the output files to your web server:
@@ -151,7 +167,21 @@ Click or press a key first - browsers block audio until user interaction.
 
 ### Black screen / WebGL errors
 
-Check browser console. Ensure your browser supports WebGL 2.0.
+The demo needs a WebGL context. When the browser refuses one -- no usable GPU, a
+blocklisted graphics driver (common on Chromium/Linux), WebGL switched off, or
+the per-page context limit already reached -- raylib logs:
+
+```
+WARNING: GLFW: Failed to initialize Window
+WARNING: SYSTEM: Failed to initialize platform
+ERROR: SYSTEM: No graphics context available, demo cannot run
+```
+
+and the demo stops there, calling `Module.onDemoUnsupported` (see *Embedding*).
+It must stop: `InitWindow()` returns normally after that failure with rlgl left
+uninitialized, so the next `BeginDrawing()` writes through a NULL matrix pointer
+onto address zero and Emscripten kills the module with `Runtime error: The
+application has corrupted its heap memory area (address zero)!`.
 
 ### Build errors with glfwGetProcAddress
 

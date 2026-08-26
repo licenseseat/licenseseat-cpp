@@ -4,6 +4,28 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-26
+
+### Fixed
+
+- The WebAssembly demo no longer takes the whole page down when the browser
+  refuses a WebGL context. `InitWindow()` only warns when its platform backend
+  fails, so the demo went on to call `BeginDrawing()`, which writes the identity
+  matrix through rlgl's still-NULL current-matrix pointer: the store lands on
+  address zero and Emscripten aborts the module with "The application has
+  corrupted its heap memory area (address zero)!". Reported on Chromium/Linux,
+  where a missing or blocklisted GPU is common. The demo now checks
+  `IsWindowReady()`, tells the embedding page through `Module.onDemoUnsupported`,
+  and exits before touching graphics or audio.
+- The standalone `synthdemo.html` shell explains that the browser cannot run the
+  demo instead of leaving a permanent spinner.
+
+### Changed
+
+- Pinned raylib and raygui to exact commits, and made the raylib web-backend
+  patch idempotent, so the shipped WASM bundle rebuilds reproducibly instead of
+  tracking whatever `master` happened to be that day.
+
 ## [0.6.0] - 2026-08-10
 
 ### Security

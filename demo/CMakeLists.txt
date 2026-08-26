@@ -9,7 +9,15 @@ include(FetchContent)
 function(replace_or_fail variable search replace)
     string(FIND "${${variable}}" "${search}" match_index)
     if(match_index EQUAL -1)
-        message(FATAL_ERROR "Failed to patch raylib web backend. Expected snippet was not found.")
+        # Reconfiguring over an already-patched FetchContent source dir is normal
+        # (it happens on every incremental rebuild). Only fail when the replacement
+        # is missing too, which means upstream really did move.
+        string(FIND "${${variable}}" "${replace}" applied_index)
+        if(applied_index EQUAL -1)
+            message(FATAL_ERROR "Failed to patch raylib web backend. Expected snippet was not found.")
+        endif()
+
+        return()
     endif()
 
     string(REPLACE "${search}" "${replace}" updated_value "${${variable}}")
@@ -27,21 +35,26 @@ else()
 endif()
 
 # Fetch raylib
+# Pinned: the web backend below is patched by exact source snippets, and the
+# shipped WASM bundle has to be rebuildable byte-for-byte. Tracking master made
+# every rebuild a different demo.
+set(RAYLIB_PINNED_COMMIT "c7df641aa25d40b1998d28cd38876e09f738b656")  # 6.0 dev, 2026-03-30
 FetchContent_Declare(
     raylib
     GIT_REPOSITORY https://github.com/raysan5/raylib.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
+    GIT_TAG ${RAYLIB_PINNED_COMMIT}
+    GIT_SHALLOW FALSE  # a shallow clone cannot check out an arbitrary commit
 )
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(raylib)
 
 # Fetch raygui (single header)
+set(RAYGUI_PINNED_COMMIT "3b2855842ab578a034f827c38cf8f62c042fc983")  # 4.5 dev, 2026-03-30
 FetchContent_Declare(
     raygui
     GIT_REPOSITORY https://github.com/raysan5/raygui.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
+    GIT_TAG ${RAYGUI_PINNED_COMMIT}
+    GIT_SHALLOW FALSE
 )
 FetchContent_MakeAvailable(raygui)
 
