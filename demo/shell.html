@@ -161,6 +161,24 @@
             visibility: hidden;
         }
 
+        .unsupported {
+            display: none;
+            max-width: 520px;
+            margin: 0 auto;
+            padding: 24px;
+            background: #1a1a1a;
+            border-radius: 12px;
+            color: #aaa;
+            font-size: 0.9rem;
+            line-height: 1.6;
+        }
+
+        .unsupported h2 {
+            font-size: 1rem;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+
         /* Responsive */
         @media (max-width: 600px) {
             .container {
@@ -205,12 +223,22 @@
         <h1>SynthDemo</h1>
         <p class="subtitle">LicenseSeat C++ SDK Demo</p>
 
-        <div class="canvas-container">
+        <div class="canvas-container" id="canvas-container">
             <div class="loading" id="loading">
                 <div class="spinner"></div>
                 <div>Loading...</div>
             </div>
             <canvas class="emscripten loading" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+        </div>
+
+        <div class="unsupported" id="unsupported">
+            <h2>This browser can&rsquo;t run the demo</h2>
+            <p>
+                SynthDemo renders with WebGL, and this browser will not hand out a
+                WebGL context &mdash; usually because there is no usable GPU, the
+                graphics driver is blocklisted, or WebGL is switched off. Everything
+                else on this page still works; only the interactive demo needs it.
+            </p>
         </div>
 
         <div class="test-keys">
@@ -249,6 +277,13 @@
                 }, false);
                 return canvas;
             })(),
+            onDemoUnsupported: function() {
+                // The C++ side could not get a graphics context and stopped before
+                // touching it. Show the explanation instead of a dead canvas.
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('canvas-container').style.display = 'none';
+                document.getElementById('unsupported').style.display = 'block';
+            },
             onRuntimeInitialized: function() {
                 // Hide loading, show canvas
                 document.getElementById('loading').style.display = 'none';
