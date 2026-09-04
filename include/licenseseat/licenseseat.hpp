@@ -746,9 +746,14 @@ struct Config {
     /// Storage prefix for file names
     std::string storage_prefix = "licenseseat";
 
-    /// Ed25519 public key for offline artifact verification.
-    /// Used for machine files and legacy offline tokens. If not provided, it
-    /// will be fetched from the API on first use when possible.
+    /// Ed25519 public key for offline artifact verification, as the raw 32-byte key
+    /// base64-encoded (the `public_key` value from GET /api/v1/signing_keys/{key_id}),
+    /// not a PEM/DER encoding.
+    ///
+    /// Online flows (activate(), checkout_machine_file()) fetch the key from the API and
+    /// cache it in memory for this Client. verify_machine_file() and the offline restore
+    /// path never fetch: they are the offline entry points. Pin this value for any app
+    /// that must verify a stored machine file after a restart or without network.
     std::string signing_public_key;
 
     /// Key ID for the signing public key

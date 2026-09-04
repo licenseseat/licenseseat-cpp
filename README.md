@@ -850,7 +850,13 @@ client.activate("LICENSE-KEY");  // Syncs machine file first, then legacy token 
 
 ### Manual Storage
 
-For custom storage (encrypted, database, etc.), store the machine file certificate directly:
+For custom storage (encrypted, database, etc.), store the machine file certificate directly.
+`verify_machine_file()` is the offline entry point and never fetches the signing key, so pin
+`config.signing_public_key` (see [Pinning the signing key](#pinning-the-signing-key)) or make
+sure the same `Client` instance already called `checkout_machine_file()` in this process. If
+you fetch the certificate yourself instead of through the SDK, request it with exactly
+`client.fingerprint()` and `"include": ["license"]`, or decryption fails and `payload.license`
+is empty.
 
 ```cpp
 // Save (online)
@@ -887,13 +893,18 @@ auto verified = client.verify_offline_token(loaded, key);
 
 ### Pre-configured Public Key
 
-For simpler deployments, you can pre-configure the signing public key:
+### Pinning the signing key
+
+For simpler deployments, and for any app that must verify offline after a restart,
+pre-configure the signing public key. Use the `public_key` value returned by
+`GET /api/v1/signing_keys/{key_id}` verbatim: it is the raw 32-byte Ed25519 key,
+base64-encoded (44 characters). A PEM/DER string (`MCowBQYDK2VwAyEA...`) is rejected.
 
 ```cpp
 licenseseat::Config config;
 config.api_key = "your-api-key";
 config.product_slug = "your-product";
-config.signing_public_key = "MCowBQYDK2VwAyEA...";  // Your public key
+config.signing_public_key = "<44-char base64 public_key from /api/v1/signing_keys/{key_id}>";
 config.offline_fallback_mode = licenseseat::OfflineFallbackMode::NetworkOnly;
 config.max_offline_days = 30;
 
