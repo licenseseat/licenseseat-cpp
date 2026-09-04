@@ -406,7 +406,7 @@ void test_activation_deactivation() {
 
         if (result.is_ok()) {
             pass("Deactivate license");
-            info("Deactivated activation ID: " + std::to_string(result.value().activation_id));
+            info("Deactivated activation ID: " + result.value().activation_id);
         } else {
             if (result.error_code() == licenseseat::ErrorCode::ActivationNotFound) {
                 pass("Deactivation - activation not found (may have been cleaned up)");

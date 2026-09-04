@@ -507,8 +507,14 @@ inline constexpr std::size_t MAX_JSON_STRING_BYTES = 256 * 1024;
 [[nodiscard]] inline Deactivation parse_deactivation(const json& j) {
     Deactivation result;
 
-    if (j.contains("activation_id") && j["activation_id"].is_number()) {
-        result.activation_id = j["activation_id"].get<int64_t>();
+    // The API issues UUID primary keys, so `activation_id` arrives as a string. Older
+    // servers sent integers, so accept both and normalise to the string form.
+    if (j.contains("activation_id") && !j["activation_id"].is_null()) {
+        if (j["activation_id"].is_string()) {
+            result.activation_id = j["activation_id"].get<std::string>();
+        } else if (j["activation_id"].is_number_integer()) {
+            result.activation_id = std::to_string(j["activation_id"].get<int64_t>());
+        }
     }
 
     if (j.contains("deactivated_at") && !j["deactivated_at"].is_null()) {

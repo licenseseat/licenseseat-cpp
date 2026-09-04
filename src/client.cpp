@@ -613,7 +613,7 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                 throw std::invalid_argument("Deactivation response has an invalid object type");
             }
             auto deactivation = json::parse_deactivation(j);
-            if (deactivation.activation_id <= 0 || deactivation.deactivated_at == Timestamp{}) {
+            if (deactivation.activation_id.empty() || deactivation.deactivated_at == Timestamp{}) {
                 throw std::invalid_argument("Deactivation response is incomplete");
             }
 

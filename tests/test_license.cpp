@@ -226,7 +226,7 @@ TEST(ActivationTest, DeactivatedActivation) {
     auto activated = std::chrono::system_clock::now() - std::chrono::hours(24);
     auto deactivated = std::chrono::system_clock::now();
 
-    Activation activation(42, "device-123", "", "KEY-ABC", activated, deactivated, "192.168.1.1",
+    Activation activation("42", "device-123", "", "KEY-ABC", activated, deactivated, "192.168.1.1",
                           {});
 
     EXPECT_FALSE(activation.is_active());
@@ -337,7 +337,7 @@ TEST(DownloadTokenTest, DefaultState) {
 TEST(DeactivationTest, DefaultState) {
     Deactivation deactivation;
 
-    EXPECT_EQ(deactivation.activation_id, 0);
+    EXPECT_TRUE(deactivation.activation_id.empty());
 }
 
 // ==================== Config Tests ====================

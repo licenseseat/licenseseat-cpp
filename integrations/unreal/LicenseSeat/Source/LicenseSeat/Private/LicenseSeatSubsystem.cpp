@@ -125,6 +125,21 @@ FString ToJsonString(const TSharedPtr<FJsonObject>& Json) {
     return RequestBody;
 }
 
+// The API issues UUID primary keys, so identifiers arrive as strings. Older servers sent
+// integers, so accept both and normalise to the string form.
+bool TryGetIdentifierField(const TSharedPtr<FJsonObject>& JsonResponse, const TCHAR* FieldName,
+                           FString& OutValue) {
+    if (JsonResponse->TryGetStringField(FieldName, OutValue)) {
+        return !OutValue.IsEmpty();
+    }
+    double NumericValue = 0.0;
+    if (JsonResponse->TryGetNumberField(FieldName, NumericValue) && NumericValue > 0.0) {
+        OutValue = LexToString(static_cast<int64>(NumericValue));
+        return true;
+    }
+    return false;
+}
+
 FString ExtractErrorMessage(const TSharedPtr<FJsonObject>& JsonResponse) {
     if (!JsonResponse.IsValid()) {
         return TEXT("Request failed");
@@ -201,9 +216,9 @@ bool ParseActivationResponse(const FString& Response, const FString& ExpectedLic
     FString LicenseKey;
     FString Fingerprint;
     FString ActivatedAt;
-    double ActivationId = 0.0;
+    FString ActivationId;
     if (!JsonResponse->TryGetStringField(TEXT("object"), Object) || Object != TEXT("activation") ||
-        !JsonResponse->TryGetNumberField(TEXT("id"), ActivationId) || ActivationId <= 0.0 ||
+        !TryGetIdentifierField(JsonResponse, TEXT("id"), ActivationId) ||
         !JsonResponse->TryGetStringField(TEXT("license_key"), LicenseKey) ||
         LicenseKey != ExpectedLicenseKey ||
         !(JsonResponse->TryGetStringField(TEXT("fingerprint"), Fingerprint) ||
@@ -224,7 +239,7 @@ bool ParseActivationResponse(const FString& Response, const FString& ExpectedLic
     }
 
     Result.bSuccess = true;
-    Result.ActivationId = LexToString(static_cast<int64>(ActivationId));
+    Result.ActivationId = ActivationId;
     Result.DeviceId = ExpectedFingerprint;
     return true;
 }
@@ -237,12 +252,11 @@ bool ParseDeactivationResponse(const FString& Response) {
     }
     FString Object;
     FString DeactivatedAt;
-    double ActivationId = 0.0;
+    FString ActivationId;
     FDateTime Parsed;
     return JsonResponse->TryGetStringField(TEXT("object"), Object) &&
            Object == TEXT("deactivation") &&
-           JsonResponse->TryGetNumberField(TEXT("activation_id"), ActivationId) &&
-           ActivationId > 0.0 &&
+           TryGetIdentifierField(JsonResponse, TEXT("activation_id"), ActivationId) &&
            JsonResponse->TryGetStringField(TEXT("deactivated_at"), DeactivatedAt) &&
            FDateTime::ParseIso8601(*DeactivatedAt, Parsed);
 }

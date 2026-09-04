@@ -694,7 +694,8 @@ struct DownloadToken {
  * @brief Deactivation response
  */
 struct Deactivation {
-    int64_t activation_id = 0;
+    /// The server issues UUIDs, so this is an opaque string — never assume it is numeric.
+    std::string activation_id;
     Timestamp deactivated_at;
 };
 

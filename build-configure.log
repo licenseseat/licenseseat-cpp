@@ -1,0 +1,25 @@
+-- The CXX compiler identification is AppleClang 17.0.0.17000604
+-- The C compiler identification is AppleClang 17.0.0.17000604
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Found OpenSSL: /opt/homebrew/Cellar/openssl@3/3.6.3/lib/libcrypto.dylib (found version "3.6.3")
+-- Found GTest: /opt/homebrew/lib/cmake/GTest/GTestConfig.cmake (found version "1.17.0")
+-- 
+-- LicenseSeat C++ SDK 0.6.0
+--   Build tests:    ON
+--   Build examples: OFF
+--   clang-tidy:     OFF
+--   Dependencies:   Bundled (nlohmann/json, cpp-httplib, PicoSHA2)
+--   External:       OpenSSL (TLS, Ed25519, AES-GCM)
+-- 
+-- Configuring done (5.3s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/javi/GitHub/.ls-worktrees/cpp-fix/build
