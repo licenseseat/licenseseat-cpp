@@ -263,6 +263,211 @@ class ClientTest : public ::testing::Test {
     Config config_;
 };
 
+// Customer-workflow review: loopback only, real signed/encrypted machine files.
+class CustomerWorkflowReview : public ClientTest {
+  protected:
+    void SetUp() override {
+        ClientTest::SetUp();
+        path_ = std::filesystem::temp_directory_path() /
+                ("ls-customer-review-" + std::to_string(
+                    std::chrono::steady_clock::now().time_since_epoch().count()));
+        config_.storage_path = path_.string();
+        config_.network_recheck_interval = 3600;
+        machine_ = build_test_machine_file("KEY-123", config_.device_id, &public_key_);
+        server_.Post("/api/v1/products/test_product/licenses/activate",
+                     [&](const httplib::Request&, httplib::Response& res) {
+            nlohmann::json j = {{"object", "activation"}, {"id", id_},
+                {"license_key", "KEY-123"}, {"fingerprint", config_.device_id},
+                {"activated_at", "2026-09-01T12:00:00Z"}};
+            res.status = 201;
+            res.set_content(j.dump(), "application/json");
+        });
+        server_.Post("/api/v1/products/test_product/licenses/deactivate",
+                     [&](const httplib::Request&, httplib::Response& res) {
+            nlohmann::json j = {{"object", "deactivation"}, {"activation_id", id_},
+                {"deactivated_at", "2026-09-05T12:00:00Z"}};
+            res.set_content(j.dump(), "application/json");
+        });
+        server_.Get("/api/v1/signing_keys/test-kid",
+                    [&](const httplib::Request&, httplib::Response& res) {
+            nlohmann::json j = {{"object", "signing_key"}, {"key_id", "test-kid"},
+                {"algorithm", "Ed25519"}, {"status", "active"}, {"public_key", public_key_}};
+            res.set_content(j.dump(), "application/json");
+        });
+        server_.Post("/api/v1/products/test_product/licenses/validate",
+                     [&](const httplib::Request&, httplib::Response& res) {
+            nlohmann::json j = {{"object", "validation_result"}, {"valid", true},
+                {"license", {{"object", "license"}, {"key", "KEY-123"},
+                    {"status", "active"}, {"mode", "hardware_locked"}, {"plan_key", "pro"},
+                    {"seat_limit", 1}, {"active_seats", 1},
+                    {"product", {{"slug", "test_product"}, {"name", "Test Product"}}}}},
+                {"activation", {{"object", "activation"}, {"id", id_},
+                    {"license_key", "KEY-123"}, {"fingerprint", config_.device_id},
+                    {"activated_at", "2026-09-01T12:00:00Z"}}}};
+            res.set_content(j.dump(), "application/json");
+        });
+        server_.Post("/api/v1/products/test_product/licenses/machine-file",
+                     [&](const httplib::Request&, httplib::Response& res) {
+            ++checkouts_;
+            const auto now = std::chrono::system_clock::now();
+            nlohmann::json j = {{"data", {{"type", "machine-files"},
+                {"attributes", {{"certificate", machine_.certificate},
+                    {"algorithm", "aes-256-gcm+ed25519"}, {"ttl", 86400},
+                    {"issued", json::format_timestamp(now)},
+                    {"expiry", json::format_timestamp(now + std::chrono::hours(24))}}},
+                {"relationships", {
+                    {"license", {{"data", {{"type", "licenses"}, {"id", "KEY-123"}}}}},
+                    {"machine", {{"data", {{"type", "machines"}, {"id", config_.device_id}}}}}
+                }}}}};
+            res.status = 201;
+            res.set_content(j.dump(), "application/json");
+        });
+        const auto port = server_.bind_to_any_port("127.0.0.1");
+        ASSERT_GT(port, 0);
+        config_.api_url = "http://127.0.0.1:" + std::to_string(port) + "/api/v1";
+        thread_ = std::thread([this] { server_.listen_after_bind(); });
+    }
+    void TearDown() override {
+        server_.stop();
+        if (thread_.joinable()) thread_.join();
+        // Keep the task-specific temp cache as review evidence.
+    }
+    httplib::Server server_;
+    std::thread thread_;
+    std::filesystem::path path_;
+    MachineFile machine_;
+    std::string public_key_;
+    nlohmann::json id_ = "9d063849-d144-49a5-bf91-2af06e700421";
+    std::atomic<int> checkouts_{0};
+};
+
+TEST_F(CustomerWorkflowReview, UuidActivateVerifyAndDeactivateClearArtifacts) {
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    auto activated = client.activate("KEY-123");
+    ASSERT_TRUE(activated.is_ok()) << activated.error_message();
+    EXPECT_EQ(activated.value().id(), id_.get<std::string>());
+    FileStorage storage(path_.string());
+    ASSERT_TRUE(storage.get_machine_file().has_value());
+    ASSERT_TRUE(storage.set_license(build_cached_license("KEY-123", config_.device_id)));
+    auto verified = client.verify_machine_file(*storage.get_machine_file());
+    ASSERT_TRUE(verified.is_ok());
+    EXPECT_TRUE(verified.value().valid);
+    auto deactivated = client.deactivate("KEY-123", config_.device_id);
+    ASSERT_TRUE(deactivated.is_ok()) << deactivated.error_message();
+    EXPECT_EQ(deactivated.value().activation_id, activated.value().id());
+    EXPECT_FALSE(storage.get_license().has_value());
+    EXPECT_FALSE(storage.get_machine_file().has_value());
+}
+
+TEST_F(CustomerWorkflowReview, ReadmeAutomaticDefaultsShouldCacheMachineFile) {
+    config_.offline_fallback_mode = Config{}.offline_fallback_mode;
+    config_.max_offline_days = Config{}.max_offline_days;
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    EXPECT_GT(checkouts_.load(), 0);
+    EXPECT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+}
+
+TEST_F(CustomerWorkflowReview, ActivateWithPinAndOfflinePolicyShouldRestoreAfterRestart) {
+    config_.signing_public_key = public_key_;
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+    }
+    server_.stop();
+    Client restarted(config_);
+    auto result = restarted.restore_license();
+    EXPECT_TRUE(result.success) << result.message;
+    EXPECT_EQ(result.status, ClientStatus::OfflineValid);
+}
+
+TEST_F(CustomerWorkflowReview, WarmFetchedKeyShouldSurviveRestartForAutomaticWorkflow) {
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        ASSERT_TRUE(FileStorage(path_.string()).set_license(
+            build_cached_license("KEY-123", config_.device_id)));
+        auto verified = client.verify_machine_file(machine_);
+        ASSERT_TRUE(verified.is_ok());
+        ASSERT_TRUE(verified.value().valid);
+    }
+    server_.stop();
+    Client restarted(config_);
+    auto result = restarted.restore_license();
+    EXPECT_TRUE(result.success) << result.message;
+    EXPECT_EQ(result.status, ClientStatus::OfflineValid);
+}
+
+TEST_F(CustomerWorkflowReview, PinnedKeyWithCompleteCacheRestoresOffline) {
+    config_.signing_public_key = public_key_;
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        ASSERT_TRUE(FileStorage(path_.string()).set_license(
+            build_cached_license("KEY-123", config_.device_id)));
+    }
+    server_.stop();
+    Client restarted(config_);
+    auto result = restarted.restore_license();
+    EXPECT_TRUE(result.success) << result.message;
+    EXPECT_EQ(result.status, ClientStatus::OfflineValid);
+}
+
+TEST_F(CustomerWorkflowReview, SupportedProvisioningValidateThenRestartWorks) {
+    config_.signing_public_key = public_key_;
+    config_.signing_key_id = "test-kid";
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        auto validated = client.validate("KEY-123");
+        ASSERT_TRUE(validated.is_ok()) << validated.error_message();
+        ASSERT_TRUE(validated.value().valid);
+        ASSERT_TRUE(validated.value().activation.has_value());
+        EXPECT_EQ(validated.value().activation->id(), id_.get<std::string>());
+        auto machine = client.checkout_machine_file("KEY-123");
+        ASSERT_TRUE(machine.is_ok()) << machine.error_message();
+    }
+    server_.stop();
+    Client restarted(config_);
+    auto restored = restarted.restore_license();
+    EXPECT_TRUE(restored.success) << restored.message;
+    EXPECT_EQ(restored.status, ClientStatus::OfflineValid);
+}
+
+TEST_F(CustomerWorkflowReview, CurlCertificateOnlyVerifiesWithPinnedKeyAndRejectsTampering) {
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    MachineFile imported;
+    imported.certificate = machine_.certificate;
+    auto valid = client.verify_machine_file(imported, "", "KEY-123", config_.device_id);
+    ASSERT_TRUE(valid.is_ok()) << valid.error_message();
+    ASSERT_TRUE(valid.value().valid);
+    ASSERT_TRUE(valid.value().payload.has_value());
+    ASSERT_TRUE(valid.value().payload->license.has_value());
+    EXPECT_EQ(valid.value().payload->license->key(), "KEY-123");
+    auto wrong_device = client.verify_machine_file(imported, "", "KEY-123", "wrong-device");
+    EXPECT_TRUE(wrong_device.is_error() || !wrong_device.value().valid);
+    auto wrong_license = client.verify_machine_file(imported, "", "WRONG-KEY", config_.device_id);
+    EXPECT_TRUE(wrong_license.is_error() || !wrong_license.value().valid);
+    imported.certificate[40] = imported.certificate[40] == 'A' ? 'B' : 'A';
+    auto tampered = client.verify_machine_file(imported, "", "KEY-123", config_.device_id);
+    EXPECT_TRUE(tampered.is_error() || !tampered.value().valid);
+}
+
+TEST_F(CustomerWorkflowReview, RejectNonpositiveNumericActivationIds) {
+    config_.offline_fallback_mode = OfflineFallbackMode::Disabled;
+    Client client(config_);
+    for (auto invalid : {0, -1}) {
+        id_ = invalid;
+        auto result = client.activate("KEY-123");
+        EXPECT_TRUE(result.is_error()) << "Accepted id=" << invalid;
+        auto deactivation = client.deactivate("KEY-123", config_.device_id);
+        EXPECT_TRUE(deactivation.is_error()) << "Accepted activation_id=" << invalid;
+    }
+}
+
 // ==================== Construction Tests ====================
 
 TEST_F(ClientTest, CanBeConstructed) {
