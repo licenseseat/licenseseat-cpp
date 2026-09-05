@@ -21,7 +21,7 @@
 namespace licenseseat {
 
 /// Library version
-constexpr const char* VERSION = "0.6.1";
+constexpr const char* VERSION = "0.7.0";
 
 /// Metadata type used throughout the SDK
 using Metadata = std::map<std::string, std::string>;
@@ -485,16 +485,18 @@ class Activation {
   public:
     Activation() = default;
 
-    Activation(int64_t id, std::string device_id, std::string device_name, std::string license_key,
-               Timestamp activated_at, std::optional<Timestamp> deactivated_at,
-               std::string ip_address, Metadata metadata)
-        : id_(id), device_id_(std::move(device_id)), device_name_(std::move(device_name)),
+    Activation(std::string id, std::string device_id, std::string device_name,
+               std::string license_key, Timestamp activated_at,
+               std::optional<Timestamp> deactivated_at, std::string ip_address,
+               Metadata metadata)
+        : id_(std::move(id)), device_id_(std::move(device_id)), device_name_(std::move(device_name)),
           license_key_(std::move(license_key)), activated_at_(activated_at),
           deactivated_at_(deactivated_at), ip_address_(std::move(ip_address)),
           metadata_(std::move(metadata)) {}
 
-    /// Get the activation ID
-    [[nodiscard]] int64_t id() const noexcept { return id_; }
+    /// Get the activation ID.
+    /// The server issues UUIDs, so this is an opaque string — never assume it is numeric.
+    [[nodiscard]] const std::string& id() const noexcept { return id_; }
 
     /// Get the device ID
     [[nodiscard]] const std::string& device_id() const noexcept { return device_id_; }
@@ -526,7 +528,7 @@ class Activation {
     [[nodiscard]] bool is_active() const noexcept { return !deactivated_at_.has_value(); }
 
   private:
-    int64_t id_ = 0;
+    std::string id_;
     std::string device_id_;
     std::string device_name_;
     std::string license_key_;
@@ -692,7 +694,8 @@ struct DownloadToken {
  * @brief Deactivation response
  */
 struct Deactivation {
-    int64_t activation_id = 0;
+    /// The server issues UUIDs, so this is an opaque string — never assume it is numeric.
+    std::string activation_id;
     Timestamp deactivated_at;
 };
 
@@ -743,9 +746,14 @@ struct Config {
     /// Storage prefix for file names
     std::string storage_prefix = "licenseseat";
 
-    /// Ed25519 public key for offline artifact verification.
-    /// Used for machine files and legacy offline tokens. If not provided, it
-    /// will be fetched from the API on first use when possible.
+    /// Ed25519 public key for offline artifact verification, as the raw 32-byte key
+    /// base64-encoded (the `public_key` value from GET /api/v1/signing_keys/{key_id}),
+    /// not a PEM/DER encoding.
+    ///
+    /// Online flows (activate(), checkout_machine_file()) fetch the key from the API and
+    /// cache it in memory for this Client. verify_machine_file() and the offline restore
+    /// path never fetch: they are the offline entry points. Pin this value for any app
+    /// that must verify a stored machine file after a restart or without network.
     std::string signing_public_key;
 
     /// Key ID for the signing public key

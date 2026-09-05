@@ -181,7 +181,7 @@ void test_scenario_1_first_launch() {
         auto activate_result = client.activate(LICENSE_KEY, config.device_id, "Test Device");
         if (activate_result.is_ok()) {
             pass("Activation succeeds");
-            info("Activation ID: " + std::to_string(activate_result.value().id()));
+            info("Activation ID: " + activate_result.value().id());
         } else if (activate_result.error_code() == licenseseat::ErrorCode::SeatLimitExceeded ||
                    activate_result.error_code() == licenseseat::ErrorCode::DeviceAlreadyActivated) {
             pass("Activation handled (seat limit or already activated)");

@@ -260,7 +260,7 @@ TEST(JsonActivationTest, ParseFullActivation) {
 
     auto activation = parse_activation(j);
 
-    EXPECT_EQ(activation.id(), 42);
+    EXPECT_EQ(activation.id(), "42");
     EXPECT_EQ(activation.device_id(), "device-001");
     EXPECT_EQ(activation.device_name(), "My MacBook");
     EXPECT_EQ(activation.license_key(), "KEY-123");
@@ -296,6 +296,20 @@ TEST(JsonActivationTest, ParseFingerprintFieldAsDeviceId) {
     EXPECT_EQ(activation.fingerprint(), "fp-123");
 }
 
+TEST(JsonActivationTest, ParsesUuidActivationId) {
+    // Production issues UUID primary keys, so `id` arrives as a string. Parsing it as a
+    // number left the id empty and made every activate() call fail the identity check.
+    nlohmann::json j = {{"id", "9d063849-d144-49a5-bf91-2af06e700421"},
+                        {"fingerprint", "device-001"},
+                        {"license_key", "KEY-123"},
+                        {"activated_at", "2026-01-19T12:00:00Z"}};
+
+    auto activation = parse_activation(j);
+
+    EXPECT_EQ(activation.id(), "9d063849-d144-49a5-bf91-2af06e700421");
+    EXPECT_FALSE(activation.id().empty());
+}
+
 TEST(JsonActivationTest, RejectsMalformedLifecycleDates) {
     EXPECT_THROW((void)parse_activation({{"id", 1}, {"activated_at", "invalid"}}),
                  std::invalid_argument);
@@ -314,7 +328,20 @@ TEST(JsonDeactivationTest, ParseDeactivation) {
 
     auto deactivation = parse_deactivation(j);
 
-    EXPECT_EQ(deactivation.activation_id, 42);
+    EXPECT_EQ(deactivation.activation_id, "42");
+}
+
+TEST(JsonDeactivationTest, ParsesUuidActivationId) {
+    // Production issues UUID primary keys, so `activation_id` arrives as a string. Parsing
+    // it as a number left the id empty and made every deactivate() call fail the
+    // completeness check before the local cache was cleared.
+    nlohmann::json j = {{"activation_id", "9d063849-d144-49a5-bf91-2af06e700421"},
+                        {"deactivated_at", "2026-01-20T12:00:00Z"}};
+
+    auto deactivation = parse_deactivation(j);
+
+    EXPECT_EQ(deactivation.activation_id, "9d063849-d144-49a5-bf91-2af06e700421");
+    EXPECT_FALSE(deactivation.activation_id.empty());
 }
 
 // ==================== Validation Warning Tests ====================
@@ -390,7 +417,7 @@ TEST(JsonValidationResultTest, ParseWithActivation) {
 
     EXPECT_TRUE(result.valid);
     EXPECT_TRUE(result.activation.has_value());
-    EXPECT_EQ(result.activation->id(), 42);
+    EXPECT_EQ(result.activation->id(), "42");
 }
 
 // ==================== Offline Token Tests ====================

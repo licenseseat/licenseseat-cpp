@@ -4,6 +4,24 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-05
+
+### Changed
+
+- `Activation::id()` and `Deactivation::activation_id` are now `std::string`.
+  Update integer variables and remove `std::to_string` calls around these values.
+  Hosted UUIDs and positive integer IDs from self-hosted engines are accepted.
+- Offline startup explicitly requires application-pinned signing keys, an enabled
+  fallback policy, a positive offline duration and persistent storage. Untrusted
+  local key files do not establish signing authority.
+
+### Fixed
+
+- Accept UUID activation and deactivation responses without weakening identifier checks.
+- Save the activated local device's session identity so a fresh client can restore
+  a verified cached machine file without a preceding online validation call.
+- Correct automatic offline, imported certificate, signing-key and JUCE dependency examples.
+
 ## [0.6.1] - 2026-08-26
 
 ### Fixed

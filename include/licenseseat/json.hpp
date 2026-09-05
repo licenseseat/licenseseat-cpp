@@ -440,12 +440,33 @@ inline constexpr std::size_t MAX_JSON_STRING_BYTES = 256 * 1024;
 
 // ==================== Activation Parsing ====================
 
+// Hosted UUIDs and integer-primary-key engines share this identifier contract.
+// Keep positive integer compatibility without truncating unsigned values or floats.
+[[nodiscard]] inline std::string parse_activation_identifier(const json& value) {
+    if (value.is_string()) {
+        const auto id = value.get<std::string>();
+        if (id.empty() || id.size() > 255)
+            return {};
+        for (const unsigned char character : id) {
+            if (character < 0x21 || character > 0x7e)
+                return {};
+        }
+        return id;
+    }
+    if (value.is_number_unsigned()) {
+        const auto id = value.get<uint64_t>();
+        return id > 0 ? std::to_string(id) : std::string{};
+    }
+    if (value.is_number_integer()) {
+        const auto id = value.get<int64_t>();
+        return id > 0 ? std::to_string(id) : std::string{};
+    }
+    return {};
+}
+
 /// Parse Activation from JSON response (new API format)
 [[nodiscard]] inline Activation parse_activation(const json& j) {
-    int64_t id = 0;
-    if (j.contains("id") && j["id"].is_number()) {
-        id = j["id"].get<int64_t>();
-    }
+    const auto id = j.contains("id") ? parse_activation_identifier(j["id"]) : std::string{};
 
     std::string device_id;
     if (j.contains("fingerprint")) {
@@ -501,9 +522,8 @@ inline constexpr std::size_t MAX_JSON_STRING_BYTES = 256 * 1024;
 [[nodiscard]] inline Deactivation parse_deactivation(const json& j) {
     Deactivation result;
 
-    if (j.contains("activation_id") && j["activation_id"].is_number()) {
-        result.activation_id = j["activation_id"].get<int64_t>();
-    }
+    if (j.contains("activation_id"))
+        result.activation_id = parse_activation_identifier(j["activation_id"]);
 
     if (j.contains("deactivated_at") && !j["deactivated_at"].is_null()) {
         auto ts = parse_timestamp(j["deactivated_at"].get<std::string>());

@@ -12,6 +12,7 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "TimerManager.h"
+#include <cmath>
 
 // PicoSHA2 is used only to retain the plugin's stable device fingerprint.
 THIRD_PARTY_INCLUDES_START
@@ -125,6 +126,26 @@ FString ToJsonString(const TSharedPtr<FJsonObject>& Json) {
     return RequestBody;
 }
 
+// Hosted UUIDs and integer-primary-key engines share the same identifier contract.
+bool TryGetIdentifierField(const TSharedPtr<FJsonObject>& JsonResponse, const TCHAR* FieldName,
+                           FString& OutValue) {
+    const TSharedPtr<FJsonValue> Field = JsonResponse->TryGetField(FieldName);
+    if (!Field.IsValid()) return false;
+    if (Field->Type == EJson::String)
+        return Field->TryGetString(OutValue) && IsSafeText(OutValue, 255) &&
+               !OutValue.Contains(TEXT(" "));
+    double NumericValue = 0.0;
+    // Unreal stores JSON numbers as doubles. Reject values outside its exact
+    // integer range instead of rounding or invoking an out-of-range cast.
+    if (Field->Type == EJson::Number && Field->TryGetNumber(NumericValue) &&
+        std::isfinite(NumericValue) && NumericValue > 0.0 &&
+        NumericValue <= 9007199254740991.0 && std::floor(NumericValue) == NumericValue) {
+        OutValue = LexToString(static_cast<int64>(NumericValue));
+        return true;
+    }
+    return false;
+}
+
 FString ExtractErrorMessage(const TSharedPtr<FJsonObject>& JsonResponse) {
     if (!JsonResponse.IsValid()) {
         return TEXT("Request failed");
@@ -201,9 +222,9 @@ bool ParseActivationResponse(const FString& Response, const FString& ExpectedLic
     FString LicenseKey;
     FString Fingerprint;
     FString ActivatedAt;
-    double ActivationId = 0.0;
+    FString ActivationId;
     if (!JsonResponse->TryGetStringField(TEXT("object"), Object) || Object != TEXT("activation") ||
-        !JsonResponse->TryGetNumberField(TEXT("id"), ActivationId) || ActivationId <= 0.0 ||
+        !TryGetIdentifierField(JsonResponse, TEXT("id"), ActivationId) ||
         !JsonResponse->TryGetStringField(TEXT("license_key"), LicenseKey) ||
         LicenseKey != ExpectedLicenseKey ||
         !(JsonResponse->TryGetStringField(TEXT("fingerprint"), Fingerprint) ||
@@ -224,7 +245,7 @@ bool ParseActivationResponse(const FString& Response, const FString& ExpectedLic
     }
 
     Result.bSuccess = true;
-    Result.ActivationId = LexToString(static_cast<int64>(ActivationId));
+    Result.ActivationId = ActivationId;
     Result.DeviceId = ExpectedFingerprint;
     return true;
 }
@@ -237,12 +258,11 @@ bool ParseDeactivationResponse(const FString& Response) {
     }
     FString Object;
     FString DeactivatedAt;
-    double ActivationId = 0.0;
+    FString ActivationId;
     FDateTime Parsed;
     return JsonResponse->TryGetStringField(TEXT("object"), Object) &&
            Object == TEXT("deactivation") &&
-           JsonResponse->TryGetNumberField(TEXT("activation_id"), ActivationId) &&
-           ActivationId > 0.0 &&
+           TryGetIdentifierField(JsonResponse, TEXT("activation_id"), ActivationId) &&
            JsonResponse->TryGetStringField(TEXT("deactivated_at"), DeactivatedAt) &&
            FDateTime::ParseIso8601(*DeactivatedAt, Parsed);
 }

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 
 project(licenseseat
-    VERSION 0.6.1
+    VERSION 0.7.0
     DESCRIPTION "C++ SDK for LicenseSeat licensing API"
     HOMEPAGE_URL "https://github.com/licenseseat/licenseseat-cpp"
     LANGUAGES CXX C

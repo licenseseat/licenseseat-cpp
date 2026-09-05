@@ -4,6 +4,7 @@
 # Build directories
 build/
 build-tests/
+build-review/
 build_*/
 cmake-build-*/
 out/
