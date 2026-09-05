@@ -470,7 +470,8 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                     result.license.mode() == LicenseMode::Unknown ||
                     result.license.plan_key().empty() || !result.license.is_valid() ||
                     (result.activation.has_value() &&
-                     (!constant_time_equal(result.activation->license_key(), license_key) ||
+                     (result.activation->id().empty() ||
+                      !constant_time_equal(result.activation->license_key(), license_key) ||
                       !constant_time_equal(result.activation->fingerprint(), request.fingerprint) ||
                       !result.activation->is_active()))) {
                     throw std::invalid_argument("Validation response identity is inconsistent");
@@ -565,6 +566,25 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 current_activation_ = activation;
+            }
+
+            // Persist only a resume identity for this machine. An activation is
+            // not a validation result, and these untrusted disk fields must never
+            // grant offline authority without a verified signed artifact.
+            if (constant_time_equal(request.fingerprint, device_id_)) {
+                auto cached = storage_->get_license();
+                if (!cached || cached->license_key != license_key ||
+                    cached->device_id != request.fingerprint) {
+                    CachedLicense identity;
+                    identity.license_key = license_key;
+                    identity.device_id = request.fingerprint;
+                    identity.activated_at = activation.activated_at();
+                    if (!storage_->set_license(identity)) {
+                        return Result<Activation>::error(ErrorCode::FileError,
+                            "Device activated, but the local session could not be saved; "
+                            "check the storage path and retry with the same fingerprint");
+                    }
+                }
             }
 
             event_bus_.emit(events::ACTIVATION_SUCCESS, activation);
@@ -893,8 +913,10 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                 return Result<MachineFile>::error(verification.error_code(),
                                                   verification.error_message());
             }
-            if (constant_time_equal(request.fingerprint, device_id_)) {
-                storage_->set_machine_file(machine_file);
+            if (constant_time_equal(request.fingerprint, device_id_) &&
+                !storage_->set_machine_file(machine_file)) {
+                return Result<MachineFile>::error(ErrorCode::FileError,
+                                                  "Verified machine file could not be saved");
             }
 
             event_bus_.emit(events::MACHINE_FILE_FETCHED, machine_file);

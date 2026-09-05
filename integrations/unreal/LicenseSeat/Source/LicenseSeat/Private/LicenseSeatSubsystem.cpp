@@ -12,6 +12,7 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "TimerManager.h"
+#include <cmath>
 
 // PicoSHA2 is used only to retain the plugin's stable device fingerprint.
 THIRD_PARTY_INCLUDES_START
@@ -125,15 +126,20 @@ FString ToJsonString(const TSharedPtr<FJsonObject>& Json) {
     return RequestBody;
 }
 
-// The API issues UUID primary keys, so identifiers arrive as strings. Older servers sent
-// integers, so accept both and normalise to the string form.
+// Hosted UUIDs and integer-primary-key engines share the same identifier contract.
 bool TryGetIdentifierField(const TSharedPtr<FJsonObject>& JsonResponse, const TCHAR* FieldName,
                            FString& OutValue) {
-    if (JsonResponse->TryGetStringField(FieldName, OutValue)) {
-        return !OutValue.IsEmpty();
-    }
+    const TSharedPtr<FJsonValue> Field = JsonResponse->TryGetField(FieldName);
+    if (!Field.IsValid()) return false;
+    if (Field->Type == EJson::String)
+        return Field->TryGetString(OutValue) && IsSafeText(OutValue, 255) &&
+               !OutValue.Contains(TEXT(" "));
     double NumericValue = 0.0;
-    if (JsonResponse->TryGetNumberField(FieldName, NumericValue) && NumericValue > 0.0) {
+    // Unreal stores JSON numbers as doubles. Reject values outside its exact
+    // integer range instead of rounding or invoking an out-of-range cast.
+    if (Field->Type == EJson::Number && Field->TryGetNumber(NumericValue) &&
+        std::isfinite(NumericValue) && NumericValue > 0.0 &&
+        NumericValue <= 9007199254740991.0 && std::floor(NumericValue) == NumericValue) {
         OutValue = LexToString(static_cast<int64>(NumericValue));
         return true;
     }

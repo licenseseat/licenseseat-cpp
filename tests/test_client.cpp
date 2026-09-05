@@ -330,7 +330,8 @@ class CustomerWorkflowReview : public ClientTest {
     void TearDown() override {
         server_.stop();
         if (thread_.joinable()) thread_.join();
-        // Keep the task-specific temp cache as review evidence.
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
     }
     httplib::Server server_;
     std::thread thread_;
@@ -360,13 +361,13 @@ TEST_F(CustomerWorkflowReview, UuidActivateVerifyAndDeactivateClearArtifacts) {
     EXPECT_FALSE(storage.get_machine_file().has_value());
 }
 
-TEST_F(CustomerWorkflowReview, ReadmeAutomaticDefaultsShouldCacheMachineFile) {
+TEST_F(CustomerWorkflowReview, DefaultConfigurationDoesNotEnableOfflineAuthority) {
     config_.offline_fallback_mode = Config{}.offline_fallback_mode;
     config_.max_offline_days = Config{}.max_offline_days;
     Client client(config_);
     ASSERT_TRUE(client.activate("KEY-123").is_ok());
-    EXPECT_GT(checkouts_.load(), 0);
-    EXPECT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+    EXPECT_EQ(checkouts_.load(), 0);
+    EXPECT_FALSE(FileStorage(path_.string()).get_machine_file().has_value());
 }
 
 TEST_F(CustomerWorkflowReview, ActivateWithPinAndOfflinePolicyShouldRestoreAfterRestart) {
@@ -383,12 +384,12 @@ TEST_F(CustomerWorkflowReview, ActivateWithPinAndOfflinePolicyShouldRestoreAfter
     EXPECT_EQ(result.status, ClientStatus::OfflineValid);
 }
 
-TEST_F(CustomerWorkflowReview, WarmFetchedKeyShouldSurviveRestartForAutomaticWorkflow) {
+TEST_F(CustomerWorkflowReview, RestartRequiresApplicationPinEvenWithPersistedKey) {
     {
         Client client(config_);
         ASSERT_TRUE(client.activate("KEY-123").is_ok());
-        ASSERT_TRUE(FileStorage(path_.string()).set_license(
-            build_cached_license("KEY-123", config_.device_id)));
+        // Disk key bytes are diagnostic data, not a cross-process trust anchor.
+        ASSERT_TRUE(FileStorage(path_.string()).set_signing_key("test-kid", public_key_));
         auto verified = client.verify_machine_file(machine_);
         ASSERT_TRUE(verified.is_ok());
         ASSERT_TRUE(verified.value().valid);
@@ -396,8 +397,9 @@ TEST_F(CustomerWorkflowReview, WarmFetchedKeyShouldSurviveRestartForAutomaticWor
     server_.stop();
     Client restarted(config_);
     auto result = restarted.restore_license();
-    EXPECT_TRUE(result.success) << result.message;
-    EXPECT_EQ(result.status, ClientStatus::OfflineValid);
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.status, ClientStatus::OfflineInvalid);
+    EXPECT_NE(result.message.find("missing_parameter"), std::string::npos);
 }
 
 TEST_F(CustomerWorkflowReview, PinnedKeyWithCompleteCacheRestoresOffline) {
@@ -466,6 +468,84 @@ TEST_F(CustomerWorkflowReview, RejectNonpositiveNumericActivationIds) {
         auto deactivation = client.deactivate("KEY-123", config_.device_id);
         EXPECT_TRUE(deactivation.is_error()) << "Accepted activation_id=" << invalid;
     }
+}
+
+TEST_F(CustomerWorkflowReview, IdentifierNormalizationRejectsMalformedResponses) {
+    config_.offline_fallback_mode = OfflineFallbackMode::Disabled;
+    Client client(config_);
+    const std::vector<nlohmann::json> invalid_ids = {
+        nullptr, true, false, 1.5, 1.0, "", " ", "bad id", "id\n",
+        std::string(256, 'x'), nlohmann::json::array({1}), nlohmann::json::object()};
+    for (const auto& invalid : invalid_ids) {
+        id_ = invalid;
+        EXPECT_TRUE(client.activate("KEY-123").is_error()) << invalid.dump();
+        EXPECT_TRUE(client.deactivate("KEY-123", config_.device_id).is_error()) << invalid.dump();
+        EXPECT_TRUE(client.validate("KEY-123").is_error()) << invalid.dump();
+    }
+}
+
+TEST_F(CustomerWorkflowReview, IntegerIdentifiersRoundTripWithoutSignedOverflow) {
+    config_.offline_fallback_mode = OfflineFallbackMode::Disabled;
+    Client client(config_);
+    for (const uint64_t value : {uint64_t{1}, uint64_t{42},
+                                 std::numeric_limits<uint64_t>::max()}) {
+        id_ = value;
+        auto activated = client.activate("KEY-123");
+        ASSERT_TRUE(activated.is_ok()) << activated.error_message();
+        EXPECT_EQ(activated.value().id(), std::to_string(value));
+        auto deactivated = client.deactivate("KEY-123", config_.device_id);
+        ASSERT_TRUE(deactivated.is_ok());
+        EXPECT_EQ(deactivated.value().activation_id, std::to_string(value));
+    }
+}
+
+TEST_F(CustomerWorkflowReview, ActivationIdentityAloneDoesNotAuthorizeOffline) {
+    config_.signing_public_key = public_key_;
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        FileStorage storage(path_.string());
+        const auto identity = storage.get_license();
+        ASSERT_TRUE(identity.has_value());
+        EXPECT_FALSE(identity->validation.has_value());
+        EXPECT_FALSE(identity->license_data.has_value());
+        storage.clear_machine_file();
+    }
+    server_.stop();
+    Client restarted(config_);
+    EXPECT_FALSE(restarted.restore_license().success);
+}
+
+TEST_F(CustomerWorkflowReview, CheckoutReportsUnwritableCacheInsteadOfReady) {
+    config_.signing_public_key = public_key_;
+    // A directory at the intended artifact filename cannot be atomically replaced.
+    std::filesystem::create_directories(path_ / "licenseseat_machine_file.json");
+    Client client(config_);
+    std::atomic<int> ready{0};
+    client.on(events::MACHINE_FILE_READY, [&](const std::any&) { ++ready; });
+    auto machine = client.checkout_machine_file("KEY-123");
+    ASSERT_TRUE(machine.is_error());
+    EXPECT_EQ(machine.error_code(), ErrorCode::FileError);
+    EXPECT_EQ(ready.load(), 0);
+}
+
+TEST_F(CustomerWorkflowReview, ActivationReportsUnwritableSessionAndSameDeviceCanRetry) {
+    config_.offline_fallback_mode = OfflineFallbackMode::Disabled;
+    const auto blocked_path = path_ / "licenseseat_license.json";
+    std::filesystem::create_directories(blocked_path);
+    Client client(config_);
+    auto activation = client.activate("KEY-123");
+    ASSERT_TRUE(activation.is_error());
+    EXPECT_EQ(activation.error_code(), ErrorCode::FileError);
+    EXPECT_NE(activation.error_message().find("Device activated"), std::string::npos);
+    std::filesystem::remove(blocked_path); // Empty directory made by this test.
+    auto retry = client.activate("KEY-123");
+    ASSERT_TRUE(retry.is_ok()) << retry.error_message();
+    FileStorage storage(path_.string());
+    const auto identity = storage.get_license();
+    ASSERT_TRUE(identity.has_value());
+    EXPECT_EQ(identity->device_id, config_.device_id);
+    EXPECT_FALSE(identity->validation.has_value());
 }
 
 // ==================== Construction Tests ====================

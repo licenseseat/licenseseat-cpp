@@ -1,10 +1,8 @@
-# C++ offline integration recipe verified during the 2026-09-05 review
+# C++ offline integration
 
-This is a proposed integration guide, not a claim that a new release is available.
-Verified locally against SDK commit ddacd678 with real Ed25519 signatures and
-AES-GCM certificates through an HTTP loopback server. This guide explicitly chooses
-application-pinned signing keys as the offline trust model. An unsigned local key
-cache must not become a trust anchor.
+This guide covers the v0.7.0 API with application-pinned signing keys. Keep the
+trusted public key in your application's configuration so it can verify licenses
+without an internet connection, including after a restart.
 
 ## Configure the application
 
@@ -33,8 +31,8 @@ usable for that long. Verification also checks signed artifact and license expir
 
 Check every result. `activate()` succeeding does not prove an offline artifact was
 saved: its automatic sync is best effort. The explicit checkout makes a failure visible.
-On this SDK version, `validate()` must run successfully online to populate the license
-record used by `restore_license()`.
+Successful local activation saves the session identity needed by `restore_license()`.
+Online validation is optional at provisioning time and retrieves current entitlements.
 
 ```cpp
 licenseseat::Client client(config);
@@ -51,9 +49,6 @@ On subsequent runs, construct a fresh Client with the same config and check
 `restore_license().success`. Treat `OfflineValid` as successful offline verification.
 Do not ask the user to activate again on every app launch. `restore_license()` performs
 a connectivity check; use `verify_machine_file()` when a strictly local operation is needed.
-
-The review's `SupportedProvisioningValidateThenRestartWorks` test destroys the first
-Client, stops its server, and successfully restores from the disk cache in a new Client.
 
 ## Import a certificate fetched using curl
 
@@ -86,13 +81,8 @@ this verification on each startup. Direct verification does not import a session
 `restore_license()`. Do not infer automatic storage or fallback-policy enforcement from
 calling the lower-level verifier.
 
-The review's `CurlCertificateOnlyVerifiesWithPinnedKeyAndRejectsTampering` test covers
-this import and rejects altered bytes, a different license key, and a different device.
+## Dependencies and migration
 
-## Release checks still outstanding
-
-The proposed v0.7.0 branch has a merge conflict and fails its release-version validator.
-Its UUID path works locally, but do not tell users to fetch that tag until the release
-actually exists and its published package is tested. Windows and Unreal require native
-build verification. The root README's zero-OpenSSL JUCE claim is obsolete: both JUCE
-adapters delegate to the core SDK and require OpenSSL.
+Both `Activation::id()` and `Deactivation::activation_id` are strings in v0.7.0.
+Change integer variables and remove `std::to_string` calls around these fields.
+Both JUCE adapters delegate to the core SDK and require OpenSSL.

@@ -1,9 +1,0 @@
-[1/8] Linking CXX static library liblicenseseat.a
-[2/8] Linking CXX executable tests/offline_workflow_test
-[3/8] Linking CXX executable tests/crypto_stress_test
-[4/8] Linking CXX executable tests/telemetry_stress_test
-[5/8] Linking CXX executable tests/integration_test
-[6/8] Linking CXX executable tests/licenseseat_tests
-ld: warning: ignoring duplicate libraries: '/opt/homebrew/lib/libgtest.a'
-[7/8] Building CXX object tests/CMakeFiles/scenario_test.dir/scenario_test.cpp.o
-[8/8] Linking CXX executable tests/scenario_test

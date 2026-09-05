@@ -237,7 +237,8 @@ The single-header still requires two external header-only libraries plus OpenSSL
 - **OpenSSL** – required for HTTPS and machine-file AES-256-GCM verification in the full SDK path
 - **macOS Security.framework** – used by cpp-httplib to load trusted roots from the system Keychain
 
-The only zero-OpenSSL path in this repo is the dedicated JUCE standalone helper above. The full/amalgamated SDK now requires OpenSSL for machine files.
+Both JUCE adapters also require the core SDK and OpenSSL. The `Standalone` class
+name is retained for source compatibility; it delegates to the same core client.
 
 ### Generate Locally
 
@@ -827,19 +828,38 @@ The SDK supports offline license validation with two artifacts:
 
 ### Automatic (Recommended)
 
-Just set `storage_path` and call `activate()` — the SDK automatically syncs a machine file:
+Enable offline use explicitly, pin your organization's signing key, and use a
+persistent cache. Offline access is disabled by default. The public key is a raw
+32-byte Ed25519 key encoded as Base64; see [Pinning the signing key](#pinning-the-signing-key).
 
 ```cpp
 config.storage_path = "/path/to/cache";
+config.signing_public_key = "YOUR_BASE64_RAW_ED25519_PUBLIC_KEY";
+config.signing_key_id = "YOUR_ORGANIZATION_SIGNING_KEY_ID";
+config.offline_fallback_mode = licenseseat::OfflineFallbackMode::NetworkOnly;
+config.max_offline_days = 30;  // Choose the offline duration your product permits
 licenseseat::Client client(config);
 
-client.activate("LICENSE-KEY");  // Automatically syncs a machine file
+auto activated = client.activate("LICENSE-KEY");
+if (activated.is_error()) throw std::runtime_error(activated.error_message());
+// Activation saves the local session and attempts machine-file sync. Check
+// checkout explicitly before telling a user that offline access is ready.
+auto machine = client.checkout_machine_file("LICENSE-KEY");
+if (machine.is_error()) throw std::runtime_error(machine.error_message());
 
-// If network fails later, validation prefers the cached machine file
-auto result = client.validate("LICENSE-KEY");  // Works offline!
+// A later process uses the SAME configuration, cache path and fingerprint:
+// licenseseat::Client restarted(config);
+// auto restored = restarted.restore_license();
+// Check restored.success; OfflineValid means the signed cache was verified.
 ```
 
-If you still need the old token path, enable it explicitly:
+The key must be part of trusted application configuration, not a key supplied by
+the end user alongside the certificate. Keys fetched online are trusted only for
+that Client's lifetime. A pinned key permits verification after an offline restart.
+`activate()` success alone does not guarantee its best-effort offline sync succeeded.
+Signed certificate and license expiry can shorten the configured offline period.
+
+If you still need the old token path, keep the configuration above and enable it explicitly:
 
 ```cpp
 config.enable_legacy_offline_tokens = true;
@@ -852,16 +872,18 @@ client.activate("LICENSE-KEY");  // Syncs machine file first, then legacy token 
 
 For custom storage (encrypted, database, etc.), store the machine file certificate directly.
 `verify_machine_file()` is the offline entry point and never fetches the signing key, so pin
-`config.signing_public_key` (see [Pinning the signing key](#pinning-the-signing-key)) or make
-sure the same `Client` instance already called `checkout_machine_file()` in this process. If
-you fetch the certificate yourself instead of through the SDK, request it with exactly
-`client.fingerprint()` and `"include": ["license"]`, or decryption fails and `payload.license`
-is empty.
+`config.signing_public_key` (see [Pinning the signing key](#pinning-the-signing-key)).
+If using curl on an online helper computer, activate and request the certificate
+with the TARGET machine's `client.fingerprint()`. Use `"include": ["license"]`
+to include license details. Transfer `data.attributes.certificate`, not the JSON
+response wrapper. A wrong fingerprint prevents decryption; omitting the include
+leaves `payload.license` empty.
 
 ```cpp
 // Save (online)
-auto machine_file = client.checkout_machine_file("LICENSE-KEY").value();
-save_to_secure_storage(machine_file.certificate);
+auto checkout = client.checkout_machine_file("LICENSE-KEY");
+if (checkout.is_error()) throw std::runtime_error(checkout.error_message());
+save_to_secure_storage(checkout.value().certificate);
 
 // Load and verify (offline)
 licenseseat::MachineFile loaded;
@@ -870,13 +892,18 @@ loaded.license_key = "LICENSE-KEY";
 loaded.fingerprint = client.fingerprint();
 
 auto verified = client.verify_machine_file(loaded);
-if (verified.is_ok() && verified.value().valid) {
+if (verified.is_ok() && verified.value().valid && verified.value().payload) {
     const auto& payload = *verified.value().payload;
     if (payload.license) {
         std::cout << "Plan: " << payload.license->plan_key() << "\n";
     }
 }
 ```
+
+This direct verifier never contacts the network and does not import a session for
+`restore_license()`. For custom storage, load and verify the certificate on every
+startup. Use the SDK-managed workflow above for automatic session restore and its
+configured fallback policy. See the [complete offline integration guide](docs/offline-integration.md).
 
 If you still need portable JSON serialization for a legacy integration, use offline tokens explicitly:
 
