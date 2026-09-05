@@ -1400,6 +1400,32 @@ int main() {
     SetConfigFlags(FLAG_VSYNC_HINT);
 #endif
     InitWindow(screenWidth, screenHeight, TextFormat("%s v%s", TOOL_NAME, TOOL_VERSION));
+
+    // InitWindow() does not abort when the platform backend fails to come up: it
+    // logs "SYSTEM: Failed to initialize platform" and returns with rlgl still
+    // zeroed. Carrying on from there is fatal -- the first BeginDrawing() writes
+    // the identity matrix through RLGL.State.currentMatrix, which is NULL, and
+    // that store lands on address zero. Emscripten notices its heap canary is
+    // gone and kills the module with "The application has corrupted its heap
+    // memory area (address zero)!", which is what the browser console shows.
+    //
+    // On the web the usual cause is a browser that refuses a WebGL context:
+    // no GPU or a blocklisted driver (common on Chromium/Linux), WebGL turned
+    // off, or the per-page live-context limit already reached.
+    if (!IsWindowReady()) {
+        TraceLog(LOG_ERROR, "SYSTEM: No graphics context available, demo cannot run");
+#ifdef __EMSCRIPTEN__
+        // Let the embedding page swap in its own fallback. Nothing below this
+        // point may touch rlgl or the audio device.
+        EM_ASM({
+            if (typeof Module !== "undefined" && Module["onDemoUnsupported"]) {
+                Module["onDemoUnsupported"]("no-graphics-context");
+            }
+        });
+#endif
+        return 1;
+    }
+
     SetExitKey(0);  // Disable ESC closing the app
     SetTargetFPS(60);
 

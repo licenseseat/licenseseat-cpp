@@ -6,7 +6,7 @@ import os
 
 class LicenseSeatConan(ConanFile):
     name = "licenseseat"
-    version = "0.6.0"
+    version = "0.7.0"
     license = "MIT"
     author = "LicenseSeat"
     url = "https://github.com/licenseseat/licenseseat-cpp"

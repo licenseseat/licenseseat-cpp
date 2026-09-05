@@ -4,6 +4,46 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-05
+
+### Changed
+
+- `Activation::id()` and `Deactivation::activation_id` are now `std::string`.
+  Update integer variables and remove `std::to_string` calls around these values.
+  Hosted UUIDs and positive integer IDs from self-hosted engines are accepted.
+- Offline startup explicitly requires application-pinned signing keys, an enabled
+  fallback policy, a positive offline duration and persistent storage. Untrusted
+  local key files do not establish signing authority.
+
+### Fixed
+
+- Accept UUID activation and deactivation responses without weakening identifier checks.
+- Save the activated local device's session identity so a fresh client can restore
+  a verified cached machine file without a preceding online validation call.
+- Correct automatic offline, imported certificate, signing-key and JUCE dependency examples.
+
+## [0.6.1] - 2026-08-26
+
+### Fixed
+
+- The WebAssembly demo no longer takes the whole page down when the browser
+  refuses a WebGL context. `InitWindow()` only warns when its platform backend
+  fails, so the demo went on to call `BeginDrawing()`, which writes the identity
+  matrix through rlgl's still-NULL current-matrix pointer: the store lands on
+  address zero and Emscripten aborts the module with "The application has
+  corrupted its heap memory area (address zero)!". Reported on Chromium/Linux,
+  where a missing or blocklisted GPU is common. The demo now checks
+  `IsWindowReady()`, tells the embedding page through `Module.onDemoUnsupported`,
+  and exits before touching graphics or audio.
+- The standalone `synthdemo.html` shell explains that the browser cannot run the
+  demo instead of leaving a permanent spinner.
+
+### Changed
+
+- Pinned raylib and raygui to exact commits, and made the raylib web-backend
+  patch idempotent, so the shipped WASM bundle rebuilds reproducibly instead of
+  tracking whatever `master` happened to be that day.
+
 ## [0.6.0] - 2026-08-10
 
 ### Security
