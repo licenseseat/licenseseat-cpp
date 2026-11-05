@@ -426,7 +426,7 @@ Result<bool> verify_offline_token_signature(const OfflineToken& offline_token,
         !safe_text(*token.fingerprint, 255) || !safe_text(token.kid, 255) || token.iat <= 0 ||
         token.iat > MAX_UNIX_TIMESTAMP || token.nbf <= 0 || token.nbf > MAX_UNIX_TIMESTAMP ||
         token.exp <= 0 || token.exp > MAX_UNIX_TIMESTAMP || token.nbf < token.iat ||
-        token.nbf > token.exp || token.exp - token.iat > MAX_OFFLINE_LIFETIME_SECONDS ||
+        token.nbf >= token.exp || token.exp - token.iat > MAX_OFFLINE_LIFETIME_SECONDS ||
         token.entitlements.size() > 500 || offline_token.signature.algorithm != "Ed25519" ||
         offline_token.signature.key_id != token.kid) {
         return Result<bool>::error(ErrorCode::InvalidParameter, "Offline token claims are invalid");
@@ -626,7 +626,7 @@ Result<MachineFilePayload> verify_machine_file(const MachineFile& machine_file,
             payload.iat > MAX_UNIX_TIMESTAMP || payload.nbf <= 0 ||
             payload.nbf > MAX_UNIX_TIMESTAMP || payload.exp <= 0 ||
             payload.exp > MAX_UNIX_TIMESTAMP || payload.nbf < payload.iat ||
-            payload.nbf > payload.exp || payload.exp < payload.iat || payload.ttl <= 0 ||
+            payload.nbf >= payload.exp || payload.exp < payload.iat || payload.ttl <= 0 ||
             payload.ttl > MAX_OFFLINE_LIFETIME_SECONDS ||
             payload.exp - payload.iat != payload.ttl || payload.grace_period < 0 ||
             payload.grace_period > MAX_GRACE_PERIOD_SECONDS ||

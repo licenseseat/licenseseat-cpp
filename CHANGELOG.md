@@ -4,6 +4,13 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Reject a zero-width validity window (`nbf == exp`) in machine files and offline tokens.
+  Windows are half-open `[nbf, exp)`, so such a grant is never valid; the machine-file
+  check previously let one through for its grace period. Matches the Swift and Rust SDKs
+  and the server (#34).
+
 ## [0.7.0] - 2026-09-05
 
 ### Changed
