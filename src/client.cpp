@@ -2060,8 +2060,13 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
 
     /// A key id from an unverified certificate is shown only when it is plain
     /// identifier text, so diagnostics cannot carry forged log lines or URL syntax.
+    /// It must start with an ASCII letter or digit, which also excludes the "." and
+    /// ".." path segments.
     static bool is_displayable_key_id(const std::string& kid) {
-        return !kid.empty() && kid.size() <= 128 &&
+        const auto is_alnum = [](unsigned char ch) {
+            return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+        };
+        return !kid.empty() && kid.size() <= 128 && is_alnum(static_cast<unsigned char>(kid[0])) &&
                std::all_of(kid.begin(), kid.end(), [](unsigned char ch) {
                    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
                           (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.';

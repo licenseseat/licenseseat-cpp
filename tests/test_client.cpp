@@ -647,6 +647,25 @@ TEST_F(ClientTest, UnverifiedKeyIdIsNotReflectedIntoDiagnostics) {
     EXPECT_EQ(message.find("FORGED"), std::string::npos) << message;
     EXPECT_EQ(message.find("\xE2\x80\xA8"), std::string::npos);
     EXPECT_NE(message.find("(unverified)"), std::string::npos) << message;
+
+    // "." and ".." are plain characters but path segments: never spliced into the URL.
+    for (const std::string& dot_kid : {std::string("."), std::string(".."), std::string(".x")}) {
+        const nlohmann::json dot_envelope = {{"enc", "YQ.YQ.YQ"},
+                                             {"sig", std::string(86, 'A')},
+                                             {"alg", "aes-256-gcm+ed25519"},
+                                             {"kid", dot_kid}};
+        const auto dot_dump = dot_envelope.dump();
+        MachineFile dot_file;
+        dot_file.certificate = wrap_machine_file_certificate(
+            crypto::base64_encode(std::vector<uint8_t>(dot_dump.begin(), dot_dump.end())));
+        auto dot_result = client.verify_machine_file(dot_file, "", "KEY-123", config_.device_id);
+        ASSERT_TRUE(dot_result.is_error()) << dot_kid;
+        EXPECT_EQ(dot_result.error_message().find("/signing_keys/" + dot_kid),
+                  std::string::npos)
+            << dot_result.error_message();
+        EXPECT_NE(dot_result.error_message().find("/signing_keys/{kid}"), std::string::npos)
+            << dot_result.error_message();
+    }
 }
 
 TEST_F(CustomerWorkflowReview, AttackerWrittenKeyFileNeverAuthorizesForgedCertificate) {
