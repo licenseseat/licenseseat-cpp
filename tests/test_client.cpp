@@ -623,6 +623,32 @@ TEST_F(CustomerWorkflowReview, PinnedKeyIdMismatchIsDiagnosed) {
     EXPECT_NE(verified.error_message().find("'rotated-kid'"), std::string::npos);
 }
 
+TEST_F(ClientTest, UnverifiedKeyIdIsNotReflectedIntoDiagnostics) {
+    // The kid comes from an unauthenticated envelope. It must not inject text
+    // (U+2028 line separator) or URL syntax into the remedy message.
+    const std::string hostile_kid = std::string("../elsewhere?x='") + "\xE2\x80\xA8" + "FORGED LOG LINE";
+    const nlohmann::json envelope = {{"enc", "YQ.YQ.YQ"},
+                                     {"sig", std::string(86, 'A')},
+                                     {"alg", "aes-256-gcm+ed25519"},
+                                     {"kid", hostile_kid}};
+    const auto dump = envelope.dump();
+    MachineFile machine_file;
+    machine_file.certificate = wrap_machine_file_certificate(
+        crypto::base64_encode(std::vector<uint8_t>(dump.begin(), dump.end())));
+    auto kid = crypto::internal::extract_machine_file_key_id(machine_file);
+    ASSERT_TRUE(kid.is_ok()) << kid.error_message();
+    ASSERT_EQ(kid.value(), hostile_kid);
+
+    Client client(config_);
+    auto result = client.verify_machine_file(machine_file, "", "KEY-123", config_.device_id);
+    ASSERT_TRUE(result.is_error());
+    const auto& message = result.error_message();
+    EXPECT_EQ(message.find("elsewhere"), std::string::npos) << message;
+    EXPECT_EQ(message.find("FORGED"), std::string::npos) << message;
+    EXPECT_EQ(message.find("\xE2\x80\xA8"), std::string::npos);
+    EXPECT_NE(message.find("(unverified)"), std::string::npos) << message;
+}
+
 TEST_F(CustomerWorkflowReview, AttackerWrittenKeyFileNeverAuthorizesForgedCertificate) {
     // A cache-writing attacker can plant both a key file and a machine file signed
     // with their own key. Trust-on-first-use of a persisted key (option (a) in #29)

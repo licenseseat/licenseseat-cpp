@@ -2058,14 +2058,26 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
         return key_id.is_ok() ? std::optional<std::string>(key_id.value()) : std::nullopt;
     }
 
+    /// A key id from an unverified certificate is shown only when it is plain
+    /// identifier text, so diagnostics cannot carry forged log lines or URL syntax.
+    static bool is_displayable_key_id(const std::string& kid) {
+        return !kid.empty() && kid.size() <= 128 &&
+               std::all_of(kid.begin(), kid.end(), [](unsigned char ch) {
+                   return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                          (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.';
+               });
+    }
+
     /// Explain why resolve_signing_key(key_id, explicit_public_key, false) found no key.
-    /// The kid comes from an unverified envelope but has passed its safe-text checks.
     std::string unresolved_signing_key_message(const std::optional<std::string>& key_id,
                                                const std::string& explicit_public_key) const {
         const std::string kid = key_id.value_or("");
         if (kid.empty()) {
             return "Machine file certificate is malformed: its signing key id cannot be read";
         }
+        const bool displayable = is_displayable_key_id(kid);
+        const std::string claimed =
+            displayable ? "'" + kid + "'" : "with a non-printable or unusual id";
         if (!explicit_public_key.empty()) {
             return "The supplied public key is not a raw 32-byte Ed25519 key encoded as "
                    "standard Base64";
@@ -2076,18 +2088,26 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                        "standard Base64 (use the public_key value from GET /signing_keys/{kid}, "
                        "not PEM/DER)";
             }
-            return "Machine file is signed by key '" + kid +
-                   "' but Config::signing_key_id pins '" + config_.signing_key_id +
-                   "'; pin the key that signs this organization's machine files";
+            const std::string pinned = is_displayable_key_id(config_.signing_key_id)
+                                           ? "'" + config_.signing_key_id + "'"
+                                           : "a different key id";
+            return "Machine file claims (unverified) to be signed by key " + claimed +
+                   ", but Config::signing_key_id pins " + pinned +
+                   "; pin the key that signs this organization's machine files";
         }
-        return "Public key required for machine file verification: no trusted signing key for "
-               "key '" +
-               kid +
-               "'. Keys fetched online are trusted only by the Client that fetched them, and "
-               "keys on disk are never trusted. To verify after a restart or offline, set "
-               "Config::signing_public_key to the public_key from GET " +
-               config_.api_url + "/signing_keys/" + kid +
-               " (see docs/offline-integration.md)";
+        std::string message =
+            "Public key required for machine file verification: no trusted signing key for "
+            "key " +
+            claimed +
+            " (unverified). Keys fetched online are trusted only by the Client that fetched "
+            "them, and keys on disk are never trusted. To verify after a restart or offline, "
+            "set Config::signing_public_key to the public_key from ";
+        message += displayable ? "GET " + config_.api_url + "/signing_keys/" + kid
+                               : "GET " + config_.api_url +
+                                     "/signing_keys/{kid} (read the kid with "
+                                     "crypto::internal::extract_machine_file_key_id)";
+        message += " (see docs/offline-integration.md)";
+        return message;
     }
 
     std::string resolve_signing_key(const std::optional<std::string>& key_id,

@@ -21,10 +21,11 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
   certificate's key id and the exact `GET <api_url>/signing_keys/<kid>` to pin, or the
   `signing_key_id` mismatch when a pinned key does not match the certificate (#29).
 - Decision recorded for #29: keys fetched online stay process-local and keys on disk are
-  never trusted. Persisting a fetched key (trust on first use) would let anyone who can
-  write the cache directory plant a key and a self-signed machine file together; a
-  restore-time fetch cannot help because offline fallback only runs when the API is
-  unreachable. Pinning `signing_public_key` remains the offline trust anchor.
+  never trusted. Persisting a fetched key in the cache (trust on first use) would let
+  anyone who can write the cache directory plant a key and a self-signed machine file
+  together. A restore-time fetch would only help when the API answers but the health
+  check fails, never on a genuinely offline start, which is the case machine files exist
+  for. Pinning `signing_public_key` remains the offline trust anchor.
 
 ## [0.7.0] - 2026-09-05
 
