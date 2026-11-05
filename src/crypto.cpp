@@ -187,14 +187,18 @@ bool timestamp_matches_unix_seconds(const std::string& encoded, int64_t expected
 
 } // namespace
 
-namespace internal {
-
-Result<std::string> extract_machine_file_key_id(const MachineFile& machine_file) {
+Result<std::string> machine_file_key_id(const MachineFile& machine_file) {
     auto envelope = parse_machine_file_envelope(machine_file.certificate);
     if (envelope.is_error()) {
         return Result<std::string>::error(envelope.error_code(), envelope.error_message());
     }
     return Result<std::string>::ok(envelope.value().kid);
+}
+
+namespace internal {
+
+Result<std::string> extract_machine_file_key_id(const MachineFile& machine_file) {
+    return machine_file_key_id(machine_file);
 }
 
 } // namespace internal

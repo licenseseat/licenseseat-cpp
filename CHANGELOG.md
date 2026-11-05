@@ -4,6 +4,16 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `crypto::machine_file_key_id()` reads the signing-key identifier (`kid`) from any
+  machine-file certificate, including one imported by hand, so the explicit-key path
+  (`fetch_signing_key(kid)` then `verify_machine_file(mf, key)`) no longer needs the
+  private `crypto::internal::extract_machine_file_key_id()`, which remains as an alias.
+  The `kid` is untrusted selection data, not a trust anchor. It is a function rather
+  than a `MachineFile` field so the struct layout, and the binary interface, stay
+  unchanged (#30).
+
 ## [0.7.0] - 2026-09-05
 
 ### Changed
