@@ -4,6 +4,28 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `events::MACHINE_FILE_SIGNING_KEY_UNPINNED` (`machineFile:signingKeyUnpinned`):
+  `checkout_machine_file()` emits it when offline fallback is enabled but no
+  `Config::signing_public_key` is pinned. The payload carries the certificate's `kid`
+  and the `publicKey` to pin, so the gap is visible during online provisioning rather
+  than at the first offline cold start (#29).
+
+### Changed
+
+- An unpinned offline cold start now reports `no_public_key` for cached machine files
+  (previously `missing_parameter`), matching the offline-token path, and
+  `restore_license()` messages include the cause. Verification errors keep the
+  `Public key required for machine file verification` prefix and now name the
+  certificate's key id and the exact `GET <api_url>/signing_keys/<kid>` to pin, or the
+  `signing_key_id` mismatch when a pinned key does not match the certificate (#29).
+- Decision recorded for #29: keys fetched online stay process-local and keys on disk are
+  never trusted. Persisting a fetched key (trust on first use) would let anyone who can
+  write the cache directory plant a key and a self-signed machine file together; a
+  restore-time fetch cannot help because offline fallback only runs when the API is
+  unreachable. Pinning `signing_public_key` remains the offline trust anchor.
+
 ## [0.7.0] - 2026-09-05
 
 ### Changed

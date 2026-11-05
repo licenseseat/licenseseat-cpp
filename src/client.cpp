@@ -919,6 +919,16 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                                                   "Verified machine file could not be saved");
             }
 
+            // Offline restarts can only use an application-pinned key (#29). Say so
+            // while the developer is still online instead of at the first cold start.
+            if (offline_policy_is_enabled() && config_.signing_public_key.empty()) {
+                event_bus_.emit(events::MACHINE_FILE_SIGNING_KEY_UNPINNED,
+                                std::map<std::string, std::string>{
+                                    {"kid", *key_id},
+                                    {"publicKey", public_key},
+                                    {"message", unresolved_signing_key_message(key_id, "")}});
+            }
+
             event_bus_.emit(events::MACHINE_FILE_FETCHED, machine_file);
             event_bus_.emit(events::MACHINE_FILE_READY, machine_file);
             return Result<MachineFile>::ok(std::move(machine_file));
@@ -1013,7 +1023,8 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
         auto public_key = resolve_signing_key(key_id, public_key_b64, false);
         if (public_key.empty()) {
             return Result<MachineFileVerificationResult>::error(
-                ErrorCode::MissingParameter, "Public key required for machine file verification");
+                ErrorCode::MissingParameter,
+                unresolved_signing_key_message(key_id, public_key_b64));
         }
 
         auto crypto_result = crypto::verify_machine_file(machine_file, resolved_license_key,
@@ -1191,9 +1202,13 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                 result.success = false;
                 // Use OfflineInvalid (not Invalid) for offline failures (matches Swift SDK)
                 result.status = ClientStatus::OfflineInvalid;
-                result.message = offline_result.is_ok()
-                                     ? "Offline verification failed: " + offline_result.value().code
-                                     : offline_result.error_message();
+                result.message =
+                    offline_result.is_ok()
+                        ? "Offline verification failed: " + offline_result.value().code +
+                              (offline_result.value().message.empty()
+                                   ? std::string{}
+                                   : " (" + offline_result.value().message + ")")
+                        : offline_result.error_message();
 
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -2043,6 +2058,38 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
         return key_id.is_ok() ? std::optional<std::string>(key_id.value()) : std::nullopt;
     }
 
+    /// Explain why resolve_signing_key(key_id, explicit_public_key, false) found no key.
+    /// The kid comes from an unverified envelope but has passed its safe-text checks.
+    std::string unresolved_signing_key_message(const std::optional<std::string>& key_id,
+                                               const std::string& explicit_public_key) const {
+        const std::string kid = key_id.value_or("");
+        if (kid.empty()) {
+            return "Machine file certificate is malformed: its signing key id cannot be read";
+        }
+        if (!explicit_public_key.empty()) {
+            return "The supplied public key is not a raw 32-byte Ed25519 key encoded as "
+                   "standard Base64";
+        }
+        if (!config_.signing_public_key.empty()) {
+            if (!is_valid_ed25519_public_key(config_.signing_public_key)) {
+                return "Config::signing_public_key is not a raw 32-byte Ed25519 key encoded as "
+                       "standard Base64 (use the public_key value from GET /signing_keys/{kid}, "
+                       "not PEM/DER)";
+            }
+            return "Machine file is signed by key '" + kid +
+                   "' but Config::signing_key_id pins '" + config_.signing_key_id +
+                   "'; pin the key that signs this organization's machine files";
+        }
+        return "Public key required for machine file verification: no trusted signing key for "
+               "key '" +
+               kid +
+               "'. Keys fetched online are trusted only by the Client that fetched them, and "
+               "keys on disk are never trusted. To verify after a restart or offline, set "
+               "Config::signing_public_key to the public_key from GET " +
+               config_.api_url + "/signing_keys/" + kid +
+               " (see docs/offline-integration.md)";
+    }
+
     std::string resolve_signing_key(const std::optional<std::string>& key_id,
                                     const std::string& explicit_public_key, bool allow_fetch) {
         if (!explicit_public_key.empty()) {
@@ -2178,6 +2225,20 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             result.offline = true;
             result.code = "no_machine_file";
             return Result<ValidationResult>::ok(std::move(result));
+        }
+
+        {
+            // Same code as the offline-token path: the artifact may be fine, but
+            // nothing trusted can verify it in this process.
+            const auto key_id = extract_machine_file_key_id(*cached_machine_file);
+            if (key_id.has_value() && resolve_signing_key(key_id, "", false).empty()) {
+                ValidationResult result;
+                result.valid = false;
+                result.offline = true;
+                result.code = "no_public_key";
+                result.message = unresolved_signing_key_message(key_id, "");
+                return Result<ValidationResult>::ok(std::move(result));
+            }
         }
 
         auto verify_result = verify_machine_file(*cached_machine_file, "", "", "");

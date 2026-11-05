@@ -856,6 +856,9 @@ if (machine.is_error()) throw std::runtime_error(machine.error_message());
 The key must be part of trusted application configuration, not a key supplied by
 the end user alongside the certificate. Keys fetched online are trusted only for
 that Client's lifetime. A pinned key permits verification after an offline restart.
+Without one, an offline cold start fails with `no_public_key`, and `checkout_machine_file()`
+emits `events::MACHINE_FILE_SIGNING_KEY_UNPINNED` (payload: `kid`, `publicKey`) to flag
+the gap while you are still online.
 `activate()` success alone does not guarantee its best-effort offline sync succeeded.
 Signed certificate and license expiry can shorten the configured offline period.
 

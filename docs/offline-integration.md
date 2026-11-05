@@ -22,6 +22,15 @@ config.offline_fallback_mode = licenseseat::OfflineFallbackMode::NetworkOnly;
 config.max_offline_days = 30; // Choose your product's permitted offline duration.
 ```
 
+Without `signing_public_key`, online calls still work (they verify with a key fetched
+over HTTPS, trusted only by that `Client`), but a process that starts offline cannot
+verify anything: `restore_license()` fails with `no_public_key` and a message naming
+the key id to pin. The SDK never trusts a key read from its own cache directory,
+because anyone who can write that directory could plant a key and a matching forged
+machine file together. Subscribe to `licenseseat::events::MACHINE_FILE_SIGNING_KEY_UNPINNED`
+during development to catch a missing pin while you are still online; its payload has
+the `kid` and the `publicKey` value to pin.
+
 Keep this configuration, product, cache path and device fingerprint consistent across
 restarts. Offline support defaults to disabled; setting only `storage_path` is insufficient.
 Thirty days is a local maximum, not a promise that an expired/revoked artifact remains
