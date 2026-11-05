@@ -1297,6 +1297,14 @@ TEST_F(ClientTest, OfflineTokenForAnotherProductIsRejected) {
     EXPECT_FALSE(restored.license.has_value());
     EXPECT_NE(restored.message.find("product_mismatch"), std::string::npos) << restored.message;
 
+    // Relabelling the visible product claim does not help: it must match the
+    // signed canonical bytes.
+    auto relabelled = offline_token;
+    relabelled.token.product_slug = "other_product";
+    auto relabelled_result = direct.verify_offline_token(relabelled);
+    ASSERT_TRUE(relabelled_result.is_error());
+    EXPECT_EQ(relabelled_result.error_code(), ErrorCode::InvalidSignature);
+
     // Control: the same cache restores for the product the token was issued for.
     config_.product_slug = "test_product";
     Client right_product(config_);
