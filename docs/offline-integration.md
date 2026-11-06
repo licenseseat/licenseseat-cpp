@@ -75,6 +75,24 @@ if (payload.license) {
 }
 ```
 
+### Without a pinned key (online only)
+
+When the process is online, a certificate can also be verified with a key fetched
+over the API. Read the key identifier from the certificate with the public API;
+the `kid` is untrusted selection data and the fetched key is trusted because it
+arrived over the authenticated HTTPS transport, not because of the certificate:
+
+```cpp
+auto kid = licenseseat::crypto::machine_file_key_id(imported); // any MachineFile
+if (kid.is_error()) throw std::runtime_error(kid.error_message());
+auto key = client.fetch_signing_key(kid.value());
+if (key.is_error()) throw std::runtime_error(key.error_message());
+auto verified = client.verify_machine_file(imported, key.value(), license_key, client.fingerprint());
+```
+
+This path needs the network every time. It is not a substitute for pinning when the
+app must start offline.
+
 This verifies independently of a preexisting cached license record. If the application
 manages certificate storage itself, persist and reload the certificate there and run
 this verification on each startup. Direct verification does not import a session for

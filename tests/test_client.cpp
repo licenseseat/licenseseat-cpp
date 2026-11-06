@@ -548,6 +548,67 @@ TEST_F(CustomerWorkflowReview, ActivationReportsUnwritableSessionAndSameDeviceCa
     EXPECT_FALSE(identity->validation.has_value());
 }
 
+// Issue #30: a machine file exposes its kid through the public API, so the
+// documented explicit-key recovery works on a fresh process without crypto::internal.
+TEST_F(CustomerWorkflowReview, ExplicitKeyPathAfterRestartUsesPublicKeyId) {
+    // No pinned key: the online process trusts a key fetched over the API only.
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        auto machine = client.checkout_machine_file("KEY-123");
+        ASSERT_TRUE(machine.is_ok()) << machine.error_message();
+        auto kid = crypto::machine_file_key_id(machine.value());
+        ASSERT_TRUE(kid.is_ok());
+        EXPECT_EQ(kid.value(), "test-kid");
+    }
+
+    // Restart between checkout and verify: the in-memory key cache is gone.
+    Client restarted(config_);
+    auto cached = FileStorage(path_.string()).get_machine_file();
+    ASSERT_TRUE(cached.has_value());
+
+    auto unpinned = restarted.verify_machine_file(*cached);
+    ASSERT_TRUE(unpinned.is_error());
+    EXPECT_EQ(unpinned.error_code(), ErrorCode::MissingParameter);
+
+    auto kid = crypto::machine_file_key_id(*cached);
+    ASSERT_TRUE(kid.is_ok()) << kid.error_message();
+    auto key = restarted.fetch_signing_key(kid.value());
+    ASSERT_TRUE(key.is_ok()) << key.error_message();
+    auto verified = restarted.verify_machine_file(*cached, key.value());
+    ASSERT_TRUE(verified.is_ok()) << verified.error_message();
+    EXPECT_TRUE(verified.value().valid) << verified.value().message;
+    ASSERT_TRUE(verified.value().payload.has_value());
+    EXPECT_EQ(verified.value().payload->key_id, kid.value());
+
+    // A certificate imported by hand (curl) works the same way.
+    MachineFile imported;
+    imported.certificate = machine_.certificate;
+    auto imported_kid = crypto::machine_file_key_id(imported);
+    ASSERT_TRUE(imported_kid.is_ok()) << imported_kid.error_message();
+    EXPECT_EQ(imported_kid.value(), "test-kid");
+    auto imported_verified =
+        restarted.verify_machine_file(imported, key.value(), "KEY-123", config_.device_id);
+    ASSERT_TRUE(imported_verified.is_ok());
+    EXPECT_TRUE(imported_verified.value().valid);
+}
+
+TEST_F(ClientTest, MachineFileKeyIdRejectsMalformedCertificatesAndKeepsInternalAlias) {
+    MachineFile garbage;
+    garbage.certificate = "not a machine file";
+    EXPECT_TRUE(crypto::machine_file_key_id(garbage).is_error());
+    MachineFile empty;
+    EXPECT_TRUE(crypto::machine_file_key_id(empty).is_error());
+
+    auto machine_file = build_test_machine_file("KEY-123", config_.device_id, nullptr);
+    auto pub = crypto::machine_file_key_id(machine_file);
+    auto alias = crypto::internal::extract_machine_file_key_id(machine_file);
+    ASSERT_TRUE(pub.is_ok());
+    ASSERT_TRUE(alias.is_ok());
+    EXPECT_EQ(pub.value(), "test-kid");
+    EXPECT_EQ(pub.value(), alias.value());
+}
+
 // ==================== Construction Tests ====================
 
 TEST_F(ClientTest, CanBeConstructed) {
