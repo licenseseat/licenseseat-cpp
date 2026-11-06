@@ -4,6 +4,8 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-06
+
 ### Added
 
 - `crypto::machine_file_key_id()` reads the signing-key identifier (`kid`) from any
