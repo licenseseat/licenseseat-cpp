@@ -4,8 +4,22 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `crypto::machine_file_key_id()` reads the signing-key identifier (`kid`) from any
+  machine-file certificate, including one imported by hand, so the explicit-key path
+  (`fetch_signing_key(kid)` then `verify_machine_file(mf, key)`) no longer needs the
+  private `crypto::internal::extract_machine_file_key_id()`, which remains as an alias.
+  The `kid` is untrusted selection data, not a trust anchor. It is a function rather
+  than a `MachineFile` field so the struct layout, and the binary interface, stay
+  unchanged (#30).
+
 ### Security
 
+- Reject a zero-width validity window (`nbf == exp`) in machine files and offline tokens.
+  Windows are half-open `[nbf, exp)`, so such a grant is never valid; the machine-file
+  check previously let one through for its grace period. Matches the Swift and Rust SDKs
+  and the server (#34).
 - Legacy offline tokens are now bound to `Config::product_slug`. One organization key
   signs tokens for all of its products, so a valid token for another product on the
   same device could previously restore this product offline. `verify_offline_token()`

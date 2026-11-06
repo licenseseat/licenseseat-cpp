@@ -548,6 +548,67 @@ TEST_F(CustomerWorkflowReview, ActivationReportsUnwritableSessionAndSameDeviceCa
     EXPECT_FALSE(identity->validation.has_value());
 }
 
+// Issue #30: a machine file exposes its kid through the public API, so the
+// documented explicit-key recovery works on a fresh process without crypto::internal.
+TEST_F(CustomerWorkflowReview, ExplicitKeyPathAfterRestartUsesPublicKeyId) {
+    // No pinned key: the online process trusts a key fetched over the API only.
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        auto machine = client.checkout_machine_file("KEY-123");
+        ASSERT_TRUE(machine.is_ok()) << machine.error_message();
+        auto kid = crypto::machine_file_key_id(machine.value());
+        ASSERT_TRUE(kid.is_ok());
+        EXPECT_EQ(kid.value(), "test-kid");
+    }
+
+    // Restart between checkout and verify: the in-memory key cache is gone.
+    Client restarted(config_);
+    auto cached = FileStorage(path_.string()).get_machine_file();
+    ASSERT_TRUE(cached.has_value());
+
+    auto unpinned = restarted.verify_machine_file(*cached);
+    ASSERT_TRUE(unpinned.is_error());
+    EXPECT_EQ(unpinned.error_code(), ErrorCode::MissingParameter);
+
+    auto kid = crypto::machine_file_key_id(*cached);
+    ASSERT_TRUE(kid.is_ok()) << kid.error_message();
+    auto key = restarted.fetch_signing_key(kid.value());
+    ASSERT_TRUE(key.is_ok()) << key.error_message();
+    auto verified = restarted.verify_machine_file(*cached, key.value());
+    ASSERT_TRUE(verified.is_ok()) << verified.error_message();
+    EXPECT_TRUE(verified.value().valid) << verified.value().message;
+    ASSERT_TRUE(verified.value().payload.has_value());
+    EXPECT_EQ(verified.value().payload->key_id, kid.value());
+
+    // A certificate imported by hand (curl) works the same way.
+    MachineFile imported;
+    imported.certificate = machine_.certificate;
+    auto imported_kid = crypto::machine_file_key_id(imported);
+    ASSERT_TRUE(imported_kid.is_ok()) << imported_kid.error_message();
+    EXPECT_EQ(imported_kid.value(), "test-kid");
+    auto imported_verified =
+        restarted.verify_machine_file(imported, key.value(), "KEY-123", config_.device_id);
+    ASSERT_TRUE(imported_verified.is_ok());
+    EXPECT_TRUE(imported_verified.value().valid);
+}
+
+TEST_F(ClientTest, MachineFileKeyIdRejectsMalformedCertificatesAndKeepsInternalAlias) {
+    MachineFile garbage;
+    garbage.certificate = "not a machine file";
+    EXPECT_TRUE(crypto::machine_file_key_id(garbage).is_error());
+    MachineFile empty;
+    EXPECT_TRUE(crypto::machine_file_key_id(empty).is_error());
+
+    auto machine_file = build_test_machine_file("KEY-123", config_.device_id, nullptr);
+    auto pub = crypto::machine_file_key_id(machine_file);
+    auto alias = crypto::internal::extract_machine_file_key_id(machine_file);
+    ASSERT_TRUE(pub.is_ok());
+    ASSERT_TRUE(alias.is_ok());
+    EXPECT_EQ(pub.value(), "test-kid");
+    EXPECT_EQ(pub.value(), alias.value());
+}
+
 // ==================== Construction Tests ====================
 
 TEST_F(ClientTest, CanBeConstructed) {
@@ -1145,6 +1206,42 @@ TEST_F(ClientTest, VerifyOfflineTokenNotYetValidFails) {
 
     EXPECT_TRUE(result.is_error());
     // Token is not yet valid (nbf in future)
+}
+
+// license_seat #16: a zero-width window (nbf == exp) is never valid and must be
+// rejected as malformed claims, not merely as "expired".
+TEST_F(ClientTest, OfflineTokenWithZeroWidthValidityWindowIsRejected) {
+    auto offline = build_test_offline_token("KEY-123", config_.device_id, nullptr);
+    auto canonical = nlohmann::json::parse(offline.canonical);
+    const int64_t edge = canonical["exp"].get<int64_t>();
+    canonical["nbf"] = edge;
+    offline.token.nbf = edge;
+    offline.canonical = canonical.dump();
+    const std::array<unsigned char, 32> seed = {0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+                                                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+                                                0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
+                                                0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22};
+    std::array<unsigned char, 32> public_key{};
+    std::array<unsigned char, 64> signature{};
+    ASSERT_TRUE(test_signing::sign_ed25519(seed, offline.canonical, public_key, signature));
+    offline.signature.value =
+        crypto::base64url_encode(std::vector<uint8_t>(signature.begin(), signature.end()));
+    const auto key =
+        crypto::base64_encode(std::vector<uint8_t>(public_key.begin(), public_key.end()));
+
+    auto result = crypto::verify_offline_token_signature(offline, key);
+    ASSERT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::InvalidParameter);
+
+    // Control: the same re-signing with a one-second window passes the claim checks.
+    canonical["nbf"] = edge - 1;
+    offline.token.nbf = edge - 1;
+    offline.canonical = canonical.dump();
+    ASSERT_TRUE(test_signing::sign_ed25519(seed, offline.canonical, public_key, signature));
+    offline.signature.value =
+        crypto::base64url_encode(std::vector<uint8_t>(signature.begin(), signature.end()));
+    auto control = crypto::verify_offline_token_signature(offline, key);
+    EXPECT_TRUE(control.is_ok()) << control.error_message();
 }
 
 TEST_F(ClientTest, FetchSigningKeyWithEmptyIdFails) {

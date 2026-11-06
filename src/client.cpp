@@ -2046,7 +2046,7 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
     }
 
     std::optional<std::string> extract_machine_file_key_id(const MachineFile& machine_file) const {
-        auto key_id = crypto::internal::extract_machine_file_key_id(machine_file);
+        auto key_id = crypto::machine_file_key_id(machine_file);
         return key_id.is_ok() ? std::optional<std::string>(key_id.value()) : std::nullopt;
     }
 

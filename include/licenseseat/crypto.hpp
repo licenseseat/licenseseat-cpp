@@ -70,10 +70,26 @@ namespace crypto {
                                                              const std::string& fingerprint,
                                                              const std::string& public_key_b64);
 
+/**
+ * @brief Read the signing-key identifier (`kid`) from a machine-file certificate
+ *
+ * Parses the certificate envelope with the same strict framing rules as
+ * verification. Nothing is verified: the returned identifier is untrusted and
+ * only selects which key to pin or fetch, e.g.
+ * `client.verify_machine_file(mf, client.fetch_signing_key(kid.value()).value())`.
+ * Works for a MachineFile from checkout_machine_file(), from storage, or one whose
+ * certificate you imported yourself. (A function rather than a MachineFile field so
+ * the struct layout, and therefore the v0.x binary interface, is unchanged.)
+ *
+ * @param machine_file Machine file whose `certificate` is set (other fields are ignored)
+ * @return Result<std::string> The envelope's `kid`, or a parse error
+ */
+[[nodiscard]] Result<std::string> machine_file_key_id(const MachineFile& machine_file);
+
 namespace internal {
 
-/// Parse a machine-file envelope using the same strict framing rules as
-/// verification and return its untrusted key identifier for key selection.
+/// Deprecated alias of crypto::machine_file_key_id(), kept for source compatibility
+/// with integrations written against v0.7.0 and earlier.
 [[nodiscard]] Result<std::string> extract_machine_file_key_id(const MachineFile& machine_file);
 
 } // namespace internal
