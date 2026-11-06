@@ -1208,6 +1208,42 @@ TEST_F(ClientTest, VerifyOfflineTokenNotYetValidFails) {
     // Token is not yet valid (nbf in future)
 }
 
+// license_seat #16: a zero-width window (nbf == exp) is never valid and must be
+// rejected as malformed claims, not merely as "expired".
+TEST_F(ClientTest, OfflineTokenWithZeroWidthValidityWindowIsRejected) {
+    auto offline = build_test_offline_token("KEY-123", config_.device_id, nullptr);
+    auto canonical = nlohmann::json::parse(offline.canonical);
+    const int64_t edge = canonical["exp"].get<int64_t>();
+    canonical["nbf"] = edge;
+    offline.token.nbf = edge;
+    offline.canonical = canonical.dump();
+    const std::array<unsigned char, 32> seed = {0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+                                                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+                                                0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
+                                                0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22};
+    std::array<unsigned char, 32> public_key{};
+    std::array<unsigned char, 64> signature{};
+    ASSERT_TRUE(test_signing::sign_ed25519(seed, offline.canonical, public_key, signature));
+    offline.signature.value =
+        crypto::base64url_encode(std::vector<uint8_t>(signature.begin(), signature.end()));
+    const auto key =
+        crypto::base64_encode(std::vector<uint8_t>(public_key.begin(), public_key.end()));
+
+    auto result = crypto::verify_offline_token_signature(offline, key);
+    ASSERT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::InvalidParameter);
+
+    // Control: the same re-signing with a one-second window passes the claim checks.
+    canonical["nbf"] = edge - 1;
+    offline.token.nbf = edge - 1;
+    offline.canonical = canonical.dump();
+    ASSERT_TRUE(test_signing::sign_ed25519(seed, offline.canonical, public_key, signature));
+    offline.signature.value =
+        crypto::base64url_encode(std::vector<uint8_t>(signature.begin(), signature.end()));
+    auto control = crypto::verify_offline_token_signature(offline, key);
+    EXPECT_TRUE(control.is_ok()) << control.error_message();
+}
+
 TEST_F(ClientTest, FetchSigningKeyWithEmptyIdFails) {
     Client client(config_);
     auto result = client.fetch_signing_key("");

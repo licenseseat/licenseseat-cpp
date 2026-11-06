@@ -724,6 +724,33 @@ TEST(MachineFileVerificationTest, ExactExpiryInstantIsExpired) {
     EXPECT_EQ(result.error_code(), ErrorCode::TokenExpired);
 }
 
+// Validity windows are half-open [nbf, exp): nbf == exp is a grant that is never
+// valid, and every LicenseSeat verifier must reject it (license_seat #16).
+TEST(MachineFileVerificationTest, RejectsZeroWidthValidityWindow) {
+    const auto now = std::time(nullptr);
+    const std::string license_key = "KEY-123";
+    const std::string fingerprint = "fp-12345";
+    // iat < nbf == exp, inside the 300 s not-before skew and before expiry: before
+    // this check the file was accepted for its grace period.
+    auto payload = build_minimal_machine_payload(license_key, fingerprint, now - 60, now + 60, 3600);
+    payload["meta"]["nbf"] = now + 60;
+
+    std::string public_key_b64;
+    MachineFile machine_file;
+    machine_file.certificate =
+        build_machine_file_certificate(license_key, fingerprint, payload, &public_key_b64);
+    auto result = verify_machine_file(machine_file, license_key, fingerprint, public_key_b64);
+    ASSERT_TRUE(result.is_error());
+    EXPECT_EQ(result.error_code(), ErrorCode::InvalidParameter);
+
+    // One second of width is a valid window.
+    payload["meta"]["nbf"] = now + 59;
+    machine_file.certificate =
+        build_machine_file_certificate(license_key, fingerprint, payload, &public_key_b64);
+    auto narrow = verify_machine_file(machine_file, license_key, fingerprint, public_key_b64);
+    EXPECT_TRUE(narrow.is_ok()) << narrow.error_message();
+}
+
 TEST(MachineFileVerificationTest, EmbeddedLicenseExpiryMustMatchTopLevelClaim) {
     const auto now = std::time(nullptr);
     const auto license_expiry = now + 86400;
