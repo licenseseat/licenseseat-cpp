@@ -6,6 +6,18 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ### Security
 
+- An authoritative server denial (`version_not_entitled`, `not_entitled`,
+  `product_mismatch`, `floating_not_implemented`, `named_user_not_implemented`, any
+  letter case, returned either as `200 valid:false` or as an HTTP error) is now
+  persisted as the current decision. A later outage or an offline relaunch no longer
+  falls back to the cached machine file or offline token and re-grants the license.
+  The offline artifacts are kept (a denial is not a revocation); the next successful
+  online validation clears the denial. Revocation still purges, and transport
+  failures without a recorded denial keep their existing fallback. Matches
+  licenseseat-swift #26.
+
+### Security
+
 - Reject a zero-width validity window (`nbf == exp`) in machine files and offline tokens.
   Windows are half-open `[nbf, exp)`, so such a grant is never valid; the machine-file
   check previously let one through for its grace period. Matches the Swift and Rust SDKs

@@ -1,7 +1,9 @@
 #include "PicoSHA2/picosha2.h"
 #include "test_signing.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -243,6 +245,12 @@ CachedLicense build_cached_license(const std::string& license_key, const std::st
     return cached;
 }
 
+std::string json_lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value;
+}
+
 class ClientTest : public ::testing::Test {
   protected:
     void SetUp() override {
@@ -296,6 +304,22 @@ class CustomerWorkflowReview : public ClientTest {
         });
         server_.Post("/api/v1/products/test_product/licenses/validate",
                      [&](const httplib::Request&, httplib::Response& res) {
+            if (deny_status_.load() == 200) {
+                nlohmann::json denial = {{"object", "validation_result"}, {"valid", false},
+                    {"code", deny_code_}, {"message", "Denied by the server"},
+                    {"license", {{"object", "license"}, {"key", "KEY-123"},
+                        {"status", "active"}, {"mode", "hardware_locked"}, {"plan_key", "pro"},
+                        {"product", {{"slug", "test_product"}, {"name", "Test Product"}}}}}};
+                res.set_content(denial.dump(), "application/json");
+                return;
+            }
+            if (deny_status_.load() != 0) {
+                nlohmann::json error = {{"error", {{"code", deny_code_},
+                    {"message", "Denied by the server"}}}};
+                res.status = deny_status_.load();
+                res.set_content(error.dump(), "application/json");
+                return;
+            }
             nlohmann::json j = {{"object", "validation_result"}, {"valid", true},
                 {"license", {{"object", "license"}, {"key", "KEY-123"},
                     {"status", "active"}, {"mode", "hardware_locked"}, {"plan_key", "pro"},
@@ -340,6 +364,9 @@ class CustomerWorkflowReview : public ClientTest {
     std::string public_key_;
     nlohmann::json id_ = "9d063849-d144-49a5-bf91-2af06e700421";
     std::atomic<int> checkouts_{0};
+    // 0 = validate succeeds; 200 = `200 valid:false` with deny_code_; other = HTTP error.
+    std::atomic<int> deny_status_{0};
+    std::string deny_code_ = "not_entitled";
 };
 
 TEST_F(CustomerWorkflowReview, UuidActivateVerifyAndDeactivateClearArtifacts) {
@@ -546,6 +573,103 @@ TEST_F(CustomerWorkflowReview, ActivationReportsUnwritableSessionAndSameDeviceCa
     ASSERT_TRUE(identity.has_value());
     EXPECT_EQ(identity->device_id, config_.device_id);
     EXPECT_FALSE(identity->validation.has_value());
+}
+
+// Authoritative denials (cross-SDK contract, licenseseat-swift #26): a server
+// verdict of not_entitled / version_not_entitled / product_mismatch /
+// floating_not_implemented / named_user_not_implemented must never be
+// overridden by the offline grant: not by a later outage, not after a
+// relaunch. The grant itself is kept (it is not a revocation).
+struct DenialCase {
+    int status;
+    const char* code;
+};
+
+class AuthoritativeDenialTest : public CustomerWorkflowReview,
+                                public ::testing::WithParamInterface<DenialCase> {};
+
+TEST_P(AuthoritativeDenialTest, IsNotOverriddenByOfflineGrant) {
+    const auto denial = GetParam();
+    config_.signing_public_key = public_key_;
+    deny_code_ = denial.code;
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        ASSERT_TRUE(client.validate("KEY-123").value().valid);
+        ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+
+        deny_status_ = denial.status;
+        auto denied = client.validate("KEY-123");
+        EXPECT_TRUE(denied.is_error() || !denied.value().valid);
+
+        // The grant is kept: a denial is not a revocation.
+        EXPECT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+
+        // Later outage in the same process.
+        server_.stop();
+        if (thread_.joinable()) thread_.join();
+        auto during_outage = client.validate("KEY-123");
+        EXPECT_TRUE(during_outage.is_error() || !during_outage.value().valid)
+            << "offline grant overrode the denial";
+        if (during_outage.is_ok()) {
+            EXPECT_EQ(during_outage.value().code, json_lower(denial.code));
+        }
+    }
+    // Relaunch while offline.
+    Client relaunched(config_);
+    auto restored = relaunched.restore_license();
+    EXPECT_FALSE(restored.success) << restored.message;
+    EXPECT_EQ(restored.status, ClientStatus::OfflineInvalid);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    CrossSdkContract, AuthoritativeDenialTest,
+    ::testing::Values(DenialCase{200, "not_entitled"}, DenialCase{200, "version_not_entitled"},
+                      DenialCase{200, "product_mismatch"},
+                      DenialCase{200, "FLOATING_NOT_IMPLEMENTED"},
+                      DenialCase{200, "named_user_not_implemented"},
+                      DenialCase{403, "not_entitled"}, DenialCase{403, "version_not_entitled"},
+                      DenialCase{422, "product_mismatch"},
+                      DenialCase{501, "floating_not_implemented"},
+                      DenialCase{501, "named_user_not_implemented"}),
+    [](const ::testing::TestParamInfo<DenialCase>& info) {
+        std::string name = std::to_string(info.param.status) + "_" + info.param.code;
+        for (auto& ch : name)
+            if (!std::isalnum(static_cast<unsigned char>(ch))) ch = '_';
+        return name;
+    });
+
+TEST_F(CustomerWorkflowReview, OnlineSuccessClearsARecordedDenial) {
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    deny_status_ = 200;
+    ASSERT_FALSE(client.validate("KEY-123").value().valid);
+    deny_status_ = 0;
+    ASSERT_TRUE(client.validate("KEY-123").value().valid);
+    server_.stop();
+    if (thread_.joinable()) thread_.join();
+    Client relaunched(config_);
+    auto restored = relaunched.restore_license();
+    EXPECT_TRUE(restored.success) << restored.message;
+    EXPECT_EQ(restored.status, ClientStatus::OfflineValid);
+}
+
+TEST_F(CustomerWorkflowReview, NonDenialErrorsKeepTheirOfflineFallback) {
+    // Only the listed codes are denials; an unrelated invalid result followed by
+    // an outage behaves exactly as before (here: the offline grant applies).
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    ASSERT_TRUE(client.validate("KEY-123").value().valid);
+    deny_status_ = 200;
+    deny_code_ = "some_other_reason";
+    ASSERT_FALSE(client.validate("KEY-123").value().valid);
+    server_.stop();
+    if (thread_.joinable()) thread_.join();
+    auto during_outage = client.validate("KEY-123");
+    ASSERT_TRUE(during_outage.is_ok()) << during_outage.error_message();
+    EXPECT_TRUE(during_outage.value().valid);
 }
 
 // ==================== Construction Tests ====================

@@ -359,6 +359,25 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                                   body, true);
 
         if (!response.success) {
+            // An authoritative denial (any status, e.g. 403 not_entitled, 422
+            // product_mismatch, 501 floating_not_implemented) is the decision:
+            // record it so no later outage or relaunch falls back past it.
+            if (response.status_code != 0) {
+                const auto denial_code = error_response_code(response);
+                if (denial_code.has_value() && is_authoritative_denial_code(*denial_code)) {
+                    auto err = handle_error_response<ValidationResult>(response);
+                    record_authoritative_denial(license_key, request.fingerprint, *denial_code,
+                                                err.error_message());
+                    ValidationResult denied;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        denied = *cached_validation_;
+                    }
+                    event_bus_.emit(events::VALIDATION_FAILED, denied);
+                    return err;
+                }
+            }
+
             // Check for authentication failure (401) - emit auth-failed event (matches Swift SDK)
             if (response.status_code == 401 || response.status_code == 403) {
                 auto err = handle_error_response<ValidationResult>(response);
@@ -502,6 +521,10 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                 update_storage_license(license_key, request.fingerprint, result);
                 event_bus_.emit(events::VALIDATION_SUCCESS, result);
             } else {
+                if (is_authoritative_denial_code(result.code)) {
+                    record_authoritative_denial(license_key, request.fingerprint, result.code,
+                                                result.message);
+                }
                 event_bus_.emit(events::VALIDATION_FAILED, result);
             }
 
@@ -1906,6 +1929,72 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
         return code == "revoked" || code == "suspended";
     }
 
+    // Server verdicts that the license does not cover this use. They are not
+    // revocations (the grant is kept), but no offline grant may override them,
+    // in the same process or after a relaunch, until an online validation
+    // succeeds again. Same set as licenseseat-swift APIError.isAuthoritativeDenial.
+    static std::string lowercase_ascii(std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+            return static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch);
+        });
+        return value;
+    }
+
+    static bool is_authoritative_denial_code(const std::string& code) {
+        const auto lowered = lowercase_ascii(code);
+        return lowered == "version_not_entitled" || lowered == "not_entitled" ||
+               lowered == "product_mismatch" || lowered == "floating_not_implemented" ||
+               lowered == "named_user_not_implemented";
+    }
+
+    static std::optional<std::string> error_response_code(const http::Response& response) {
+        try {
+            auto api_error = json::parse_error_response(json::parse_strict(response.body));
+            if (!api_error.code.empty() && is_safe_text(api_error.code, 100))
+                return api_error.code;
+        } catch (...) {
+        }
+        return std::nullopt;
+    }
+
+    /// Persist an authoritative denial as the current decision. Offline
+    /// artifacts are deliberately left in place: this is not a revocation.
+    void record_authoritative_denial(const std::string& license_key, const std::string& fingerprint,
+                                     const std::string& code, const std::string& message) {
+        ValidationResult denial;
+        denial.valid = false;
+        denial.offline = false;
+        denial.code = lowercase_ascii(code);
+        denial.message = message;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_validation_ = denial;
+            cached_license_.reset();
+        }
+        auto stored = storage_->get_license();
+        CachedLicense record;
+        if (stored.has_value() && constant_time_equal(stored->license_key, license_key)) {
+            record = *stored;
+        } else {
+            record.license_key = license_key;
+            record.device_id = fingerprint;
+            record.activated_at = std::chrono::system_clock::now();
+        }
+        record.last_validated = std::chrono::system_clock::now();
+        record.validation = denial;
+        (void)storage_->set_license(record);
+    }
+
+    /// A recorded authoritative denial, if the persisted decision is one.
+    std::optional<ValidationResult> recorded_authoritative_denial() const {
+        auto stored = storage_->get_license();
+        if (stored.has_value() && stored->validation.has_value() && !stored->validation->valid &&
+            is_authoritative_denial_code(stored->validation->code)) {
+            return stored->validation;
+        }
+        return std::nullopt;
+    }
+
     // Check if the HTTP error indicates license revocation (for non-validate endpoints)
     // 422 = unprocessable_entity (license errors like revoked, expired, suspended)
     // But NOT 401 (unauthorized), 404 (not found), 429 (rate limit)
@@ -2365,6 +2454,16 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
     }
 
     Result<ValidationResult> verify_cached_offline() {
+        if (auto denial = recorded_authoritative_denial()) {
+            ValidationResult result;
+            result.valid = false;
+            result.offline = true;
+            result.code = denial->code;
+            result.message = "The server denied this license (" + denial->code +
+                             "); offline artifacts cannot override that decision until an "
+                             "online validation succeeds";
+            return Result<ValidationResult>::ok(std::move(result));
+        }
         auto machine_result = verify_cached_machine_file();
         if (machine_result.is_ok() && machine_result.value().valid) {
             return machine_result;
