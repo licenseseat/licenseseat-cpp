@@ -1,7 +1,13 @@
 #include "PicoSHA2/picosha2.h"
 #include "test_signing.hpp"
 
+#include <algorithm>
 #include <array>
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+#include <cctype>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -246,6 +252,12 @@ CachedLicense build_cached_license(const std::string& license_key, const std::st
     return cached;
 }
 
+std::string json_lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value;
+}
+
 class ClientTest : public ::testing::Test {
   protected:
     void SetUp() override {
@@ -299,6 +311,26 @@ class CustomerWorkflowReview : public ClientTest {
         });
         server_.Post("/api/v1/products/test_product/licenses/validate",
                      [&](const httplib::Request&, httplib::Response& res) {
+            if (stall_validate_.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                return;
+            }
+            if (deny_status_.load() == 200) {
+                nlohmann::json denial = {{"object", "validation_result"}, {"valid", false},
+                    {"code", deny_code_}, {"message", "Denied by the server"},
+                    {"license", {{"object", "license"}, {"key", "KEY-123"},
+                        {"status", "active"}, {"mode", "hardware_locked"}, {"plan_key", "pro"},
+                        {"product", {{"slug", "test_product"}, {"name", "Test Product"}}}}}};
+                res.set_content(denial.dump(), "application/json");
+                return;
+            }
+            if (deny_status_.load() != 0) {
+                nlohmann::json error = {{"error", {{"code", deny_code_},
+                    {"message", "Denied by the server"}}}};
+                res.status = deny_status_.load();
+                res.set_content(error.dump(), "application/json");
+                return;
+            }
             nlohmann::json j = {{"object", "validation_result"}, {"valid", true},
                 {"license", {{"object", "license"}, {"key", "KEY-123"},
                     {"status", "active"}, {"mode", "hardware_locked"}, {"plan_key", "pro"},
@@ -343,6 +375,11 @@ class CustomerWorkflowReview : public ClientTest {
     std::string public_key_;
     nlohmann::json id_ = "9d063849-d144-49a5-bf91-2af06e700421";
     std::atomic<int> checkouts_{0};
+    // 0 = validate succeeds; 200 = `200 valid:false` with deny_code_; other = HTTP error.
+    std::atomic<int> deny_status_{0};
+    std::string deny_code_ = "not_entitled";
+    // Stall validate past the client timeout to produce a transport failure.
+    std::atomic<bool> stall_validate_{false};
 };
 
 TEST_F(CustomerWorkflowReview, UuidActivateVerifyAndDeactivateClearArtifacts) {
@@ -552,6 +589,266 @@ TEST_F(CustomerWorkflowReview, ActivationReportsUnwritableSessionAndSameDeviceCa
     ASSERT_TRUE(identity.has_value());
     EXPECT_EQ(identity->device_id, config_.device_id);
     EXPECT_FALSE(identity->validation.has_value());
+}
+
+// Authoritative denials (cross-SDK contract, licenseseat-swift #26): a server
+// verdict of not_entitled / version_not_entitled / product_mismatch /
+// floating_not_implemented / named_user_not_implemented must never be
+// overridden by the offline grant: not by a later outage, not after a
+// relaunch. The grant itself is kept (it is not a revocation).
+struct DenialCase {
+    int status;
+    const char* code;
+};
+
+class AuthoritativeDenialTest : public CustomerWorkflowReview,
+                                public ::testing::WithParamInterface<DenialCase> {};
+
+TEST_P(AuthoritativeDenialTest, IsNotOverriddenByOfflineGrant) {
+    const auto denial = GetParam();
+    config_.signing_public_key = public_key_;
+    deny_code_ = denial.code;
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        ASSERT_TRUE(client.validate("KEY-123").value().valid);
+        ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+
+        deny_status_ = denial.status;
+        auto denied = client.validate("KEY-123");
+        EXPECT_TRUE(denied.is_error() || !denied.value().valid);
+
+        // The grant is kept: a denial is not a revocation.
+        EXPECT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+
+        // Later outage in the same process.
+        server_.stop();
+        if (thread_.joinable()) thread_.join();
+        auto during_outage = client.validate("KEY-123");
+        EXPECT_TRUE(during_outage.is_error() || !during_outage.value().valid)
+            << "offline grant overrode the denial";
+        if (during_outage.is_ok()) {
+            EXPECT_EQ(during_outage.value().code, json_lower(denial.code));
+        }
+    }
+    // Relaunch while offline.
+    Client relaunched(config_);
+    auto restored = relaunched.restore_license();
+    EXPECT_FALSE(restored.success) << restored.message;
+    EXPECT_EQ(restored.status, ClientStatus::OfflineInvalid);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    CrossSdkContract, AuthoritativeDenialTest,
+    ::testing::Values(DenialCase{200, "not_entitled"}, DenialCase{200, "version_not_entitled"},
+                      DenialCase{200, "product_mismatch"},
+                      DenialCase{200, "FLOATING_NOT_IMPLEMENTED"},
+                      DenialCase{200, "named_user_not_implemented"},
+                      DenialCase{403, "not_entitled"}, DenialCase{403, "version_not_entitled"},
+                      DenialCase{422, "product_mismatch"},
+                      DenialCase{501, "floating_not_implemented"},
+                      DenialCase{501, "named_user_not_implemented"}),
+    [](const ::testing::TestParamInfo<DenialCase>& info) {
+        std::string name = std::to_string(info.param.status) + "_" + info.param.code;
+        for (auto& ch : name)
+            if (!std::isalnum(static_cast<unsigned char>(ch))) ch = '_';
+        return name;
+    });
+
+TEST_F(CustomerWorkflowReview, OnlineSuccessClearsARecordedDenial) {
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    deny_status_ = 200;
+    ASSERT_FALSE(client.validate("KEY-123").value().valid);
+    deny_status_ = 0;
+    ASSERT_TRUE(client.validate("KEY-123").value().valid);
+    server_.stop();
+    if (thread_.joinable()) thread_.join();
+    // Same process: the in-memory denial latch is released by the success.
+    auto during_outage = client.validate("KEY-123");
+    ASSERT_TRUE(during_outage.is_ok()) << during_outage.error_message();
+    EXPECT_TRUE(during_outage.value().valid) << during_outage.value().code;
+    Client relaunched(config_);
+    auto restored = relaunched.restore_license();
+    EXPECT_TRUE(restored.success) << restored.message;
+    EXPECT_EQ(restored.status, ClientStatus::OfflineValid);
+}
+
+TEST_F(CustomerWorkflowReview, UnpersistableDenialRetiresTheOfflineGrant) {
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+    // Make the license record unwritable: a directory where the file must be replaced.
+    const auto license_file = path_ / "licenseseat_license.json";
+    std::filesystem::remove(license_file);
+    std::filesystem::create_directories(license_file);
+    deny_status_ = 403;
+    EXPECT_TRUE(client.validate("KEY-123").is_error());
+    EXPECT_FALSE(FileStorage(path_.string()).get_machine_file().has_value());
+    std::filesystem::remove(license_file);
+}
+
+// Codex round 1, item 1: a denial that cannot be persisted at all (immutable
+// cache directory: neither the record nor the artifact deletion can be
+// written) still holds for the rest of the process, while the grant stays on disk.
+// Documented limitation: it does not survive the process (see CHANGELOG).
+TEST_F(CustomerWorkflowReview, DenialHoldsInProcessWhenTheCacheIsImmutable) {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+    config_.signing_public_key = public_key_;
+    struct Immutable {
+        std::string path;
+        ~Immutable() { (void)::chflags(path.c_str(), 0); }
+    } guard{path_.string()};
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    ASSERT_TRUE(client.validate("KEY-123").value().valid);
+    ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+
+    // FileStorage restores directory permissions itself; only the immutable
+    // flag makes every write and every deletion fail.
+    ASSERT_EQ(::chflags(path_.c_str(), UF_IMMUTABLE), 0);
+    deny_status_ = 403;
+    EXPECT_TRUE(client.validate("KEY-123").is_error());
+    // Nothing could be written or retired: the in-memory hold is all that is left.
+    ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+    auto record = FileStorage(path_.string()).get_license();
+    ASSERT_TRUE(record.has_value() && record->validation.has_value());
+    ASSERT_TRUE(record->validation->valid) << "the denial unexpectedly reached disk";
+
+    server_.stop();
+    if (thread_.joinable()) thread_.join();
+    auto during_outage = client.validate("KEY-123");
+    EXPECT_TRUE(during_outage.is_error() || !during_outage.value().valid)
+        << "offline grant overrode an unpersisted denial";
+    auto restored = client.restore_license();
+    EXPECT_FALSE(restored.success) << restored.message;
+    EXPECT_NE(client.get_client_status(), ClientStatus::OfflineValid);
+#else
+    GTEST_SKIP() << "needs chflags(UF_IMMUTABLE) to make the cache directory immutable";
+#endif
+}
+
+// Offline grants stay fail-open on storage errors (orchestrator decision): a
+// cache that cannot record the last-seen time (full disk, read-only folder)
+// must not lock out a licensed user when no denial is held.
+TEST_F(CustomerWorkflowReview, OfflineGrantSurvivesAnUnwritableLastSeenTime) {
+    config_.signing_public_key = public_key_;
+    const auto timestamp_file = path_ / "licenseseat_timestamp.json";
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        ASSERT_TRUE(client.validate("KEY-123").value().valid);
+        // A directory where the file must be replaced: every last-seen write fails.
+        std::filesystem::remove(timestamp_file);
+        std::filesystem::create_directories(timestamp_file);
+        ASSERT_FALSE(FileStorage(path_.string()).set_last_seen_timestamp(1.0));
+
+        server_.stop();
+        if (thread_.joinable()) thread_.join();
+        auto during_outage = client.validate("KEY-123");
+        ASSERT_TRUE(during_outage.is_ok()) << during_outage.error_message();
+        EXPECT_TRUE(during_outage.value().valid) << during_outage.value().code;
+    }
+    Client relaunched(config_);
+    auto restored = relaunched.restore_license();
+    EXPECT_TRUE(restored.success) << restored.message;
+    EXPECT_EQ(restored.status, ClientStatus::OfflineValid);
+    std::filesystem::remove(timestamp_file);
+}
+
+// Codex round 1, item 1 (second reproduction): the artifacts are retired but
+// the denial record stays unwritable; a later checkout must not replenish the
+// offline grant behind the denial's back.
+TEST_F(CustomerWorkflowReview, UnpersistedDenialBlocksAReplenishedGrant) {
+    config_.signing_public_key = public_key_;
+    const auto license_file = path_ / "licenseseat_license.json";
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        std::filesystem::remove(license_file);
+        std::filesystem::create_directories(license_file);
+        deny_status_ = 403;
+        EXPECT_TRUE(client.validate("KEY-123").is_error());
+        ASSERT_FALSE(FileStorage(path_.string()).get_machine_file().has_value());
+
+        auto replenished = client.checkout_machine_file("KEY-123");
+        EXPECT_TRUE(replenished.is_error());
+        EXPECT_FALSE(FileStorage(path_.string()).get_machine_file().has_value())
+            << "a new offline grant was stored behind an unpersisted denial";
+
+        server_.stop();
+        if (thread_.joinable()) thread_.join();
+        auto during_outage = client.validate("KEY-123");
+        EXPECT_TRUE(during_outage.is_error() || !during_outage.value().valid);
+    }
+    Client relaunched(config_);
+    auto restored = relaunched.restore_license();
+    EXPECT_FALSE(restored.success) << restored.message;
+    std::filesystem::remove(license_file);
+}
+
+// Codex round 1, item 2: a denial recorded while offline verification is in
+// flight (here from a synchronous MACHINE_FILE_VERIFIED handler) wins over the
+// verification result, on both the restore and the validate-fallback paths.
+TEST_F(CustomerWorkflowReview, DenialDuringOfflineRestoreWins) {
+    config_.signing_public_key = public_key_;
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        ASSERT_TRUE(client.validate("KEY-123").value().valid);
+    }
+    // No /health route: restore takes the offline path while validate still answers.
+    Client client(config_);
+    std::atomic<bool> denied{false};
+    client.on(events::MACHINE_FILE_VERIFIED, [&](const std::any&) {
+        if (denied.exchange(true)) return;
+        deny_status_ = 200;
+        EXPECT_FALSE(client.validate("KEY-123").value().valid);
+    });
+    auto restored = client.restore_license();
+    ASSERT_TRUE(denied.load());
+    EXPECT_FALSE(restored.success) << restored.message;
+    EXPECT_NE(client.get_client_status(), ClientStatus::OfflineValid);
+}
+
+TEST_F(CustomerWorkflowReview, DenialDuringOfflineFallbackWins) {
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    ASSERT_TRUE(client.validate("KEY-123").value().valid);
+    std::atomic<bool> denied{false};
+    client.on(events::MACHINE_FILE_VERIFIED, [&](const std::any&) {
+        if (denied.exchange(true)) return;
+        stall_validate_ = false;
+        deny_status_ = 200;
+        EXPECT_FALSE(client.validate("KEY-123").value().valid);
+    });
+    // The outer request times out (a transport failure, so it falls back offline);
+    // the nested request from the handler is answered at once.
+    stall_validate_ = true;
+    auto result = client.validate("KEY-123");
+    ASSERT_TRUE(denied.load());
+    EXPECT_TRUE(result.is_error() || !result.value().valid) << "fallback overrode the denial";
+    EXPECT_NE(client.get_client_status(), ClientStatus::OfflineValid);
+}
+
+TEST_F(CustomerWorkflowReview, NonDenialErrorsKeepTheirOfflineFallback) {
+    // Only the listed codes are denials; an unrelated invalid result followed by
+    // an outage behaves exactly as before (here: the offline grant applies).
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    ASSERT_TRUE(client.validate("KEY-123").value().valid);
+    deny_status_ = 200;
+    deny_code_ = "some_other_reason";
+    ASSERT_FALSE(client.validate("KEY-123").value().valid);
+    server_.stop();
+    if (thread_.joinable()) thread_.join();
+    auto during_outage = client.validate("KEY-123");
+    ASSERT_TRUE(during_outage.is_ok()) << during_outage.error_message();
+    EXPECT_TRUE(during_outage.value().valid);
 }
 
 // Issue #29: an unpinned cold start must fail with an actionable diagnosis, and

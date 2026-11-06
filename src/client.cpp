@@ -359,6 +359,20 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                                   body, true);
 
         if (!response.success) {
+            // An authoritative denial (any status, e.g. 403 not_entitled, 422
+            // product_mismatch, 501 floating_not_implemented) is the decision:
+            // record it so no later outage or relaunch falls back past it.
+            if (response.status_code != 0) {
+                const auto denial_code = error_response_code(response);
+                if (denial_code.has_value() && is_authoritative_denial_code(*denial_code)) {
+                    auto err = handle_error_response<ValidationResult>(response);
+                    const auto denied = record_authoritative_denial(
+                        license_key, request.fingerprint, *denial_code, err.error_message());
+                    event_bus_.emit(events::VALIDATION_FAILED, denied);
+                    return err;
+                }
+            }
+
             // Check for authentication failure (401) - emit auth-failed event (matches Swift SDK)
             if (response.status_code == 401 || response.status_code == 403) {
                 auto err = handle_error_response<ValidationResult>(response);
@@ -392,15 +406,28 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             // Check if we should fallback to offline
             if (should_fallback_to_offline(response)) {
                 auto offline_result = verify_cached_offline();
+                bool should_emit_network_offline = false;
                 if (offline_result.is_ok() && offline_result.value().valid) {
-                    // Update cached state so get_client_status() returns OfflineValid
-                    bool should_emit_network_offline = false;
+                    // Update cached state so get_client_status() returns OfflineValid,
+                    // unless a denial was latched after verification (checked
+                    // under the same lock the latch is set with).
+                    std::optional<ValidationResult> late_denial;
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
-                        cached_validation_ = offline_result.value();
-                        is_online_ = false;
-                        should_emit_network_offline = request.was_online;
+                        if (denial_latch_.has_value()) {
+                            late_denial = denial_latch_;
+                        } else {
+                            cached_validation_ = offline_result.value();
+                            is_online_ = false;
+                            should_emit_network_offline = request.was_online;
+                        }
                     }
+                    if (late_denial.has_value()) {
+                        offline_result =
+                            Result<ValidationResult>::ok(denied_offline_result(*late_denial));
+                    }
+                }
+                if (offline_result.is_ok() && offline_result.value().valid) {
                     if (should_emit_network_offline) {
                         event_bus_.emit(events::NETWORK_OFFLINE,
                                         std::map<std::string, std::string>{});
@@ -499,9 +526,14 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             }
 
             if (result.valid) {
+                clear_denial_latch();
                 update_storage_license(license_key, request.fingerprint, result);
                 event_bus_.emit(events::VALIDATION_SUCCESS, result);
             } else {
+                if (is_authoritative_denial_code(result.code)) {
+                    record_authoritative_denial(license_key, request.fingerprint, result.code,
+                                                result.message);
+                }
                 event_bus_.emit(events::VALIDATION_FAILED, result);
             }
 
@@ -643,6 +675,8 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                 current_activation_.reset();
                 cached_license_.reset();
                 cached_validation_.reset();
+                denial_latch_.reset();
+                denial_persisted_ = false;
             }
             storage_->clear_license();
             storage_->clear_offline_token();
@@ -823,7 +857,8 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                                          : verification.error_message());
             }
 
-            if (constant_time_equal(request.fingerprint, device_id_)) {
+            if (constant_time_equal(request.fingerprint, device_id_) &&
+                may_store_offline_artifact()) {
                 storage_->set_offline_token(offline);
             }
 
@@ -912,6 +947,13 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             if (!verification.is_ok()) {
                 return Result<MachineFile>::error(verification.error_code(),
                                                   verification.error_message());
+            }
+            if (constant_time_equal(request.fingerprint, device_id_) &&
+                !may_store_offline_artifact()) {
+                return Result<MachineFile>::error(
+                    ErrorCode::FileError,
+                    "Machine file not saved: an authoritative denial is in force and could "
+                    "not be persisted");
             }
             if (constant_time_equal(request.fingerprint, device_id_) &&
                 !storage_->set_machine_file(machine_file)) {
@@ -1181,6 +1223,24 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
         } else {
             // Step 3b: Offline - verify cached offline token
             auto offline_result = verify_cached_offline();
+            if (offline_result.is_ok() && offline_result.value().valid) {
+                // Commit under the lock the denial latch is set with, so a
+                // denial recorded after verification is never overwritten.
+                std::optional<ValidationResult> late_denial;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (denial_latch_.has_value()) {
+                        late_denial = denial_latch_;
+                    } else {
+                        cached_license_ = offline_result.value().license;
+                        cached_validation_ = offline_result.value();
+                    }
+                }
+                if (late_denial.has_value()) {
+                    offline_result =
+                        Result<ValidationResult>::ok(denied_offline_result(*late_denial));
+                }
+            }
 
             RestoreResult result;
             if (offline_result.is_ok() && offline_result.value().valid) {
@@ -1188,13 +1248,6 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                 result.status = ClientStatus::OfflineValid;
                 result.license = offline_result.value().license;
                 result.message = "License restored from offline cache";
-
-                // Update cached state
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    cached_license_ = offline_result.value().license;
-                    cached_validation_ = offline_result.value();
-                }
 
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -1848,6 +1901,8 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             std::lock_guard<std::mutex> lock(mutex_);
             cached_license_.reset();
             cached_validation_.reset();
+            denial_latch_.reset();
+            denial_persisted_ = false;
             current_activation_.reset();
             current_auto_license_key_.clear();
             current_heartbeat_license_key_.clear();
@@ -1928,6 +1983,124 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
         return code == "revoked" || code == "suspended";
     }
 
+    // Server verdicts that the license does not cover this use. They are not
+    // revocations (the grant is kept), but no offline grant may override them,
+    // in the same process or after a relaunch, until an online validation
+    // succeeds again. Same set as licenseseat-swift APIError.isAuthoritativeDenial.
+    static std::string lowercase_ascii(std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+            return static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch);
+        });
+        return value;
+    }
+
+    static bool is_authoritative_denial_code(const std::string& code) {
+        const auto lowered = lowercase_ascii(code);
+        return lowered == "version_not_entitled" || lowered == "not_entitled" ||
+               lowered == "product_mismatch" || lowered == "floating_not_implemented" ||
+               lowered == "named_user_not_implemented";
+    }
+
+    static std::optional<std::string> error_response_code(const http::Response& response) {
+        try {
+            auto api_error = json::parse_error_response(json::parse_strict(response.body));
+            if (!api_error.code.empty() && is_safe_text(api_error.code, 100))
+                return api_error.code;
+        } catch (...) {
+        }
+        return std::nullopt;
+    }
+
+    /// Persist an authoritative denial as the current decision. Offline
+    /// artifacts are deliberately left in place: this is not a revocation.
+    ValidationResult record_authoritative_denial(const std::string& license_key,
+                                                 const std::string& fingerprint,
+                                                 const std::string& code,
+                                                 const std::string& message) {
+        ValidationResult denial;
+        denial.valid = false;
+        denial.offline = false;
+        denial.code = lowercase_ascii(code);
+        denial.message = message;
+        {
+            // Latch before touching disk, so a concurrent offline verification
+            // that commits after this point sees the denial.
+            std::lock_guard<std::mutex> lock(mutex_);
+            cached_validation_ = denial;
+            cached_license_.reset();
+            denial_latch_ = denial;
+            denial_persisted_ = false;
+        }
+        auto stored = storage_->get_license();
+        CachedLicense record;
+        if (stored.has_value() && constant_time_equal(stored->license_key, license_key)) {
+            record = *stored;
+        } else {
+            record.license_key = license_key;
+            record.device_id = fingerprint;
+            record.activated_at = std::chrono::system_clock::now();
+        }
+        record.last_validated = std::chrono::system_clock::now();
+        record.validation = denial;
+        if (storage_->set_license(record)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (denial_latch_.has_value())
+                denial_persisted_ = true;
+        } else {
+            // A denial that cannot be persisted must not let a relaunch revive
+            // the grant: retire the offline artifacts instead (fail closed).
+            // If even that fails (an unwritable cache), the in-memory latch
+            // holds only until the process exits: a relaunch on the same cache
+            // can grant from the surviving artifacts until the next online
+            // check. Offline grants deliberately stay fail-open on storage
+            // errors, so a full disk or read-only cache never locks out a
+            // licensed user who is offline.
+            storage_->clear_machine_file();
+            storage_->clear_offline_token();
+        }
+        return denial;
+    }
+
+    void clear_denial_latch() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        denial_latch_.reset();
+        denial_persisted_ = false;
+    }
+
+    /// False while a denial is latched in memory but not on disk: storing a
+    /// new offline artifact then would let a relaunch grant past the denial.
+    bool may_store_offline_artifact() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return !denial_latch_.has_value() || denial_persisted_;
+    }
+
+    static ValidationResult denied_offline_result(const ValidationResult& denial) {
+        ValidationResult result;
+        result.valid = false;
+        result.offline = true;
+        result.code = denial.code;
+        result.message = "The server denied this license (" + denial.code +
+                         "); offline artifacts cannot override that decision until an "
+                         "online validation succeeds";
+        return result;
+    }
+
+    /// The authoritative denial in force: the in-process latch, else the
+    /// persisted decision if it is one.
+    std::optional<ValidationResult> recorded_authoritative_denial() const {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (denial_latch_.has_value())
+                return denial_latch_;
+        }
+        auto stored = storage_->get_license();
+        if (stored.has_value() && stored->validation.has_value() && !stored->validation->valid &&
+            is_authoritative_denial_code(stored->validation->code)) {
+            return stored->validation;
+        }
+        return std::nullopt;
+    }
+
     // Check if the HTTP error indicates license revocation (for non-validate endpoints)
     // 422 = unprocessable_entity (license errors like revoked, expired, suspended)
     // But NOT 401 (unauthorized), 404 (not found), 429 (rate limit)
@@ -1953,6 +2126,8 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             std::lock_guard<std::mutex> lock(mutex_);
             cached_license_.reset();
             cached_validation_.reset();
+            denial_latch_.reset();
+            denial_persisted_ = false;
             current_activation_.reset();
             current_auto_license_key_.clear();
             current_heartbeat_license_key_.clear();
@@ -2215,8 +2390,11 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                config_.max_offline_days > 0;
     }
 
+    /// Advance the clock-tamper anchor after an offline grant.
     void update_last_seen(int64_t now_unix) {
-        storage_->set_last_seen_timestamp(static_cast<double>(now_unix));
+        // Best effort: a cache that cannot be written (full disk, read-only
+        // folder) must not refuse an offline grant on its own.
+        (void)storage_->set_last_seen_timestamp(static_cast<double>(now_unix));
     }
 
     License fallback_license_for_machine_payload(
@@ -2467,6 +2645,21 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
     }
 
     Result<ValidationResult> verify_cached_offline() {
+        if (auto denial = recorded_authoritative_denial()) {
+            return Result<ValidationResult>::ok(denied_offline_result(*denial));
+        }
+        auto result = verify_cached_offline_artifacts();
+        // Verification emits events synchronously and may run concurrently
+        // with validate(): a denial recorded meanwhile wins over its result.
+        if (result.is_ok() && result.value().valid) {
+            if (auto denial = recorded_authoritative_denial()) {
+                return Result<ValidationResult>::ok(denied_offline_result(*denial));
+            }
+        }
+        return result;
+    }
+
+    Result<ValidationResult> verify_cached_offline_artifacts() {
         auto machine_result = verify_cached_machine_file();
         if (machine_result.is_ok() && machine_result.value().valid) {
             return machine_result;
@@ -2841,6 +3034,11 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
     std::optional<Activation> current_activation_;
     std::optional<License> cached_license_;
     std::optional<ValidationResult> cached_validation_;
+    // In-process authoritative denial (guarded by mutex_). It holds even when
+    // the denial record could not be written, and only an online validation
+    // success, deactivation, revocation or reset() clears it.
+    std::optional<ValidationResult> denial_latch_;
+    bool denial_persisted_ = false;
     std::unordered_map<std::string, std::string> trusted_signing_keys_;
     mutable std::mutex mutex_;
 
