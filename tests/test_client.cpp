@@ -655,6 +655,21 @@ TEST_F(CustomerWorkflowReview, OnlineSuccessClearsARecordedDenial) {
     EXPECT_EQ(restored.status, ClientStatus::OfflineValid);
 }
 
+TEST_F(CustomerWorkflowReview, UnpersistableDenialRetiresTheOfflineGrant) {
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+    // Make the license record unwritable: a directory where the file must be replaced.
+    const auto license_file = path_ / "licenseseat_license.json";
+    std::filesystem::remove(license_file);
+    std::filesystem::create_directories(license_file);
+    deny_status_ = 403;
+    EXPECT_TRUE(client.validate("KEY-123").is_error());
+    EXPECT_FALSE(FileStorage(path_.string()).get_machine_file().has_value());
+    std::filesystem::remove(license_file);
+}
+
 TEST_F(CustomerWorkflowReview, NonDenialErrorsKeepTheirOfflineFallback) {
     // Only the listed codes are denials; an unrelated invalid result followed by
     // an outage behaves exactly as before (here: the offline grant applies).

@@ -1979,7 +1979,12 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
         }
         record.last_validated = std::chrono::system_clock::now();
         record.validation = denial;
-        (void)storage_->set_license(record);
+        if (!storage_->set_license(record)) {
+            // A denial that cannot be persisted must not let a relaunch revive
+            // the grant: retire the offline artifacts instead (fail closed).
+            storage_->clear_machine_file();
+            storage_->clear_offline_token();
+        }
         return denial;
     }
 
