@@ -220,6 +220,13 @@ constexpr const char* MACHINE_FILE_FETCH_ERROR = "machineFile:fetchError";
 constexpr const char* MACHINE_FILE_READY = "machineFile:ready";
 constexpr const char* MACHINE_FILE_VERIFIED = "machineFile:verified";
 constexpr const char* MACHINE_FILE_VERIFICATION_FAILED = "machineFile:verificationFailed";
+/// Emitted by checkout_machine_file() when offline fallback is enabled but no
+/// Config::signing_public_key is pinned. The machine file was verified with a key
+/// fetched online, which is trusted only for this Client's lifetime, so a fresh
+/// process started offline will NOT be able to verify it. Payload:
+/// std::map<std::string, std::string> with "kid", "publicKey" (the value to pin)
+/// and "message".
+constexpr const char* MACHINE_FILE_SIGNING_KEY_UNPINNED = "machineFile:signingKeyUnpinned";
 
 // Heartbeat events
 constexpr const char* HEARTBEAT_SUCCESS = "heartbeat:success";

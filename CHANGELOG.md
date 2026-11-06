@@ -13,6 +13,29 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
   The `kid` is untrusted selection data, not a trust anchor. It is a function rather
   than a `MachineFile` field so the struct layout, and the binary interface, stay
   unchanged (#30).
+- `events::MACHINE_FILE_SIGNING_KEY_UNPINNED` (`machineFile:signingKeyUnpinned`):
+  `checkout_machine_file()` emits it when offline fallback is enabled but no
+  `Config::signing_public_key` is pinned. The payload carries the certificate's `kid`
+  and the `publicKey` to pin, so the gap is visible during online provisioning rather
+  than at the first offline cold start (#29).
+
+### Changed
+
+- An unpinned offline cold start now reports `no_public_key` for cached machine files
+  (previously `missing_parameter`), matching the offline-token path, and
+  `restore_license()` messages include the cause. Verification errors keep the
+  `Public key required for machine file verification` prefix and now name the
+  certificate's key id and the exact `GET <api_url>/signing_keys/<kid>` to pin, or the
+  `signing_key_id` mismatch when a pinned key does not match the certificate (#29).
+- Decision recorded for #29: keys fetched online stay process-local and keys on disk are
+  never trusted. Persisting a fetched key in the cache (trust on first use) would let
+  anyone who can write the cache directory plant a key and a self-signed machine file
+  together. A restore-time fetch would only help when the API is partly reachable: the
+  health check fails while the key endpoint answers, or the health check succeeds but
+  validation then times out or fails in transport. It never helps on a genuinely offline
+  start, which is the case machine files exist for. In the partial cases an explicit
+  `fetch_signing_key()` already recovers for the running process. Pinning
+  `signing_public_key` remains the offline trust anchor.
 
 ### Security
 
