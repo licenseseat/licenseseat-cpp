@@ -17,11 +17,14 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
   licenseseat-swift #26.
 - The denial also holds when it cannot be written to disk: it is latched in memory
   until an online validation succeeds, no new machine file or offline token is
-  stored behind an unpersisted denial, and an offline grant now requires a writable
-  cache (`storage_unwritable` otherwise), so a relaunch on a cache that could not
-  record the denial cannot grant either. A denial recorded while offline
-  verification is in flight (from an event handler or another thread) wins over
-  that verification's result.
+  stored behind an unpersisted denial, and the offline artifacts are retired when
+  they can be. A denial recorded while offline verification is in flight (from an
+  event handler or another thread) wins over that verification's result.
+  Known limitation: if the cache can neither record the denial nor delete the
+  artifacts, the denial lasts only until the process exits; a relaunch on that
+  cache can grant offline again until the next online check. Offline grants stay
+  fail-open on storage errors on purpose, so a full disk or a read-only cache
+  folder never locks a licensed user out while offline.
 - Reject a zero-width validity window (`nbf == exp`) in machine files and offline tokens.
   Windows are half-open `[nbf, exp)`, so such a grant is never valid; the machine-file
   check previously let one through for its grace period. Matches the Swift and Rust SDKs

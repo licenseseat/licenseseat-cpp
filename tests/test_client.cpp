@@ -686,41 +686,70 @@ TEST_F(CustomerWorkflowReview, UnpersistableDenialRetiresTheOfflineGrant) {
 
 // Codex round 1, item 1: a denial that cannot be persisted at all (immutable
 // cache directory: neither the record nor the artifact deletion can be
-// written) must still hold for the rest of the process and after a relaunch.
-TEST_F(CustomerWorkflowReview, DenialHoldsWhenTheCacheIsImmutable) {
+// written) still holds for the rest of the process, while the grant stays on disk.
+// Documented limitation: it does not survive the process (see CHANGELOG).
+TEST_F(CustomerWorkflowReview, DenialHoldsInProcessWhenTheCacheIsImmutable) {
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
     config_.signing_public_key = public_key_;
     struct Immutable {
         std::string path;
         ~Immutable() { (void)::chflags(path.c_str(), 0); }
     } guard{path_.string()};
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    ASSERT_TRUE(client.validate("KEY-123").value().valid);
+    ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+
+    // FileStorage restores directory permissions itself; only the immutable
+    // flag makes every write and every deletion fail.
+    ASSERT_EQ(::chflags(path_.c_str(), UF_IMMUTABLE), 0);
+    deny_status_ = 403;
+    EXPECT_TRUE(client.validate("KEY-123").is_error());
+    // Nothing could be written or retired: the in-memory hold is all that is left.
+    ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+    auto record = FileStorage(path_.string()).get_license();
+    ASSERT_TRUE(record.has_value() && record->validation.has_value());
+    ASSERT_TRUE(record->validation->valid) << "the denial unexpectedly reached disk";
+
+    server_.stop();
+    if (thread_.joinable()) thread_.join();
+    auto during_outage = client.validate("KEY-123");
+    EXPECT_TRUE(during_outage.is_error() || !during_outage.value().valid)
+        << "offline grant overrode an unpersisted denial";
+    auto restored = client.restore_license();
+    EXPECT_FALSE(restored.success) << restored.message;
+    EXPECT_NE(client.get_client_status(), ClientStatus::OfflineValid);
+#else
+    GTEST_SKIP() << "needs chflags(UF_IMMUTABLE) to make the cache directory immutable";
+#endif
+}
+
+// Offline grants stay fail-open on storage errors (orchestrator decision): a
+// cache that cannot record the last-seen time (full disk, read-only folder)
+// must not lock out a licensed user when no denial is held.
+TEST_F(CustomerWorkflowReview, OfflineGrantSurvivesAnUnwritableLastSeenTime) {
+    config_.signing_public_key = public_key_;
+    const auto timestamp_file = path_ / "licenseseat_timestamp.json";
     {
         Client client(config_);
         ASSERT_TRUE(client.activate("KEY-123").is_ok());
         ASSERT_TRUE(client.validate("KEY-123").value().valid);
-        ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
-
-        // FileStorage restores directory permissions itself; only the immutable
-        // flag makes every write and every deletion fail.
-        ASSERT_EQ(::chflags(path_.c_str(), UF_IMMUTABLE), 0);
-        deny_status_ = 403;
-        EXPECT_TRUE(client.validate("KEY-123").is_error());
-        // The artifacts could not be retired: the in-memory latch is all that is left.
-        ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+        // A directory where the file must be replaced: every last-seen write fails.
+        std::filesystem::remove(timestamp_file);
+        std::filesystem::create_directories(timestamp_file);
+        ASSERT_FALSE(FileStorage(path_.string()).set_last_seen_timestamp(1.0));
 
         server_.stop();
         if (thread_.joinable()) thread_.join();
         auto during_outage = client.validate("KEY-123");
-        EXPECT_TRUE(during_outage.is_error() || !during_outage.value().valid)
-            << "offline grant overrode an unpersisted denial";
+        ASSERT_TRUE(during_outage.is_ok()) << during_outage.error_message();
+        EXPECT_TRUE(during_outage.value().valid) << during_outage.value().code;
     }
     Client relaunched(config_);
     auto restored = relaunched.restore_license();
-    EXPECT_FALSE(restored.success) << restored.message;
-    EXPECT_EQ(restored.status, ClientStatus::OfflineInvalid);
-#else
-    GTEST_SKIP() << "needs chflags(UF_IMMUTABLE) to make the cache directory immutable";
-#endif
+    EXPECT_TRUE(restored.success) << restored.message;
+    EXPECT_EQ(restored.status, ClientStatus::OfflineValid);
+    std::filesystem::remove(timestamp_file);
 }
 
 // Codex round 1, item 1 (second reproduction): the artifacts are retired but

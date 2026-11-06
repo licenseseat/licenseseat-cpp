@@ -2027,9 +2027,12 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
         } else {
             // A denial that cannot be persisted must not let a relaunch revive
             // the grant: retire the offline artifacts instead (fail closed).
-            // If even that fails, the latch holds for this process and an
-            // offline grant also needs a writable cache (update_last_seen), so
-            // a relaunch on the same unwritable cache cannot grant either.
+            // If even that fails (an unwritable cache), the in-memory latch
+            // holds only until the process exits: a relaunch on the same cache
+            // can grant from the surviving artifacts until the next online
+            // check. Offline grants deliberately stay fail-open on storage
+            // errors, so a full disk or read-only cache never locks out a
+            // licensed user who is offline.
             storage_->clear_machine_file();
             storage_->clear_offline_token();
         }
@@ -2308,11 +2311,11 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                config_.max_offline_days > 0;
     }
 
-    /// Offline authority needs a cache that can still record decisions: if
-    /// the clock anchor cannot be written, neither could a denial, so an
-    /// offline grant from such a cache fails closed.
-    [[nodiscard]] bool update_last_seen(int64_t now_unix) {
-        return storage_->set_last_seen_timestamp(static_cast<double>(now_unix));
+    /// Advance the clock-tamper anchor after an offline grant.
+    void update_last_seen(int64_t now_unix) {
+        // Best effort: a cache that cannot be written (full disk, read-only
+        // folder) must not refuse an offline grant on its own.
+        (void)storage_->set_last_seen_timestamp(static_cast<double>(now_unix));
     }
 
     License fallback_license_for_machine_payload(
@@ -2402,12 +2405,7 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             return Result<ValidationResult>::ok(std::move(result));
         }
 
-        if (!update_last_seen(now_unix)) {
-            result.valid = false;
-            result.code = "storage_unwritable";
-            result.message = "Offline grant refused: the license cache is not writable";
-            return Result<ValidationResult>::ok(std::move(result));
-        }
+        update_last_seen(now_unix);
 
         result.valid = true;
         result.license = payload.license.has_value()
@@ -2520,12 +2518,7 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             return Result<ValidationResult>::ok(result);
         }
 
-        if (!update_last_seen(now_unix)) {
-            result.valid = false;
-            result.code = "storage_unwritable";
-            result.message = "Offline grant refused: the license cache is not writable";
-            return Result<ValidationResult>::ok(std::move(result));
-        }
+        update_last_seen(now_unix);
 
         result.valid = true;
         result.code = "";
