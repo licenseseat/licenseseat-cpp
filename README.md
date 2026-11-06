@@ -903,6 +903,10 @@ if (verified.is_ok() && verified.value().valid && verified.value().payload) {
 }
 ```
 
+Read a certificate's signing-key identifier with `licenseseat::crypto::machine_file_key_id(loaded)`
+(it works for checked-out, stored and hand-imported certificates). While online and without a pin,
+you can `client.fetch_signing_key(kid)` and pass the key to `verify_machine_file(loaded, key)`.
+
 This direct verifier never contacts the network and does not import a session for
 `restore_license()`. For custom storage, load and verify the certificate on every
 startup. Use the SDK-managed workflow above for automatic session restore and its

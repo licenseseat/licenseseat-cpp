@@ -6,6 +6,13 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ### Added
 
+- `crypto::machine_file_key_id()` reads the signing-key identifier (`kid`) from any
+  machine-file certificate, including one imported by hand, so the explicit-key path
+  (`fetch_signing_key(kid)` then `verify_machine_file(mf, key)`) no longer needs the
+  private `crypto::internal::extract_machine_file_key_id()`, which remains as an alias.
+  The `kid` is untrusted selection data, not a trust anchor. It is a function rather
+  than a `MachineFile` field so the struct layout, and the binary interface, stay
+  unchanged (#30).
 - `events::MACHINE_FILE_SIGNING_KEY_UNPINNED` (`machineFile:signingKeyUnpinned`):
   `checkout_machine_file()` emits it when offline fallback is enabled but no
   `Config::signing_public_key` is pinned. The payload carries the certificate's `kid`
@@ -29,6 +36,18 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
   start, which is the case machine files exist for. In the partial cases an explicit
   `fetch_signing_key()` already recovers for the running process. Pinning
   `signing_public_key` remains the offline trust anchor.
+
+### Security
+
+- Reject a zero-width validity window (`nbf == exp`) in machine files and offline tokens.
+  Windows are half-open `[nbf, exp)`, so such a grant is never valid; the machine-file
+  check previously let one through for its grace period. Matches the Swift and Rust SDKs
+  and the server (#34).
+- Legacy offline tokens are now bound to `Config::product_slug`. One organization key
+  signs tokens for all of its products, so a valid token for another product on the
+  same device could previously restore this product offline. `verify_offline_token()`
+  returns `InvalidParameter` and cached restores report `product_mismatch`, as machine
+  files already did (#35).
 
 ## [0.7.0] - 2026-09-05
 
