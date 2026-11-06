@@ -20,6 +20,11 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
   Windows are half-open `[nbf, exp)`, so such a grant is never valid; the machine-file
   check previously let one through for its grace period. Matches the Swift and Rust SDKs
   and the server (#34).
+- Legacy offline tokens are now bound to `Config::product_slug`. One organization key
+  signs tokens for all of its products, so a valid token for another product on the
+  same device could previously restore this product offline. `verify_offline_token()`
+  returns `InvalidParameter` and cached restores report `product_mismatch`, as machine
+  files already did (#35).
 
 ## [0.7.0] - 2026-09-05
 

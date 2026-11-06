@@ -1359,6 +1359,59 @@ TEST_F(ClientTest, RestoreLicenseRejectsCopiedOfflineTokenCacheOnDifferentDevice
     std::filesystem::remove_all(storage_dir, ec);
 }
 
+// A token signed for another product of the same organization (same signing
+// key, same device) must not unlock this product, directly or from the cache.
+TEST_F(ClientTest, OfflineTokenForAnotherProductIsRejected) {
+    const std::string license_key = "KEY-123";
+    std::string public_key_b64;
+    auto offline_token = build_test_offline_token(license_key, config_.device_id, &public_key_b64);
+    ASSERT_EQ(offline_token.token.product_slug, "test_product");
+
+    config_.product_slug = "other_product";
+    config_.signing_public_key = public_key_b64;
+
+    Client direct(config_);
+    auto verified = direct.verify_offline_token(offline_token);
+    ASSERT_TRUE(verified.is_error());
+    EXPECT_EQ(verified.error_code(), ErrorCode::InvalidParameter);
+    EXPECT_NE(verified.error_message().find("different product"), std::string::npos);
+
+    const auto storage_dir =
+        std::filesystem::temp_directory_path() /
+        ("licenseseat-product-binding-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    {
+        FileStorage storage(storage_dir.string());
+        ASSERT_TRUE(storage.set_license(build_cached_license(license_key, config_.device_id)));
+        ASSERT_TRUE(storage.set_offline_token(offline_token));
+    }
+    config_.storage_path = storage_dir.string();
+    config_.enable_legacy_offline_tokens = true;
+    Client restored_client(config_);
+    auto restored = restored_client.restore_license();
+    EXPECT_FALSE(restored.success);
+    EXPECT_EQ(restored.status, ClientStatus::OfflineInvalid);
+    EXPECT_FALSE(restored.license.has_value());
+    EXPECT_NE(restored.message.find("product_mismatch"), std::string::npos) << restored.message;
+
+    // Relabelling the visible product claim does not help: it must match the
+    // signed canonical bytes.
+    auto relabelled = offline_token;
+    relabelled.token.product_slug = "other_product";
+    auto relabelled_result = direct.verify_offline_token(relabelled);
+    ASSERT_TRUE(relabelled_result.is_error());
+    EXPECT_EQ(relabelled_result.error_code(), ErrorCode::InvalidSignature);
+
+    // Control: the same cache restores for the product the token was issued for.
+    config_.product_slug = "test_product";
+    Client right_product(config_);
+    auto control = right_product.restore_license();
+    EXPECT_TRUE(control.success) << control.message;
+
+    std::error_code ec;
+    std::filesystem::remove_all(storage_dir, ec);
+}
+
 TEST_F(ClientTest, InvalidOfflinePolicyCannotAuthorizeCachedArtifacts) {
     const std::string license_key = "KEY-123";
     std::string public_key_b64;

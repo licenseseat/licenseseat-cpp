@@ -960,6 +960,13 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             return Result<bool>::error(ErrorCode::LicenseExpired, "Underlying license has expired");
         }
 
+        // One organization key signs tokens for all of its products, so the
+        // signature alone does not say the token is for this product.
+        if (offline_token.token.product_slug != config_.product_slug) {
+            return Result<bool>::error(ErrorCode::InvalidParameter,
+                                       "Offline token belongs to a different product");
+        }
+
         // Local storage is attacker-writable and cannot establish signing
         // authority. Use a caller/configuration pin or a key fetched over the
         // authenticated transport during this process.
@@ -2261,6 +2268,15 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
             result.valid = false;
             result.offline = true;
             result.code = "no_offline_token";
+            return Result<ValidationResult>::ok(result);
+        }
+
+        if (cached_offline->token.product_slug != config_.product_slug) {
+            ValidationResult result;
+            result.valid = false;
+            result.offline = true;
+            result.code = "product_mismatch";
+            result.message = "Offline token belongs to a different product";
             return Result<ValidationResult>::ok(result);
         }
 
