@@ -15,9 +15,13 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
   online validation clears the denial. Revocation still purges, and transport
   failures without a recorded denial keep their existing fallback. Matches
   licenseseat-swift #26.
-
-### Security
-
+- The denial also holds when it cannot be written to disk: it is latched in memory
+  until an online validation succeeds, no new machine file or offline token is
+  stored behind an unpersisted denial, and an offline grant now requires a writable
+  cache (`storage_unwritable` otherwise), so a relaunch on a cache that could not
+  record the denial cannot grant either. A denial recorded while offline
+  verification is in flight (from an event handler or another thread) wins over
+  that verification's result.
 - Reject a zero-width validity window (`nbf == exp`) in machine files and offline tokens.
   Windows are half-open `[nbf, exp)`, so such a grant is never valid; the machine-file
   check previously let one through for its grace period. Matches the Swift and Rust SDKs

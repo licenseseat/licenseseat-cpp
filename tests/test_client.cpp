@@ -3,6 +3,10 @@
 
 #include <algorithm>
 #include <array>
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include <cctype>
 #include <atomic>
 #include <chrono>
@@ -304,6 +308,10 @@ class CustomerWorkflowReview : public ClientTest {
         });
         server_.Post("/api/v1/products/test_product/licenses/validate",
                      [&](const httplib::Request&, httplib::Response& res) {
+            if (stall_validate_.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                return;
+            }
             if (deny_status_.load() == 200) {
                 nlohmann::json denial = {{"object", "validation_result"}, {"valid", false},
                     {"code", deny_code_}, {"message", "Denied by the server"},
@@ -367,6 +375,8 @@ class CustomerWorkflowReview : public ClientTest {
     // 0 = validate succeeds; 200 = `200 valid:false` with deny_code_; other = HTTP error.
     std::atomic<int> deny_status_{0};
     std::string deny_code_ = "not_entitled";
+    // Stall validate past the client timeout to produce a transport failure.
+    std::atomic<bool> stall_validate_{false};
 };
 
 TEST_F(CustomerWorkflowReview, UuidActivateVerifyAndDeactivateClearArtifacts) {
@@ -649,6 +659,10 @@ TEST_F(CustomerWorkflowReview, OnlineSuccessClearsARecordedDenial) {
     ASSERT_TRUE(client.validate("KEY-123").value().valid);
     server_.stop();
     if (thread_.joinable()) thread_.join();
+    // Same process: the in-memory denial latch is released by the success.
+    auto during_outage = client.validate("KEY-123");
+    ASSERT_TRUE(during_outage.is_ok()) << during_outage.error_message();
+    EXPECT_TRUE(during_outage.value().valid) << during_outage.value().code;
     Client relaunched(config_);
     auto restored = relaunched.restore_license();
     EXPECT_TRUE(restored.success) << restored.message;
@@ -668,6 +682,121 @@ TEST_F(CustomerWorkflowReview, UnpersistableDenialRetiresTheOfflineGrant) {
     EXPECT_TRUE(client.validate("KEY-123").is_error());
     EXPECT_FALSE(FileStorage(path_.string()).get_machine_file().has_value());
     std::filesystem::remove(license_file);
+}
+
+// Codex round 1, item 1: a denial that cannot be persisted at all (immutable
+// cache directory: neither the record nor the artifact deletion can be
+// written) must still hold for the rest of the process and after a relaunch.
+TEST_F(CustomerWorkflowReview, DenialHoldsWhenTheCacheIsImmutable) {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+    config_.signing_public_key = public_key_;
+    struct Immutable {
+        std::string path;
+        ~Immutable() { (void)::chflags(path.c_str(), 0); }
+    } guard{path_.string()};
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        ASSERT_TRUE(client.validate("KEY-123").value().valid);
+        ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+
+        // FileStorage restores directory permissions itself; only the immutable
+        // flag makes every write and every deletion fail.
+        ASSERT_EQ(::chflags(path_.c_str(), UF_IMMUTABLE), 0);
+        deny_status_ = 403;
+        EXPECT_TRUE(client.validate("KEY-123").is_error());
+        // The artifacts could not be retired: the in-memory latch is all that is left.
+        ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+
+        server_.stop();
+        if (thread_.joinable()) thread_.join();
+        auto during_outage = client.validate("KEY-123");
+        EXPECT_TRUE(during_outage.is_error() || !during_outage.value().valid)
+            << "offline grant overrode an unpersisted denial";
+    }
+    Client relaunched(config_);
+    auto restored = relaunched.restore_license();
+    EXPECT_FALSE(restored.success) << restored.message;
+    EXPECT_EQ(restored.status, ClientStatus::OfflineInvalid);
+#else
+    GTEST_SKIP() << "needs chflags(UF_IMMUTABLE) to make the cache directory immutable";
+#endif
+}
+
+// Codex round 1, item 1 (second reproduction): the artifacts are retired but
+// the denial record stays unwritable; a later checkout must not replenish the
+// offline grant behind the denial's back.
+TEST_F(CustomerWorkflowReview, UnpersistedDenialBlocksAReplenishedGrant) {
+    config_.signing_public_key = public_key_;
+    const auto license_file = path_ / "licenseseat_license.json";
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        std::filesystem::remove(license_file);
+        std::filesystem::create_directories(license_file);
+        deny_status_ = 403;
+        EXPECT_TRUE(client.validate("KEY-123").is_error());
+        ASSERT_FALSE(FileStorage(path_.string()).get_machine_file().has_value());
+
+        auto replenished = client.checkout_machine_file("KEY-123");
+        EXPECT_TRUE(replenished.is_error());
+        EXPECT_FALSE(FileStorage(path_.string()).get_machine_file().has_value())
+            << "a new offline grant was stored behind an unpersisted denial";
+
+        server_.stop();
+        if (thread_.joinable()) thread_.join();
+        auto during_outage = client.validate("KEY-123");
+        EXPECT_TRUE(during_outage.is_error() || !during_outage.value().valid);
+    }
+    Client relaunched(config_);
+    auto restored = relaunched.restore_license();
+    EXPECT_FALSE(restored.success) << restored.message;
+    std::filesystem::remove(license_file);
+}
+
+// Codex round 1, item 2: a denial recorded while offline verification is in
+// flight (here from a synchronous MACHINE_FILE_VERIFIED handler) wins over the
+// verification result, on both the restore and the validate-fallback paths.
+TEST_F(CustomerWorkflowReview, DenialDuringOfflineRestoreWins) {
+    config_.signing_public_key = public_key_;
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        ASSERT_TRUE(client.validate("KEY-123").value().valid);
+    }
+    // No /health route: restore takes the offline path while validate still answers.
+    Client client(config_);
+    std::atomic<bool> denied{false};
+    client.on(events::MACHINE_FILE_VERIFIED, [&](const std::any&) {
+        if (denied.exchange(true)) return;
+        deny_status_ = 200;
+        EXPECT_FALSE(client.validate("KEY-123").value().valid);
+    });
+    auto restored = client.restore_license();
+    ASSERT_TRUE(denied.load());
+    EXPECT_FALSE(restored.success) << restored.message;
+    EXPECT_NE(client.get_client_status(), ClientStatus::OfflineValid);
+}
+
+TEST_F(CustomerWorkflowReview, DenialDuringOfflineFallbackWins) {
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    ASSERT_TRUE(client.activate("KEY-123").is_ok());
+    ASSERT_TRUE(client.validate("KEY-123").value().valid);
+    std::atomic<bool> denied{false};
+    client.on(events::MACHINE_FILE_VERIFIED, [&](const std::any&) {
+        if (denied.exchange(true)) return;
+        stall_validate_ = false;
+        deny_status_ = 200;
+        EXPECT_FALSE(client.validate("KEY-123").value().valid);
+    });
+    // The outer request times out (a transport failure, so it falls back offline);
+    // the nested request from the handler is answered at once.
+    stall_validate_ = true;
+    auto result = client.validate("KEY-123");
+    ASSERT_TRUE(denied.load());
+    EXPECT_TRUE(result.is_error() || !result.value().valid) << "fallback overrode the denial";
+    EXPECT_NE(client.get_client_status(), ClientStatus::OfflineValid);
 }
 
 TEST_F(CustomerWorkflowReview, NonDenialErrorsKeepTheirOfflineFallback) {
