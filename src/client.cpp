@@ -366,13 +366,8 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
                 const auto denial_code = error_response_code(response);
                 if (denial_code.has_value() && is_authoritative_denial_code(*denial_code)) {
                     auto err = handle_error_response<ValidationResult>(response);
-                    record_authoritative_denial(license_key, request.fingerprint, *denial_code,
-                                                err.error_message());
-                    ValidationResult denied;
-                    {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        denied = *cached_validation_;
-                    }
+                    const auto denied = record_authoritative_denial(
+                        license_key, request.fingerprint, *denial_code, err.error_message());
                     event_bus_.emit(events::VALIDATION_FAILED, denied);
                     return err;
                 }
@@ -1959,8 +1954,10 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
 
     /// Persist an authoritative denial as the current decision. Offline
     /// artifacts are deliberately left in place: this is not a revocation.
-    void record_authoritative_denial(const std::string& license_key, const std::string& fingerprint,
-                                     const std::string& code, const std::string& message) {
+    ValidationResult record_authoritative_denial(const std::string& license_key,
+                                                 const std::string& fingerprint,
+                                                 const std::string& code,
+                                                 const std::string& message) {
         ValidationResult denial;
         denial.valid = false;
         denial.offline = false;
@@ -1983,6 +1980,7 @@ class Client::Impl : public std::enable_shared_from_this<Client::Impl> {
         record.last_validated = std::chrono::system_clock::now();
         record.validation = denial;
         (void)storage_->set_license(record);
+        return denial;
     }
 
     /// A recorded authoritative denial, if the persisted decision is one.
