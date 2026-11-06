@@ -1,6 +1,6 @@
 # C++ offline integration
 
-This guide covers the v0.7.0 API with application-pinned signing keys. Keep the
+This guide covers the v0.8.0 API with application-pinned signing keys. Keep the
 trusted public key in your application's configuration so it can verify licenses
 without an internet connection, including after a restart.
 
