@@ -47,14 +47,16 @@ std::string wrap_machine_file_certificate(const std::string& encoded) {
     return certificate;
 }
 
+constexpr std::array<unsigned char, 32> kTestSigningSeed = {
+    0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22};
+
 std::string build_machine_file_certificate(const std::string& license_key,
                                            const std::string& fingerprint,
                                            const nlohmann::json& payload_json,
-                                           std::string* public_key_b64_out) {
-    const std::array<unsigned char, 32> seed = {0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
-                                                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-                                                0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12,
-                                                0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22};
+                                           std::string* public_key_b64_out,
+                                           const std::array<unsigned char, 32>& seed =
+                                               kTestSigningSeed) {
 
     std::array<unsigned char, 32> public_key{};
 
@@ -122,7 +124,8 @@ std::string build_machine_file_certificate(const std::string& license_key,
 }
 
 MachineFile build_test_machine_file(const std::string& license_key, const std::string& fingerprint,
-                                    std::string* public_key_b64_out) {
+                                    std::string* public_key_b64_out,
+                                    const std::array<unsigned char, 32>& seed = kTestSigningSeed) {
     const auto now = std::time(nullptr);
     const auto license_expiry = now + 86400 * 30;
 
@@ -167,7 +170,7 @@ MachineFile build_test_machine_file(const std::string& license_key, const std::s
     machine_file.license_key = license_key;
     machine_file.fingerprint = fingerprint;
     machine_file.certificate =
-        build_machine_file_certificate(license_key, fingerprint, payload, public_key_b64_out);
+        build_machine_file_certificate(license_key, fingerprint, payload, public_key_b64_out, seed);
     return machine_file;
 }
 
@@ -436,7 +439,10 @@ TEST_F(CustomerWorkflowReview, RestartRequiresApplicationPinEvenWithPersistedKey
     auto result = restarted.restore_license();
     EXPECT_FALSE(result.success);
     EXPECT_EQ(result.status, ClientStatus::OfflineInvalid);
-    EXPECT_NE(result.message.find("missing_parameter"), std::string::npos);
+    // Same code as the offline-token path, plus the exact remedy (#29).
+    EXPECT_NE(result.message.find("no_public_key"), std::string::npos) << result.message;
+    EXPECT_NE(result.message.find("Config::signing_public_key"), std::string::npos);
+    EXPECT_NE(result.message.find("/signing_keys/test-kid"), std::string::npos);
 }
 
 TEST_F(CustomerWorkflowReview, PinnedKeyWithCompleteCacheRestoresOffline) {
@@ -843,6 +849,219 @@ TEST_F(CustomerWorkflowReview, NonDenialErrorsKeepTheirOfflineFallback) {
     auto during_outage = client.validate("KEY-123");
     ASSERT_TRUE(during_outage.is_ok()) << during_outage.error_message();
     EXPECT_TRUE(during_outage.value().valid);
+}
+
+// Issue #29: an unpinned cold start must fail with an actionable diagnosis, and
+// the developer must be told while still online, not by the first offline user.
+TEST_F(CustomerWorkflowReview, UnpinnedCheckoutWarnsThatOfflineRestartCannotVerify) {
+    Client client(config_);
+    std::vector<std::map<std::string, std::string>> warnings;
+    client.on(events::MACHINE_FILE_SIGNING_KEY_UNPINNED, [&](const std::any& data) {
+        warnings.push_back(std::any_cast<std::map<std::string, std::string>>(data));
+    });
+    auto machine = client.checkout_machine_file("KEY-123");
+    ASSERT_TRUE(machine.is_ok()) << machine.error_message();
+    ASSERT_EQ(warnings.size(), 1u);
+    EXPECT_EQ(warnings[0]["kid"], "test-kid");
+    EXPECT_EQ(warnings[0]["publicKey"], public_key_);
+    EXPECT_NE(warnings[0]["message"].find("Config::signing_public_key"), std::string::npos);
+}
+
+TEST_F(CustomerWorkflowReview, PinnedCheckoutDoesNotWarn) {
+    config_.signing_public_key = public_key_;
+    Client client(config_);
+    std::atomic<int> warnings{0};
+    client.on(events::MACHINE_FILE_SIGNING_KEY_UNPINNED, [&](const std::any&) { ++warnings; });
+    ASSERT_TRUE(client.checkout_machine_file("KEY-123").is_ok());
+    EXPECT_EQ(warnings.load(), 0);
+}
+
+TEST_F(CustomerWorkflowReview, UnpinnedColdStartReportsNoPublicKeyWithRemedy) {
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        ASSERT_TRUE(FileStorage(path_.string()).get_machine_file().has_value());
+    }
+    server_.stop();
+    Client restarted(config_);
+    auto cached = FileStorage(path_.string()).get_machine_file();
+    ASSERT_TRUE(cached.has_value());
+    auto direct = restarted.verify_machine_file(*cached);
+    ASSERT_TRUE(direct.is_error());
+    EXPECT_EQ(direct.error_code(), ErrorCode::MissingParameter);
+    // Prefix kept for integrations that match on the old text.
+    EXPECT_EQ(direct.error_message().rfind("Public key required for machine file verification", 0),
+              0u);
+    EXPECT_NE(direct.error_message().find(config_.api_url + "/signing_keys/test-kid"),
+              std::string::npos)
+        << direct.error_message();
+
+    auto restored = restarted.restore_license();
+    EXPECT_FALSE(restored.success);
+    EXPECT_EQ(restored.status, ClientStatus::OfflineInvalid);
+    EXPECT_NE(restored.message.find("no_public_key"), std::string::npos) << restored.message;
+
+    // Pinning the key in application configuration is the whole fix.
+    config_.signing_public_key = public_key_;
+    Client pinned(config_);
+    auto pinned_restore = pinned.restore_license();
+    EXPECT_TRUE(pinned_restore.success) << pinned_restore.message;
+    EXPECT_EQ(pinned_restore.status, ClientStatus::OfflineValid);
+}
+
+TEST_F(CustomerWorkflowReview, PinnedKeyIdMismatchIsDiagnosed) {
+    config_.signing_public_key = public_key_;
+    config_.signing_key_id = "rotated-kid";
+    Client client(config_);
+    auto verified = client.verify_machine_file(machine_, "", "KEY-123", config_.device_id);
+    ASSERT_TRUE(verified.is_error());
+    EXPECT_NE(verified.error_message().find("'test-kid'"), std::string::npos)
+        << verified.error_message();
+    EXPECT_NE(verified.error_message().find("'rotated-kid'"), std::string::npos);
+}
+
+TEST_F(ClientTest, UnverifiedKeyIdIsNotReflectedIntoDiagnostics) {
+    // The kid comes from an unauthenticated envelope. It must not inject text
+    // (U+2028 line separator) or URL syntax into the remedy message.
+    const std::string hostile_kid = std::string("../elsewhere?x='") + "\xE2\x80\xA8" + "FORGED LOG LINE";
+    const nlohmann::json envelope = {{"enc", "YQ.YQ.YQ"},
+                                     {"sig", std::string(86, 'A')},
+                                     {"alg", "aes-256-gcm+ed25519"},
+                                     {"kid", hostile_kid}};
+    const auto dump = envelope.dump();
+    MachineFile machine_file;
+    machine_file.certificate = wrap_machine_file_certificate(
+        crypto::base64_encode(std::vector<uint8_t>(dump.begin(), dump.end())));
+    auto kid = crypto::internal::extract_machine_file_key_id(machine_file);
+    ASSERT_TRUE(kid.is_ok()) << kid.error_message();
+    ASSERT_EQ(kid.value(), hostile_kid);
+
+    Client client(config_);
+    auto result = client.verify_machine_file(machine_file, "", "KEY-123", config_.device_id);
+    ASSERT_TRUE(result.is_error());
+    const auto& message = result.error_message();
+    EXPECT_EQ(message.find("elsewhere"), std::string::npos) << message;
+    EXPECT_EQ(message.find("FORGED"), std::string::npos) << message;
+    EXPECT_EQ(message.find("\xE2\x80\xA8"), std::string::npos);
+    EXPECT_NE(message.find("(unverified)"), std::string::npos) << message;
+
+    // "." and ".." are plain characters but path segments: never spliced into the URL.
+    for (const std::string& dot_kid : {std::string("."), std::string(".."), std::string(".x")}) {
+        const nlohmann::json dot_envelope = {{"enc", "YQ.YQ.YQ"},
+                                             {"sig", std::string(86, 'A')},
+                                             {"alg", "aes-256-gcm+ed25519"},
+                                             {"kid", dot_kid}};
+        const auto dot_dump = dot_envelope.dump();
+        MachineFile dot_file;
+        dot_file.certificate = wrap_machine_file_certificate(
+            crypto::base64_encode(std::vector<uint8_t>(dot_dump.begin(), dot_dump.end())));
+        auto dot_result = client.verify_machine_file(dot_file, "", "KEY-123", config_.device_id);
+        ASSERT_TRUE(dot_result.is_error()) << dot_kid;
+        EXPECT_EQ(dot_result.error_message().find("/signing_keys/" + dot_kid),
+                  std::string::npos)
+            << dot_result.error_message();
+        EXPECT_NE(dot_result.error_message().find("/signing_keys/{kid}"), std::string::npos)
+            << dot_result.error_message();
+    }
+}
+
+TEST_F(CustomerWorkflowReview, AttackerWrittenKeyFileNeverAuthorizesForgedCertificate) {
+    // A cache-writing attacker can plant both a key file and a machine file signed
+    // with their own key. Trust-on-first-use of a persisted key (option (a) in #29)
+    // would accept that pair; the SDK must not.
+    const std::array<unsigned char, 32> attacker_seed = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+        0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+        0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20};
+    std::string attacker_key;
+    const auto forged =
+        build_test_machine_file("KEY-123", config_.device_id, &attacker_key, attacker_seed);
+    ASSERT_FALSE(forged.certificate.empty());
+    ASSERT_NE(attacker_key, public_key_);
+    {
+        // Control: the forgery is otherwise well formed (it verifies under its own key).
+        Client control(config_);
+        auto self_signed = control.verify_machine_file(forged, attacker_key);
+        ASSERT_TRUE(self_signed.is_ok());
+        ASSERT_TRUE(self_signed.value().valid);
+    }
+    FileStorage storage(path_.string());
+    ASSERT_TRUE(storage.set_signing_key("test-kid", attacker_key));
+    ASSERT_TRUE(storage.set_license(build_cached_license("KEY-123", config_.device_id)));
+    ASSERT_TRUE(storage.set_machine_file(forged));
+    server_.stop();
+
+    Client unpinned(config_);
+    auto restored = unpinned.restore_license();
+    EXPECT_FALSE(restored.success);
+    EXPECT_NE(restored.message.find("no_public_key"), std::string::npos) << restored.message;
+
+    config_.signing_public_key = public_key_;
+    Client pinned(config_);
+    auto pinned_restore = pinned.restore_license();
+    EXPECT_FALSE(pinned_restore.success);
+    EXPECT_EQ(pinned_restore.status, ClientStatus::OfflineInvalid);
+}
+
+// Issue #30: a machine file exposes its kid through the public API, so the
+// documented explicit-key recovery works on a fresh process without crypto::internal.
+TEST_F(CustomerWorkflowReview, ExplicitKeyPathAfterRestartUsesPublicKeyId) {
+    // No pinned key: the online process trusts a key fetched over the API only.
+    {
+        Client client(config_);
+        ASSERT_TRUE(client.activate("KEY-123").is_ok());
+        auto machine = client.checkout_machine_file("KEY-123");
+        ASSERT_TRUE(machine.is_ok()) << machine.error_message();
+        auto kid = crypto::machine_file_key_id(machine.value());
+        ASSERT_TRUE(kid.is_ok());
+        EXPECT_EQ(kid.value(), "test-kid");
+    }
+
+    // Restart between checkout and verify: the in-memory key cache is gone.
+    Client restarted(config_);
+    auto cached = FileStorage(path_.string()).get_machine_file();
+    ASSERT_TRUE(cached.has_value());
+
+    auto unpinned = restarted.verify_machine_file(*cached);
+    ASSERT_TRUE(unpinned.is_error());
+    EXPECT_EQ(unpinned.error_code(), ErrorCode::MissingParameter);
+
+    auto kid = crypto::machine_file_key_id(*cached);
+    ASSERT_TRUE(kid.is_ok()) << kid.error_message();
+    auto key = restarted.fetch_signing_key(kid.value());
+    ASSERT_TRUE(key.is_ok()) << key.error_message();
+    auto verified = restarted.verify_machine_file(*cached, key.value());
+    ASSERT_TRUE(verified.is_ok()) << verified.error_message();
+    EXPECT_TRUE(verified.value().valid) << verified.value().message;
+    ASSERT_TRUE(verified.value().payload.has_value());
+    EXPECT_EQ(verified.value().payload->key_id, kid.value());
+
+    // A certificate imported by hand (curl) works the same way.
+    MachineFile imported;
+    imported.certificate = machine_.certificate;
+    auto imported_kid = crypto::machine_file_key_id(imported);
+    ASSERT_TRUE(imported_kid.is_ok()) << imported_kid.error_message();
+    EXPECT_EQ(imported_kid.value(), "test-kid");
+    auto imported_verified =
+        restarted.verify_machine_file(imported, key.value(), "KEY-123", config_.device_id);
+    ASSERT_TRUE(imported_verified.is_ok());
+    EXPECT_TRUE(imported_verified.value().valid);
+}
+
+TEST_F(ClientTest, MachineFileKeyIdRejectsMalformedCertificatesAndKeepsInternalAlias) {
+    MachineFile garbage;
+    garbage.certificate = "not a machine file";
+    EXPECT_TRUE(crypto::machine_file_key_id(garbage).is_error());
+    MachineFile empty;
+    EXPECT_TRUE(crypto::machine_file_key_id(empty).is_error());
+
+    auto machine_file = build_test_machine_file("KEY-123", config_.device_id, nullptr);
+    auto pub = crypto::machine_file_key_id(machine_file);
+    auto alias = crypto::internal::extract_machine_file_key_id(machine_file);
+    ASSERT_TRUE(pub.is_ok());
+    ASSERT_TRUE(alias.is_ok());
+    EXPECT_EQ(pub.value(), "test-kid");
+    EXPECT_EQ(pub.value(), alias.value());
 }
 
 // ==================== Construction Tests ====================
@@ -1590,6 +1809,59 @@ TEST_F(ClientTest, RestoreLicenseRejectsCopiedOfflineTokenCacheOnDifferentDevice
     EXPECT_FALSE(result.success);
     EXPECT_EQ(result.status, ClientStatus::OfflineInvalid);
     EXPECT_FALSE(result.license.has_value());
+
+    std::error_code ec;
+    std::filesystem::remove_all(storage_dir, ec);
+}
+
+// A token signed for another product of the same organization (same signing
+// key, same device) must not unlock this product, directly or from the cache.
+TEST_F(ClientTest, OfflineTokenForAnotherProductIsRejected) {
+    const std::string license_key = "KEY-123";
+    std::string public_key_b64;
+    auto offline_token = build_test_offline_token(license_key, config_.device_id, &public_key_b64);
+    ASSERT_EQ(offline_token.token.product_slug, "test_product");
+
+    config_.product_slug = "other_product";
+    config_.signing_public_key = public_key_b64;
+
+    Client direct(config_);
+    auto verified = direct.verify_offline_token(offline_token);
+    ASSERT_TRUE(verified.is_error());
+    EXPECT_EQ(verified.error_code(), ErrorCode::InvalidParameter);
+    EXPECT_NE(verified.error_message().find("different product"), std::string::npos);
+
+    const auto storage_dir =
+        std::filesystem::temp_directory_path() /
+        ("licenseseat-product-binding-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    {
+        FileStorage storage(storage_dir.string());
+        ASSERT_TRUE(storage.set_license(build_cached_license(license_key, config_.device_id)));
+        ASSERT_TRUE(storage.set_offline_token(offline_token));
+    }
+    config_.storage_path = storage_dir.string();
+    config_.enable_legacy_offline_tokens = true;
+    Client restored_client(config_);
+    auto restored = restored_client.restore_license();
+    EXPECT_FALSE(restored.success);
+    EXPECT_EQ(restored.status, ClientStatus::OfflineInvalid);
+    EXPECT_FALSE(restored.license.has_value());
+    EXPECT_NE(restored.message.find("product_mismatch"), std::string::npos) << restored.message;
+
+    // Relabelling the visible product claim does not help: it must match the
+    // signed canonical bytes.
+    auto relabelled = offline_token;
+    relabelled.token.product_slug = "other_product";
+    auto relabelled_result = direct.verify_offline_token(relabelled);
+    ASSERT_TRUE(relabelled_result.is_error());
+    EXPECT_EQ(relabelled_result.error_code(), ErrorCode::InvalidSignature);
+
+    // Control: the same cache restores for the product the token was issued for.
+    config_.product_slug = "test_product";
+    Client right_product(config_);
+    auto control = right_product.restore_license();
+    EXPECT_TRUE(control.success) << control.message;
 
     std::error_code ec;
     std::filesystem::remove_all(storage_dir, ec);

@@ -4,6 +4,39 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `crypto::machine_file_key_id()` reads the signing-key identifier (`kid`) from any
+  machine-file certificate, including one imported by hand, so the explicit-key path
+  (`fetch_signing_key(kid)` then `verify_machine_file(mf, key)`) no longer needs the
+  private `crypto::internal::extract_machine_file_key_id()`, which remains as an alias.
+  The `kid` is untrusted selection data, not a trust anchor. It is a function rather
+  than a `MachineFile` field so the struct layout, and the binary interface, stay
+  unchanged (#30).
+- `events::MACHINE_FILE_SIGNING_KEY_UNPINNED` (`machineFile:signingKeyUnpinned`):
+  `checkout_machine_file()` emits it when offline fallback is enabled but no
+  `Config::signing_public_key` is pinned. The payload carries the certificate's `kid`
+  and the `publicKey` to pin, so the gap is visible during online provisioning rather
+  than at the first offline cold start (#29).
+
+### Changed
+
+- An unpinned offline cold start now reports `no_public_key` for cached machine files
+  (previously `missing_parameter`), matching the offline-token path, and
+  `restore_license()` messages include the cause. Verification errors keep the
+  `Public key required for machine file verification` prefix and now name the
+  certificate's key id and the exact `GET <api_url>/signing_keys/<kid>` to pin, or the
+  `signing_key_id` mismatch when a pinned key does not match the certificate (#29).
+- Decision recorded for #29: keys fetched online stay process-local and keys on disk are
+  never trusted. Persisting a fetched key in the cache (trust on first use) would let
+  anyone who can write the cache directory plant a key and a self-signed machine file
+  together. A restore-time fetch would only help when the API is partly reachable: the
+  health check fails while the key endpoint answers, or the health check succeeds but
+  validation then times out or fails in transport. It never helps on a genuinely offline
+  start, which is the case machine files exist for. In the partial cases an explicit
+  `fetch_signing_key()` already recovers for the running process. Pinning
+  `signing_public_key` remains the offline trust anchor.
+
 ### Security
 
 - An authoritative server denial (`version_not_entitled`, `not_entitled`,
@@ -29,6 +62,11 @@ All notable changes to the LicenseSeat C++ SDK will be documented in this file.
   Windows are half-open `[nbf, exp)`, so such a grant is never valid; the machine-file
   check previously let one through for its grace period. Matches the Swift and Rust SDKs
   and the server (#34).
+- Legacy offline tokens are now bound to `Config::product_slug`. One organization key
+  signs tokens for all of its products, so a valid token for another product on the
+  same device could previously restore this product offline. `verify_offline_token()`
+  returns `InvalidParameter` and cached restores report `product_mismatch`, as machine
+  files already did (#35).
 
 ## [0.7.0] - 2026-09-05
 

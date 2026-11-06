@@ -856,6 +856,9 @@ if (machine.is_error()) throw std::runtime_error(machine.error_message());
 The key must be part of trusted application configuration, not a key supplied by
 the end user alongside the certificate. Keys fetched online are trusted only for
 that Client's lifetime. A pinned key permits verification after an offline restart.
+Without one, an offline cold start fails with `no_public_key`, and `checkout_machine_file()`
+emits `events::MACHINE_FILE_SIGNING_KEY_UNPINNED` (payload: `kid`, `publicKey`) to flag
+the gap while you are still online.
 `activate()` success alone does not guarantee its best-effort offline sync succeeded.
 Signed certificate and license expiry can shorten the configured offline period.
 
@@ -899,6 +902,10 @@ if (verified.is_ok() && verified.value().valid && verified.value().payload) {
     }
 }
 ```
+
+Read a certificate's signing-key identifier with `licenseseat::crypto::machine_file_key_id(loaded)`
+(it works for checked-out, stored and hand-imported certificates). While online and without a pin,
+you can `client.fetch_signing_key(kid)` and pass the key to `verify_machine_file(loaded, key)`.
 
 This direct verifier never contacts the network and does not import a session for
 `restore_license()`. For custom storage, load and verify the certificate on every
