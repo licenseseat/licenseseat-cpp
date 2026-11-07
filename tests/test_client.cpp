@@ -1991,14 +1991,16 @@ TEST_F(ClientTest, RestoreLicenseRevalidatesWhenNetworkReturns) {
     EXPECT_EQ(result.status, ClientStatus::OfflineValid);
     EXPECT_EQ(client.get_client_status(), ClientStatus::OfflineValid);
 
+    // Generous upper bounds: the loops exit as soon as the condition holds,
+    // and slow hosted runners (macos-15-intel) have overrun a 2 s budget.
     int attempts = 0;
-    while (attempts++ < 40 && client.get_client_status() != ClientStatus::Active) {
+    while (attempts++ < 200 && client.get_client_status() != ClientStatus::Active) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     EXPECT_EQ(client.get_client_status(), ClientStatus::Active);
     int timer_attempts = 0;
-    while (timer_attempts++ < 20 &&
+    while (timer_attempts++ < 100 &&
            (!client.is_auto_validating() || !client.is_heartbeat_running())) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
